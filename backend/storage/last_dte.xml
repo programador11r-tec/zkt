@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<dte:GTDocumento
+    xmlns:dte="http://www.sat.gob.gt/dte/fel/0.2.0"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    Version="0.4"
+    xsi:schemaLocation="http://www.sat.gob.gt/dte/fel/0.2.0 GT_Documento-0.2.0.xsd">
+<dte:SAT ClaseDocumento="dte">
+    <dte:DTE ID="DatosCertificados">
+    <dte:DatosEmision ID="DatosEmision">
+        <dte:DatosGenerales FechaHoraEmision="2025-10-10T06:36:40" Tipo="FACT" CodigoMoneda="GTQ"/>
+        <dte:Emisor NITEmisor="800000001026" NombreEmisor="EMISOR DEMO" AfiliacionIVA="GEN" CodigoEstablecimiento="1" CorreoEmisor="emisor@demo.gt">
+          <dte:DireccionEmisor>
+    <dte:Direccion>Ciudad</dte:Direccion>
+    <dte:CodigoPostal>01001</dte:CodigoPostal>
+    <dte:Municipio>Guatemala</dte:Municipio>
+    <dte:Departamento>Guatemala</dte:Departamento>
+    <dte:Pais>GT</dte:Pais>
+  </dte:DireccionEmisor>
+        </dte:Emisor>
+        <dte:Receptor IDReceptor="CF" NombreReceptor="Consumidor Final" CorreoReceptor="receptor@demo.gt">
+          <dte:DireccionReceptor>
+    <dte:Direccion>Ciudad</dte:Direccion>
+    <dte:CodigoPostal>01001</dte:CodigoPostal>
+    <dte:Municipio>Guatemala</dte:Municipio>
+    <dte:Departamento>Guatemala</dte:Departamento>
+    <dte:Pais>GT</dte:Pais>
+  </dte:DireccionReceptor>
+        </dte:Receptor>
+        <dte:Frases>
+        <dte:Frase TipoFrase="1" CodigoEscenario="1"/>
+        </dte:Frases>
+        <dte:Items>
+        <dte:Item NumeroLinea="1" BienOServicio="S">
+            <dte:Cantidad>1</dte:Cantidad>
+            <dte:UnidadMedida>UND</dte:UnidadMedida>
+            <dte:Descripcion>Ticket de parqueo</dte:Descripcion>
+            <dte:PrecioUnitario>22.32</dte:PrecioUnitario>
+            <dte:Precio>22.32</dte:Precio>
+            <dte:Descuento>0.00</dte:Descuento>
+            <dte:Impuestos>
+            <dte:Impuesto>
+                <dte:NombreCorto>IVA</dte:NombreCorto>
+                <dte:CodigoUnidadGravable>1</dte:CodigoUnidadGravable>
+                <dte:MontoGravable>22.32</dte:MontoGravable>
+                <dte:MontoImpuesto>2.68</dte:MontoImpuesto>
+            </dte:Impuesto>
+            </dte:Impuestos>
+            <dte:Total>25.00</dte:Total>
+        </dte:Item>
+        </dte:Items>
+        <dte:Totales>
+        <dte:TotalImpuestos>
+            <dte:TotalImpuesto NombreCorto="IVA" TotalMontoImpuesto="2.68"/>
+        </dte:TotalImpuestos>
+        <dte:GranTotal>25.00</dte:GranTotal>
+        </dte:Totales>
+    </dte:DatosEmision>
+    </dte:DTE>
+</dte:SAT>
+</dte:GTDocumento>

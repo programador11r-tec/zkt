@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ZKTeco ↔ G4S FEL • Panel</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="/assets/css/styles.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body class="bg-surface">
+  <!-- Topbar -->
+  <nav class="navbar navbar-expand-lg navbar-glass shadow-sm">
+    <div class="container-fluid px-4">
+      <a class="navbar-brand d-flex align-items-center gap-2" href="#">
+        <span class="brand-badge">FEL</span>
+        <span class="fw-semibold text-primary-600">ZKTeco ↔ G4S</span>
+      </a>
+      <div class="d-flex align-items-center gap-2">
+        <span class="badge env-badge">Local</span>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Layout -->
+  <div class="layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-inner">
+        <div class="sidebar-header">
+          <div class="text-muted small">Menú</div>
+        </div>
+        <ul class="nav flex-column gap-1">
+          <li class="nav-item">
+            <a class="nav-link nav-pill active" href="#" data-page="dashboard">
+              <span class="dot"></span> Dashboard
+            </a>
+          </li>
+          <li class="nav-item">
+            <a class="nav-link nav-pill" href="#" data-page="invoices">
+              <span class="dot"></span> Facturación 
+            </a>
+          </li>
+          <li class="nav-item">
+            <a class="nav-link nav-pill" href="#" data-page="settings">
+              <span class="dot"></span> Ajustes
+            </a>
+          </li>
+          <li class="nav-item">
+            <a class="nav-link nav-pill" href="#" data-page="reports">
+              <span class="dot"></span> Reportes
+            </a>
+          </li>
+        </ul>
+
+        <div class="sidebar-footer">
+          <div class="small text-muted">Estado</div>
+          <div id="health-pill" class="pill pill-muted">…</div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Content -->
+    <main class="content">
+      <!-- Hero header -->
+      <section class="hero card shadow-sm">
+        <div class="card-body d-flex flex-wrap align-items-center justify-content-between gap-3">
+          <div>
+            <h1 class="h4 mb-1">Panel de Integración</h1>
+            <p class="text-muted mb-0">ZKTeco → Backend → FEL G4S → SAT</p>
+          </div>
+          <div class="d-flex gap-2">
+            <button id="refreshBtn" class="btn btn-primary btn-sm">
+              Actualizar
+            </button>
+            <a class="btn btn-outline-primary btn-sm" href="api/health" target="_blank" rel="noopener">
+              Comprobar API
+            </a>
+          </div>
+        </div>
+      </section>
+
+      <!-- Aquí se inyectan las vistas -->
+      <div id="app" class="mt-4"></div>
+
+      <!-- Footer -->
+      <footer class="page-footer">
+        <div class="text-muted small">
+          © <span id="y"></span> Integración ANPR / FEL — Demo
+        </div>
+      </footer>
+    </main>
+  </div>
+
+  <script>
+    // año del footer
+    document.getElementById('y').textContent = new Date().getFullYear();
+    // ping de salud ligero para el pill de la izquierda
+    fetch('api/health').then(r => r.json()).then(_ => {
+      const pill = document.getElementById('health-pill');
+      pill.textContent = 'API OK';
+      pill.classList.remove('pill-muted');
+      pill.classList.add('pill-ok');
+    }).catch(() => {
+      const pill = document.getElementById('health-pill');
+      pill.textContent = 'API caída';
+      pill.classList.remove('pill-muted');
+      pill.classList.add('pill-bad');
+    });
+    // trigger refresh (re-render) si la vista lo implementa
+    document.getElementById('refreshBtn').addEventListener('click', () => {
+      const active = document.querySelector('.nav-link.active')?.getAttribute('data-page');
+      document.querySelector(`.nav-link[data-page="${active}"]`)?.click();
+    });
+  </script>
+
+  <script src="/assets/js/app.js"></script>
+</body>
+</html>

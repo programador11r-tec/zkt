@@ -41,63 +41,6 @@ class G4SClient
         return ['ok'=>(bool)$uuid, 'uuid'=>$uuid, 'raw'=>$respXml];
     }
 
-
-    /**
-     * (Opcional) Consulta RequestTransaction “clásico” (no Secure). Úsalo si lo necesitas.
-     * Retorna el XML SOAP de respuesta como string.
-     */
-    public function requestTransaction(array $params): string{
-        $url    = $this->config->get('FEL_G4S_SOAP_URL');
-        $action = 'http://www.fact.com.mx/schema/ws/RequestTransaction';
-
-        // Campos base
-        $requestor = $this->config->get('FEL_G4S_REQUESTOR', '');
-        $country   = $this->config->get('FEL_G4S_COUNTRY', 'GT');
-        $entity    = $this->config->get('FEL_G4S_ENTITY', '');
-        $user      = $this->config->get('FEL_G4S_USER', $requestor);
-        $username  = $this->config->get('FEL_G4S_USERNAME', '');
-
-        $transaction = $params['Transaction'] ?? 'BASE';
-        $data1 = $params['Data1'] ?? '';
-        $data2 = $params['Data2'] ?? '';
-        $data3 = $params['Data3'] ?? '';
-
-        $soapBody = <<<XML
-        <?xml version="1.0" encoding="UTF-8"?>
-        <soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
-        <soap:Body>
-            <sch:RequestTransaction xmlns:sch="http://www.fact.com.mx/schema/ws">
-            <sch:Requestor>{$this->xmlEscape($requestor)}</sch:Requestor>
-            <sch:Transaction>{$this->xmlEscape($transaction)}</sch:Transaction>
-            <sch:Country>{$this->xmlEscape($country)}</sch:Country>
-            <sch:Entity>{$this->xmlEscape($entity)}</sch:Entity>
-            <sch:User>{$this->xmlEscape($user)}</sch:User>
-            <sch:UserName>{$this->xmlEscape($username)}</sch:UserName>
-            <sch:Data1>{$this->xmlEscape($data1)}</sch:Data1>
-            <sch:Data2>{$this->xmlEscape($data2)}</sch:Data2>
-            <sch:Data3>{$this->xmlEscape($data3)}</sch:Data3>
-            </sch:RequestTransaction>
-        </soap:Body>
-        </soap:Envelope>
-        XML;
-
-        $headers = "Content-Type: text/xml; charset=utf-8\r\n"
-                 . "SOAPAction: \"{$action}\"\r\n";
-
-        $ctx = stream_context_create(['http' => [
-            'method'  => 'POST',
-            'header'  => $headers,
-            'content' => $soapBody,
-            'timeout' => 45,
-        ]]);
-
-        $resp = @file_get_contents($url, false, $ctx);
-        if ($resp === false) {
-            throw new \RuntimeException("No se pudo conectar con G4S (RequestTransaction)");
-        }
-        return $resp;
-    }
-
     /* ====================== SecureTransaction helpers ====================== */
 
     public function requestTransaction(array $params): string{
@@ -369,5 +312,6 @@ class G4SClient
         </dte:GTDocumento>
         XML;
     }
+
 
 }

@@ -1,6 +1,9 @@
-<IfModule mod_rewrite.c>
-  RewriteEngine On
-  RewriteCond %{REQUEST_FILENAME} !-f
-  RewriteCond %{REQUEST_FILENAME} !-d
-  RewriteRule ^ index.php [QSA,L]
-</IfModule>
+RewriteEngine On
+
+# Sirve archivos estáticos tal cual
+RewriteCond %{REQUEST_FILENAME} -f [OR]
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^ - [L]
+
+# Redirige todo a index.php (si tu router PHP lo requiere)
+RewriteRule ^ index.php [L]

@@ -1,40 +1,49 @@
-
 spec:
-  name: zk-g4s-fel-php
+  name: zkt-fel
   services:
-    - name: backend
-      environment_slug: php
-      source_dir: backend
-      run_command: ./ops_app_platform_entrypoint.sh
+    - name: web
       http_port: 8080
-      instance_count: 1
       instance_size_slug: basic-xxs
-      routes:
-        - path: /
+      dockerfile_path: ./Dockerfile
       envs:
-        - key: APP_ENV
-          scope: RUN_AND_BUILD_TIME
-          value: production
+        - key: FEL_G4S_SOAP_URL
+          value: https://fel.g4sdocumenta.com/webservicefront/factwsfront.asmx
+        - key: FEL_G4S_SOAP_ACTION
+          value: http://www.fact.com.mx/schema/ws/RequestTransaction
+        - key: FEL_G4S_SOAP_VERSION
+          value: "1.1"
+        - key: FEL_G4S_REQUESTOR
+          value: 425C5714-AA9E-4212-B4AA-75BD70328030
+        - key: FEL_G4S_COUNTRY
+          value: GT
+        - key: FEL_G4S_ENTITY
+          value: "81491514"
+        - key: FEL_G4S_USER
+          value: 425C5714-AA9E-4212-B4AA-75BD70328030
+        - key: FEL_G4S_USERNAME
+          value: ADMINISTRADOR
+        - key: FEL_G4S_PASS
+          value: TVAmE7Wk
+          scope: RUN_TIME
+          type: SECRET
+        - key: FEL_G4S_LIST_TX
+          value: LOOKUP_GUATEMALIAN_ISSUED
+        - key: FEL_G4S_DATAX_ENCODE
+          value: base64
+        - key: FEL_G4S_ESTABLECIMIENTO
+          value: "4"
+
         - key: DB_CONNECTION
-          scope: RUN_AND_BUILD_TIME
           value: mysql
         - key: DB_HOST
-          scope: RUN_AND_BUILD_TIME
-          type: GENERAL
-          value: ""
+          value: your-mysql-host
         - key: DB_PORT
-          scope: RUN_AND_BUILD_TIME
-          type: GENERAL
           value: "3306"
         - key: DB_DATABASE
-          scope: RUN_AND_BUILD_TIME
-          type: GENERAL
-          value: ""
+          value: zkt
         - key: DB_USERNAME
-          scope: RUN_AND_BUILD_TIME
-          type: GENERAL
-          value: ""
+          value: root
         - key: DB_PASSWORD
-          scope: RUN_AND_BUILD_TIME
-          type: SECRET
           value: ""
+          scope: RUN_TIME
+          type: SECRET

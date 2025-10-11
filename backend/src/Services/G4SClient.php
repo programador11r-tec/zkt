@@ -100,22 +100,64 @@ class G4SClient
 
     /* ====================== SecureTransaction helpers ====================== */
 
-    private function buildDataExchangeXML(array $kv): string{
-        // Construye <RequestTransaction> interno que va dentro de CDATA
-        $xml = <<<XML
-        <RequestTransaction xmlns="http://www.fact.com.mx/schema/ws">
-        <Requestor>{$this->xmlEscape($kv['Requestor'] ?? '')}</Requestor>
-        <Transaction>{$this->xmlEscape($kv['Transaction'] ?? '')}</Transaction>
-        <Country>{$this->xmlEscape($kv['Country'] ?? '')}</Country>
-        <Entity>{$this->xmlEscape($kv['Entity'] ?? '')}</Entity>
-        <User>{$this->xmlEscape($kv['User'] ?? '')}</User>
-        <UserName>{$this->xmlEscape($kv['UserName'] ?? '')}</UserName>
-        <Data1>{$this->xmlEscape($kv['Data1'] ?? '')}</Data1>
-        <Data2>{$this->xmlEscape($kv['Data2'] ?? '')}</Data2>
-        <Data3>{$this->xmlEscape($kv['Data3'] ?? '')}</Data3>
-        </RequestTransaction>
+    public function requestTransaction(array $params): string{
+        $url    = $this->config->get('FEL_G4S_SOAP_URL');
+        $action = 'http://www.fact.com.mx/schema/ws/RequestTransaction';
+
+        // Campos base (revisa .env)
+        $requestor = $this->config->get('FEL_G4S_REQUESTOR', '');       // GUID
+        $country   = $this->config->get('FEL_G4S_COUNTRY', 'GT');       // GT
+        $entity    = $this->config->get('FEL_G4S_ENTITY', '');          // 81491514
+        $user      = $this->config->get('FEL_G4S_USER', $requestor);    // GUID (usa el mismo del requestor)
+        $username  = $this->config->get('FEL_G4S_USERNAME', '');        // ADMINISTRADOR
+
+        $transaction = $params['Transaction'] ?? 'BASE';
+        $data1       = $params['Data1'] ?? '';
+        $data2       = $params['Data2'] ?? '';
+        $data3       = $params['Data3'] ?? '';
+
+        // Sobre SOAP 1.1 literal, tal cual WSDL (sin prefijos propios)
+        $soapBody = <<<XML
+        <?xml version="1.0" encoding="utf-8"?>
+        <soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                    xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+                    xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+        <soap:Body>
+            <RequestTransaction xmlns="http://www.fact.com.mx/schema/ws">
+            <Requestor>{$this->xmlEscape($requestor)}</Requestor>
+            <Transaction>{$this->xmlEscape($transaction)}</Transaction>
+            <Country>{$this->xmlEscape($country)}</Country>
+            <Entity>{$this->xmlEscape($entity)}</Entity>
+            <User>{$this->xmlEscape($user)}</User>
+            <UserName>{$this->xmlEscape($username)}</UserName>
+            <Data1>{$this->xmlEscape($data1)}</Data1>
+            <Data2>{$this->xmlEscape($data2)}</Data2>
+            <Data3>{$this->xmlEscape($data3)}</Data3>
+            </RequestTransaction>
+        </soap:Body>
+        </soap:Envelope>
         XML;
-        return $xml;
+
+        // Guardar request para depuración
+        @file_put_contents($this->storageDir.'/last_request_tx.xml', $soapBody);
+
+        $headers = "Content-Type: text/xml; charset=utf-8\r\n"
+                . "SOAPAction: \"{$action}\"\r\n";
+
+        $ctx = stream_context_create(['http' => [
+            'method'  => 'POST',
+            'header'  => $headers,
+            'content' => $soapBody,
+            'timeout' => 60,
+        ]]);
+
+        $resp = @file_get_contents($url, false, $ctx);
+        if ($resp === false) {
+            throw new \RuntimeException("No se pudo conectar con G4S (RequestTransaction)");
+        }
+
+        @file_put_contents($this->storageDir.'/last_request_tx_resp.xml', (string)$resp);
+        return $resp;
     }
 
     private function buildSecureSoapEnvelope11(string $entity, string $dataExchange): string{
@@ -208,63 +250,71 @@ class G4SClient
      * Ajusta campos de dirección/correos/razón social según tu emisor.
      */
     private function buildGuatemalaDTE(array $doc): string{
-        // ========= Datos base =========
-        $fecha          = date('Y-m-d\TH:i:s');
-        $nitEmisor      = trim($doc['emisor']['nit'] ?? '');
-        $nombreEmisor   = $doc['emisor']['nombre'] ?? 'EMISOR DEMO';
-        $correoEmisor   = $doc['emisor']['correo'] ?? 'emisor@demo.gt';
+        // Fecha Guatemala
+        $tzGT  = new \DateTimeZone('America/Guatemala');
+        $fecha = (new \DateTime('now', $tzGT))->format('Y-m-d\TH:i:sP'); // ej. 2025-10-10T13:45:12-06:00
 
+        // Emisor
+        $nitEmisor      = trim($doc['emisor']['nit'] ?? '81491514');
+        $nombreEmisor   = $doc['emisor']['nombre'] ?? 'PARQUEO OBELISCO REFORMA';
+        $correoEmisor   = trim($doc['emisor']['correo'] ?? '');
+        $codEst         = $this->config->get('FEL_G4S_ESTABLECIMIENTO', '4');
+
+        // Receptor
         $nitReceptor    = trim($doc['receptor']['nit'] ?? 'CF');
         $nombreReceptor = $doc['receptor']['nombre'] ?? ($nitReceptor === 'CF' ? 'Consumidor Final' : 'Receptor');
-        $correoReceptor = $doc['receptor']['correo'] ?? 'receptor@demo.gt';
+        $correoReceptor = trim($doc['receptor']['correo'] ?? '');
 
-        $moneda         = $doc['documento']['moneda'] ?? 'GTQ';
-        $total          = (float)($doc['documento']['total'] ?? 0);
-        if ($total <= 0) {
+        // Doc
+        $moneda     = $doc['documento']['moneda'] ?? 'GTQ';
+        $totalBruto = (float)($doc['documento']['total'] ?? 0);
+        if ($totalBruto <= 0) {
             throw new \InvalidArgumentException('Total debe ser > 0 para construir DTE');
         }
 
-        // ========= 1 ítem: asumimos total IVA-incluido (12%) =========
+        // Un ítem (total IVA incluido)
         $desc = $doc['documento']['items'][0]['descripcion'] ?? 'Servicio';
 
-        $gravable = round($total / 1.12, 6);
-        $iva      = round($total - $gravable, 6);
+        // Base + IVA
+        $base = round($totalBruto / 1.12, 6);
+        $iva  = round($totalBruto - $base, 6);
 
-        // ======== Formatos (según XSD: hasta 6 decimales) ========
-        $fmt6 = fn($n) => number_format((float)$n, 6, '.', '');
-        $fmt2 = fn($n) => number_format((float)$n, 2, '.', '');
+        $f6 = fn($n) => number_format((float)$n, 6, '.', '');
+        $f2 = fn($n) => number_format((float)$n, 2, '.', '');
 
-        $precioUnitario   = $fmt6($gravable); // sin IVA
-        $precioLinea      = $fmt6($gravable); // cantidad = 1
-        $descuento        = $fmt6(0);
-        $montoGravable    = $fmt6($gravable);
-        $montoImpuestoIVA = $fmt6($iva);
-        $totalLinea       = $fmt6($gravable + $iva);    // precio - descuento + impuestos
-        $granTotal        = $fmt2($total);              // totales a 2 decimales
+        $precioUnitario   = $f6($base);
+        $precioLinea      = $f6($base);
+        $descuento        = $f6(0);
+        $montoGravable    = $f6($base);
+        $montoImpuestoIVA = $f6($iva);
+        $totalLinea       = $f6($base);         // SIN IVA
+        $granTotal        = $f2($base + $iva);  // CON IVA
 
-        // ======== Direcciones mínimas válidas ========
+        // Direcciones mínimas
         $dirEmisor = <<<XML
         <dte:DireccionEmisor>
-            <dte:Direccion>Ciudad</dte:Direccion>
-            <dte:CodigoPostal>01001</dte:CodigoPostal>
-            <dte:Municipio>Guatemala</dte:Municipio>
-            <dte:Departamento>Guatemala</dte:Departamento>
-            <dte:Pais>GT</dte:Pais>
+        <dte:Direccion>Ciudad</dte:Direccion>
+        <dte:CodigoPostal>01001</dte:CodigoPostal>
+        <dte:Municipio>Guatemala</dte:Municipio>
+        <dte:Departamento>Guatemala</dte:Departamento>
+        <dte:Pais>GT</dte:Pais>
         </dte:DireccionEmisor>
         XML;
 
-        $dirReceptor = <<<XML
+            $dirReceptor = <<<XML
         <dte:DireccionReceptor>
-            <dte:Direccion>Ciudad</dte:Direccion>
-            <dte:CodigoPostal>01001</dte:CodigoPostal>
-            <dte:Municipio>Guatemala</dte:Municipio>
-            <dte:Departamento>Guatemala</dte:Departamento>
-            <dte:Pais>GT</dte:Pais>
+        <dte:Direccion>Ciudad</dte:Direccion>
+        <dte:CodigoPostal>01001</dte:CodigoPostal>
+        <dte:Municipio>Guatemala</dte:Municipio>
+        <dte:Departamento>Guatemala</dte:Departamento>
+        <dte:Pais>GT</dte:Pais>
         </dte:DireccionReceptor>
         XML;
 
-        // ========= XML DTE =========
-        // Nota: Sin schemaLocation; Version=0.4; UnidadMedida=UNI
+        // Atributos opcionales: si no hay correo, no se envían
+        $attrCorreoEmisor   = $correoEmisor   !== '' ? ' CorreoEmisor="'.$this->xmlEscape($correoEmisor).'"'     : '';
+        $attrCorreoReceptor = $correoReceptor !== '' ? ' CorreoReceptor="'.$this->xmlEscape($correoReceptor).'"' : '';
+
         return <<<XML
         <?xml version="1.0" encoding="UTF-8"?>
         <dte:GTDocumento
@@ -274,11 +324,15 @@ class G4SClient
         <dte:SAT ClaseDocumento="dte">
             <dte:DTE ID="DatosCertificados">
             <dte:DatosEmision ID="DatosEmision">
-                <dte:DatosGenerales FechaHoraEmision="{$fecha}" Tipo="FACT" CodigoMoneda="{$moneda}"/>
-                <dte:Emisor NITEmisor="{$this->xmlEscape($nitEmisor)}" NombreEmisor="{$this->xmlEscape($nombreEmisor)}" AfiliacionIVA="GEN" CodigoEstablecimiento="1" CorreoEmisor="{$this->xmlEscape($correoEmisor)}">
+                <dte:DatosGenerales FechaHoraEmision="{$fecha}" Tipo="FACT" CodigoMoneda="{$this->xmlEscape($moneda)}"/>
+                <dte:Emisor NITEmisor="{$this->xmlEscape($nitEmisor)}"
+                            NombreEmisor="{$this->xmlEscape($nombreEmisor)}"
+                            AfiliacionIVA="GEN"
+                            CodigoEstablecimiento="{$this->xmlEscape($codEst)}"{$attrCorreoEmisor}>
                 {$dirEmisor}
                 </dte:Emisor>
-                <dte:Receptor IDReceptor="{$this->xmlEscape($nitReceptor)}" NombreReceptor="{$this->xmlEscape($nombreReceptor)}" CorreoReceptor="{$this->xmlEscape($correoReceptor)}">
+                <dte:Receptor IDReceptor="{$this->xmlEscape($nitReceptor)}"
+                            NombreReceptor="{$this->xmlEscape($nombreReceptor)}"{$attrCorreoReceptor}>
                 {$dirReceptor}
                 </dte:Receptor>
                 <dte:Frases>

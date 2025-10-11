@@ -329,63 +329,163 @@ class ApiController {
         }
     }
 
-    public function ingestTicket(){
+    public function ingestTickets() {
         try {
+            // seguridad simple por header
+            $key = $this->config->get('INGEST_KEY', '');
+            if ($key !== '' && ($_SERVER['HTTP_X_INGEST_KEY'] ?? '') !== $key) {
+                \App\Utils\Http::json(['ok'=>false,'error'=>'Unauthorized'], 401);
+                return;
+            }
+
             $pdo = \App\Utils\DB::pdo($this->config);
-            $b = \App\Utils\Http::body();
+            $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
 
-            // Validación mínima
-            $ticket_no = trim((string)($b['ticket_no'] ?? ''));
-            if ($ticket_no === '') throw new \InvalidArgumentException('ticket_no requerido');
+            $body = \App\Utils\Http::body();
 
-            $plate   = $b['plate'] ?? null;
-            $status  = $b['status'] ?? 'OPEN'; // OPEN|CLOSED
-            $entry   = $b['entry_at'] ?? null; // ISO
-            $exit    = $b['exit_at']  ?? null; // ISO
-            $durMin  = isset($b['duration_min']) ? (int)$b['duration_min'] : null;
-            $amount  = isset($b['amount']) ? (float)$b['amount'] : 0;
+            $rows = [];
 
-            $sql = "
-            INSERT INTO tickets (ticket_no, plate, status, entry_at, exit_at, duration_min, amount, created_at)
-            VALUES (:ticket_no,:plate,:status,:entry_at,:exit_at,:duration_min,:amount, datetime('now'))
-            ON CONFLICT(ticket_no) DO UPDATE SET
-            plate=excluded.plate, status=excluded.status, entry_at=excluded.entry_at,
-            exit_at=excluded.exit_at, duration_min=excluded.duration_min, amount=excluded.amount";
-            $st = $pdo->prepare($sql);
-            $st->execute([
-                ':ticket_no'=>$ticket_no, ':plate'=>$plate, ':status'=>$status,
-                ':entry_at'=>$entry, ':exit_at'=>$exit, ':duration_min'=>$durMin, ':amount'=>$amount
-            ]);
+            // A) Formato “raw ZKBio CVSecurity”: { code, message, data: { data: [ ... ] } }
+            if (isset($body['data']['data']) && is_array($body['data']['data'])) {
+                foreach ($body['data']['data'] as $r) {
+                    // Mapeo de campos de tu ejemplo:
+                    $id        = (string)($r['id'] ?? '');
+                    if ($id === '') continue;
 
-            \App\Utils\Http::json(['ok'=>true,'ticket_no'=>$ticket_no]);
+                    $car       = (string)($r['carNumber'] ?? null);
+                    $exit      = (string)($r['checkOutTime'] ?? null); // "yyyy-MM-dd HH:mm:ss.SSS"
+                    $parking   = (string)($r['parkingTime'] ?? null);  // "HH:mm:ss"
+
+                    // Calcula entry_at si tenemos parkingTime y checkOutTime
+                    $entryAt = null;
+                    if ($exit && $parking && preg_match('/^\d{2}:\d{2}:\d{2}/', $parking)) {
+                        $secs = 0;
+                        [$h,$m,$s] = array_map('intval', explode(':', substr($parking,0,8)));
+                        $secs = $h*3600 + $m*60 + $s;
+                        $exitTs = strtotime(str_replace('.', '', $exit)); // tolerante a .mmm
+                        if ($exitTs) $entryAt = date('Y-m-d H:i:s', $exitTs - $secs);
+                    }
+
+                    $rows[] = [
+                        'ticket_no'   => $id,
+                        'plate'       => $car ?: null,
+                        'status'      => 'CLOSED',             // por ser record OUT
+                        'entry_at'    => $entryAt,
+                        'exit_at'     => $exit ? substr($exit,0,19) : null,
+                        'duration_min'=> isset($parking) && strlen($parking)>=5 ? 
+                                        (int)floor((($h??0)*60)+($m??0)+(($s??0)>0?1:0)) : null,
+                        'amount'      => null,                 // si no viene, queda null
+                        'source'      => 'zkbio',
+                        'raw_json'    => json_encode($r, JSON_UNESCAPED_UNICODE),
+                    ];
+                }
+
+            // B) Formato normalizado: { tickets: [ {ticket_no, plate, entry_at, exit_at, duration_min, amount, status} ] }
+            } elseif (isset($body['tickets']) && is_array($body['tickets'])) {
+                foreach ($body['tickets'] as $t) {
+                    if (empty($t['ticket_no'])) continue;
+                    $rows[] = [
+                        'ticket_no'   => (string)$t['ticket_no'],
+                        'plate'       => $t['plate'] ?? null,
+                        'status'      => strtoupper((string)($t['status'] ?? 'CLOSED')),
+                        'entry_at'    => $t['entry_at'] ?? null,
+                        'exit_at'     => $t['exit_at'] ?? null,
+                        'duration_min'=> isset($t['duration_min']) ? (int)$t['duration_min'] : null,
+                        'amount'      => isset($t['amount']) ? (float)$t['amount'] : null,
+                        'source'      => $t['source'] ?? 'external',
+                        'raw_json'    => json_encode($t, JSON_UNESCAPED_UNICODE),
+                    ];
+                }
+            } else {
+                \App\Utils\Http::json(['ok'=>false,'error'=>'Payload inválido'], 400);
+                return;
+            }
+
+            if (!$rows) { \App\Utils\Http::json(['ok'=>true,'ingested'=>0]); return; }
+
+            $up = $pdo->prepare("
+                INSERT INTO tickets (ticket_no, plate, status, entry_at, exit_at, duration_min, amount, source, raw_json, created_at, updated_at)
+                VALUES (:ticket_no,:plate,:status,:entry_at,:exit_at,:duration_min,:amount,:source,:raw_json, NOW(), NOW())
+                ON DUPLICATE KEY UPDATE
+                plate=VALUES(plate),
+                status=VALUES(status),
+                entry_at=VALUES(entry_at),
+                exit_at=VALUES(exit_at),
+                duration_min=VALUES(duration_min),
+                amount=VALUES(amount),
+                source=VALUES(source),
+                raw_json=VALUES(raw_json),
+                updated_at=NOW()
+            ");
+
+            $n=0;
+            foreach ($rows as $r) { $up->execute($r); $n++; }
+
+            \App\Utils\Http::json(['ok'=>true,'ingested'=>$n]);
         } catch (\Throwable $e) {
-            \App\Utils\Http::json(['ok'=>false,'error'=>$e->getMessage()], 400);
+            \App\Utils\Http::json(['ok'=>false,'error'=>$e->getMessage()], 500);
         }
     }
 
-    public function ingestPayment(){
+    public function ingestPayments() {
         try {
+            // seguridad simple
+            $key = $this->config->get('INGEST_KEY', '');
+            if ($key !== '' && ($_SERVER['HTTP_X_INGEST_KEY'] ?? '') !== $key) {
+                \App\Utils\Http::json(['ok'=>false,'error'=>'Unauthorized'], 401);
+                return;
+            }
+
             $pdo = \App\Utils\DB::pdo($this->config);
-            $b = \App\Utils\Http::body();
+            $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
 
-            $ticket_no = trim((string)($b['ticket_no'] ?? ''));
-            if ($ticket_no === '') throw new \InvalidArgumentException('ticket_no requerido');
+            $body = \App\Utils\Http::body();
+            $rows = [];
 
-            $amount = (float)($b['amount'] ?? 0);
-            if ($amount <= 0) throw new \InvalidArgumentException('amount > 0 requerido');
+            // A) Normalizado: { payments: [ {ticket_no, amount, method, paid_at, ref} ] }
+            if (isset($body['payments']) && is_array($body['payments'])) {
+                foreach ($body['payments'] as $p) {
+                    if (empty($p['ticket_no']) || !isset($p['amount'])) continue;
+                    $rows[] = [
+                        'ticket_no' => (string)$p['ticket_no'],
+                        'amount'    => (float)$p['amount'],
+                        'method'    => $p['method'] ?? 'cash',
+                        'paid_at'   => $p['paid_at'] ?? date('Y-m-d H:i:s'),
+                        'ref'       => $p['ref'] ?? null,
+                        'raw_json'  => json_encode($p, JSON_UNESCAPED_UNICODE),
+                    ];
+                }
 
-            $method = $b['method'] ?? null;
-            $paidAt = $b['paid_at'] ?? date('c');
+            // B) Raw ZKBio (si algún endpoint de ZK trae pagos; aquí dejamos ejemplo genérico)
+            } elseif (isset($body['data']['data']) && is_array($body['data']['data'])) {
+                foreach ($body['data']['data'] as $r) {
+                    // adapta si tu fuente de pagos trae otros nombres
+                    $rows[] = [
+                        'ticket_no' => (string)($r['id'] ?? ''),
+                        'amount'    => (float)($r['amount'] ?? 0),
+                        'method'    => (string)($r['method'] ?? 'cash'),
+                        'paid_at'   => (string)($r['paidAt'] ?? date('Y-m-d H:i:s')),
+                        'ref'       => (string)($r['txn'] ?? null),
+                        'raw_json'  => json_encode($r, JSON_UNESCAPED_UNICODE),
+                    ];
+                }
+            } else {
+                \App\Utils\Http::json(['ok'=>false,'error'=>'Payload inválido'], 400);
+                return;
+            }
 
-            $st = $pdo->prepare("INSERT INTO payments (ticket_no, amount, method, paid_at, created_at)
-                                VALUES (:ticket_no,:amount,:method,:paid_at, datetime('now'))");
-            $st->execute([
-                ':ticket_no'=>$ticket_no, ':amount'=>$amount, ':method'=>$method, ':paid_at'=>$paidAt
-            ]);
+            if (!$rows) { \App\Utils\Http::json(['ok'=>true,'ingested'=>0]); return; }
 
-            \App\Utils\Http::json(['ok'=>true,'ticket_no'=>$ticket_no,'amount'=>$amount]);
+            $ins = $pdo->prepare("
+                INSERT INTO payments (ticket_no, amount, method, paid_at, ref, raw_json, created_at)
+                VALUES (:ticket_no,:amount,:method,:paid_at,:ref,:raw_json, NOW())
+            ");
+            $n=0;
+            foreach ($rows as $r) { $ins->execute($r); $n++; }
+
+            \App\Utils\Http::json(['ok'=>true,'ingested'=>$n]);
         } catch (\Throwable $e) {
-            \App\Utils\Http::json(['ok'=>false,'error'=>$e->getMessage()], 400);
+            \App\Utils\Http::json(['ok'=>false,'error'=>$e->getMessage()], 500);
         }
     }
 

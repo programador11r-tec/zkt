@@ -1,38 +1,40 @@
-name: zk-g4s-fel-php
-services:
-  - name: backend
-    environment_slug: php
-    source_dir: backend
-    run_command: ./ops_app_platform_entrypoint.sh
-    http_port: 8080
-    instance_count: 1
-    instance_size_slug: basic-xxs
-    routes:
-      - path: /
-    envs:
-      - key: APP_ENV
-        scope: RUN_AND_BUILD_TIME
-        value: production
-      - key: DB_CONNECTION
-        scope: RUN_AND_BUILD_TIME
-        value: mysql
-      - key: DB_HOST
-        scope: RUN_AND_BUILD_TIME
-        type: GENERAL
-        value: ""
-      - key: DB_PORT
-        scope: RUN_AND_BUILD_TIME
-        type: GENERAL
-        value: "3306"
-      - key: DB_DATABASE
-        scope: RUN_AND_BUILD_TIME
-        type: GENERAL
-        value: ""
-      - key: DB_USERNAME
-        scope: RUN_AND_BUILD_TIME
-        type: GENERAL
-        value: ""
-      - key: DB_PASSWORD
-        scope: RUN_AND_BUILD_TIME
-        type: SECRET
-        value: ""
+
+spec:
+  name: zk-g4s-fel-php
+  services:
+    - name: backend
+      environment_slug: php
+      source_dir: backend
+      run_command: ./ops_app_platform_entrypoint.sh
+      http_port: 8080
+      instance_count: 1
+      instance_size_slug: basic-xxs
+      routes:
+        - path: /
+      envs:
+        - key: APP_ENV
+          scope: RUN_AND_BUILD_TIME
+          value: production
+        - key: DB_CONNECTION
+          scope: RUN_AND_BUILD_TIME
+          value: mysql
+        - key: DB_HOST
+          scope: RUN_AND_BUILD_TIME
+          type: GENERAL
+          value: ""
+        - key: DB_PORT
+          scope: RUN_AND_BUILD_TIME
+          type: GENERAL
+          value: "3306"
+        - key: DB_DATABASE
+          scope: RUN_AND_BUILD_TIME
+          type: GENERAL
+          value: ""
+        - key: DB_USERNAME
+          scope: RUN_AND_BUILD_TIME
+          type: GENERAL
+          value: ""
+        - key: DB_PASSWORD
+          scope: RUN_AND_BUILD_TIME
+          type: SECRET
+          value: ""

@@ -9,6 +9,8 @@ class G4SClient
 {
     private Config $config;
     private string $storageDir;
+    private ?int $lastHttpStatus = null;
+    private array $lastHttpHeaders = [];
 
     public function __construct(Config $config){
         $this->config = $config;
@@ -20,7 +22,7 @@ class G4SClient
 
     /**
      * Enviar factura a G4S (TIMBRAR) usando SecureTransaction + DataExchange (XML dentro de CDATA).
-     * Devuelve array con: ok(bool), uuid(?string), raw(string XML SOAP), inner(?string)
+     * Devuelve array con: ok(bool), uuid(?string), raw(string XML SOAP), httpStatus(?int)
      */
     public function submitInvoice(array $payload) {
         $xmlDte = $this->buildGuatemalaDTE($payload);
@@ -33,12 +35,16 @@ class G4SClient
             'Transaction' => 'TIMBRAR',
             'Data1'       => $data1,
             'Data2'       => $this->config->get('FEL_G4S_PASS',''),
-            'Data3'       => '',
         ]);
 
         $uuid = null;
         if (preg_match('/<DocumentGUID>([^<]+)<\/DocumentGUID>/', $respXml, $m)) $uuid = $m[1];
-        return ['ok'=>(bool)$uuid, 'uuid'=>$uuid, 'raw'=>$respXml];
+        return [
+            'ok'         => (bool)$uuid,
+            'uuid'       => $uuid,
+            'raw'        => $respXml,
+            'httpStatus' => $this->getLastHttpStatus(),
+        ];
     }
 
     /* ====================== SecureTransaction helpers ====================== */
@@ -57,7 +63,7 @@ class G4SClient
         $transaction = $params['Transaction'] ?? 'BASE';
         $data1       = $params['Data1'] ?? '';
         $data2       = $params['Data2'] ?? '';
-        $data3       = $params['Data3'] ?? '';
+        $data3       = $params['Data3'] ?? (string)$this->config->get('FEL_G4S_MODE', '');
 
         // Sobre SOAP 1.1 literal, tal cual WSDL (sin prefijos propios)
         $soapBody = <<<XML
@@ -87,17 +93,7 @@ class G4SClient
         $headers = "Content-Type: text/xml; charset=utf-8\r\n"
                 . "SOAPAction: \"{$action}\"\r\n";
 
-        $ctx = stream_context_create(['http' => [
-            'method'  => 'POST',
-            'header'  => $headers,
-            'content' => $soapBody,
-            'timeout' => 60,
-        ]]);
-
-        $resp = @file_get_contents($url, false, $ctx);
-        if ($resp === false) {
-            throw new \RuntimeException("No se pudo conectar con G4S (RequestTransaction)");
-        }
+        $resp = $this->postSoapRequest($url, $soapBody, $headers, 60, 'No se pudo conectar con G4S (RequestTransaction)');
 
         @file_put_contents($this->storageDir.'/last_request_tx_resp.xml', (string)$resp);
         return $resp;
@@ -141,18 +137,14 @@ class G4SClient
 
         $headers11 = "Content-Type: text/xml; charset=utf-8\r\n"
                    . "SOAPAction: \"http://www.fact.com.mx/schema/ws/SecureTransaction\"\r\n";
-        $ctx11 = stream_context_create(['http' => [
-            'method'  => 'POST',
-            'header'  => $headers11,
-            'content' => $soap11,
-            'timeout' => 45,
-        ]]);
-        $resp11 = @file_get_contents($url, false, $ctx11);
-        if ($resp11 !== false) {
+        try {
+            $resp11 = $this->postSoapRequest($url, $soap11, $headers11, 45, 'No se pudo conectar con G4S (SecureTransaction SOAP 1.1)');
             @file_put_contents($this->storageDir.'/last_secure_resp_11.xml', $resp11);
             if (strpos($resp11, '<SecureTransactionResult>') !== false) {
                 return $resp11;
             }
+        } catch (\RuntimeException $e) {
+            $resp11 = null;
         }
 
         // --- SOAP 1.2 (fallback) ---
@@ -160,16 +152,7 @@ class G4SClient
         @file_put_contents($this->storageDir.'/last_secure_req_12.xml', $soap12);
 
         $headers12 = "Content-Type: application/soap+xml; charset=utf-8\r\n";
-        $ctx12 = stream_context_create(['http' => [
-            'method'  => 'POST',
-            'header'  => $headers12,
-            'content' => $soap12,
-            'timeout' => 45,
-        ]]);
-        $resp12 = @file_get_contents($url, false, $ctx12);
-        if ($resp12 === false) {
-            throw new \RuntimeException('No se pudo conectar con G4S (SecureTransaction SOAP 1.2)');
-        }
+        $resp12 = $this->postSoapRequest($url, $soap12, $headers12, 45, 'No se pudo conectar con G4S (SecureTransaction SOAP 1.2)');
         @file_put_contents($this->storageDir.'/last_secure_resp_12.xml', $resp12);
         return $resp12;
     }
@@ -184,6 +167,69 @@ class G4SClient
 
     private function xmlEscape(string $s): string{
         return htmlspecialchars($s, ENT_QUOTES | ENT_XML1, 'UTF-8');
+    }
+
+    private function postSoapRequest(string $url, string $body, string $headers, int $timeout, string $errorPrefix): string
+    {
+        global $http_response_header;
+
+        $options = [
+            'http' => [
+                'method'        => 'POST',
+                'header'        => $headers,
+                'content'       => $body,
+                'timeout'       => $timeout,
+                'ignore_errors' => true,
+            ],
+        ];
+
+        $this->lastHttpHeaders = [];
+        $this->lastHttpStatus  = null;
+
+        $ctx  = stream_context_create($options);
+        $resp = @file_get_contents($url, false, $ctx);
+        $headersResp = [];
+        if (isset($http_response_header) && is_array($http_response_header)) {
+            $headersResp = $http_response_header;
+        }
+
+        if (is_array($headersResp)) {
+            $this->lastHttpHeaders = $headersResp;
+            $this->lastHttpStatus  = $this->extractStatusCode($headersResp);
+        }
+
+        if ($resp === false) {
+            $err = error_get_last();
+            $statusLine = $headersResp[0] ?? '';
+            $details = trim(($statusLine ? $statusLine . ' ' : '') . ($err['message'] ?? ''));
+            $msg = $details !== '' ? $errorPrefix . ': ' . $details : $errorPrefix;
+            throw new \RuntimeException($msg);
+        }
+
+        return $resp;
+    }
+
+    private function extractStatusCode(array $headers): ?int
+    {
+        if (empty($headers)) {
+            return null;
+        }
+
+        if (preg_match('/\s(\d{3})\s/', (string)$headers[0], $m)) {
+            return (int)$m[1];
+        }
+
+        return null;
+    }
+
+    public function getLastHttpStatus(): ?int
+    {
+        return $this->lastHttpStatus;
+    }
+
+    public function getLastHttpHeaders(): array
+    {
+        return $this->lastHttpHeaders;
     }
 
     /* ========================= DTE FEL Guatemala ========================= */

@@ -1,11 +1,4 @@
-diff --git a/ops/nginx/site.conf b/ops/nginx/site.conf.template
-similarity index 88%
-rename from ops/nginx/site.conf
-rename to ops/nginx/site.conf.template
-index 6a2068c61216d6bda612f96b29074270e2c45638..4c1b1a5887fa677f3f1e9b057527bf62c6e31492 100644
---- a/ops/nginx/site.conf
-+++ b/ops/nginx/site.conf.template
-@@ -1,22 +1,22 @@
+
  server {
      listen 80;
      server_name _;
@@ -19,8 +12,8 @@ index 6a2068c61216d6bda612f96b29074270e2c45638..4c1b1a5887fa677f3f1e9b057527bf62
  
      location ~ \.php$ {
          include snippets/fastcgi-php.conf;
--        fastcgi_pass unix:/run/php/php8.2-fpm.sock;
-+        fastcgi_pass unix:__PHP_FPM_SOCKET__;
+        fastcgi_pass unix:/run/php/php8.2-fpm.sock;
+        fastcgi_pass unix:__PHP_FPM_SOCKET__;
      }
  
      location ~* \.(css|js|png|jpg|jpeg|gif|ico|svg)$ {

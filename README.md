@@ -1,8 +1,3 @@
-diff --git a/README.md b/README.md
-index d2e3f9df05f9b3d2c720ce6e146fe9e4a3cb563c..b8a6aa0355ad7a35b7889bf6525da06d5b134588 100644
---- a/README.md
-+++ b/README.md
-@@ -1,42 +1,56 @@
  # ZKTeco ↔ G4S FEL PHP (Frontend + Backend)
  
  Proyecto base listo para DigitalOcean (LAMP/LEMP). Contiene:

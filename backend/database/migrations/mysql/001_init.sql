@@ -1,6 +1,7 @@
 CREATE TABLE IF NOT EXISTS tickets (
   ticket_no    VARCHAR(64) PRIMARY KEY,
   plate        VARCHAR(32),
+  receptor_nit VARCHAR(32),
   status       ENUM('OPEN','CLOSED') NOT NULL DEFAULT 'OPEN',
   entry_at     DATETIME NULL,
   exit_at      DATETIME NULL,

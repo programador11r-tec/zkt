@@ -230,7 +230,7 @@ body.sidebar-open .sidebar-toggle-icon::after {
 }
 
 body.sidebar-open .layout {
-  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  grid-template-columns: minmax(0, var(--sidebar-width)) minmax(0, 1fr);
   column-gap: var(--sidebar-gap);
   max-width: calc(var(--layout-max) + var(--sidebar-width) + var(--sidebar-gap));
   margin-left: 0;
@@ -243,13 +243,14 @@ body.sidebar-open .layout {
   position: sticky;
   top: 0;
   height: 100vh;
-  width: var(--sidebar-width);
+  width: 100%;
+  max-width: var(--sidebar-width);
   border-radius: 0 var(--radius-lg) var(--radius-lg) 0;
   background: var(--surface-card);
   box-shadow: var(--shadow-lg);
   border: 1px solid rgba(13, 202, 240, 0.18);
   overflow-y: auto;
-  transform: translateX(calc(-1 * var(--sidebar-width)));
+  transform: translateX(-100%);
   opacity: 0;
   pointer-events: none;
   visibility: hidden;
@@ -769,6 +770,7 @@ body.sidebar-open .sidebar {
 @media (max-width: 991.98px) {
   .sidebar {
     width: min(300px, 86vw);
+    max-width: min(300px, 86vw);
   }
 
   .sidebar-inner {
@@ -812,6 +814,7 @@ body.sidebar-open .sidebar {
 @media (max-width: 575.98px) {
   .sidebar {
     width: 100vw;
+    max-width: 100vw;
     border-radius: 0;
   }
 }

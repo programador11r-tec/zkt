@@ -1,5 +1,13 @@
 (() => {
   const app = document.getElementById('app');
+  const sidebar = document.getElementById('appSidebar');
+  const sidebarLinks = sidebar ? Array.from(sidebar.querySelectorAll('.nav-link')) : [];
+  let currentPage = null;
+  let renderGeneration = 0;
+
+  if (sidebar) {
+    sidebar.setAttribute('aria-hidden', 'false');
+  }
 
   // Detecta el directorio base (soporta /, /zkt/backend/public/, etc.)
   const base = (() => {
@@ -15,8 +23,10 @@
   }
 
   function setActive(link) {
-    document.querySelectorAll('.nav-link').forEach(a => a.classList.remove('active'));
-    link.classList.add('active');
+    sidebarLinks.forEach((a) => a.classList.remove('active'));
+    if (link) {
+      link.classList.add('active');
+    }
   }
 
   async function fetchJSON(url, opts) {
@@ -30,50 +40,370 @@
     }
   }
 
+  const settingsState = { cache: null, promise: null };
+
+  const escapeHtml = (value) => String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
+  const formatNumber = (value) => {
+    if (value === null || value === undefined) return '—';
+    const num = Number(value);
+    if (Number.isNaN(num)) return String(value);
+    try {
+      return num.toLocaleString('es-GT');
+    } catch (_) {
+      return num.toString();
+    }
+  };
+
+  const formatDateTime = (value) => {
+    if (!value) return '—';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    try {
+      return date.toLocaleString('es-GT', { dateStyle: 'medium', timeStyle: 'short' });
+    } catch (_) {
+      return date.toISOString();
+    }
+  };
+
+  const formatRelativeTime = (value) => {
+    if (!value) return '';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '';
+    const diff = date.getTime() - Date.now();
+    const units = [
+      { unit: 'day', ms: 86400000 },
+      { unit: 'hour', ms: 3600000 },
+      { unit: 'minute', ms: 60000 },
+      { unit: 'second', ms: 1000 },
+    ];
+    try {
+      const rtf = new Intl.RelativeTimeFormat('es', { numeric: 'auto' });
+      for (const { unit, ms } of units) {
+        if (Math.abs(diff) >= ms || unit === 'second') {
+          return rtf.format(Math.round(diff / ms), unit);
+        }
+      }
+    } catch (_) {
+      // noop
+    }
+    const minutes = Math.round(Math.abs(diff) / 60000);
+    return diff < 0 ? `hace ${minutes} min` : `en ${minutes} min`;
+  };
+
+  const statusToClass = (status) => {
+    const normalized = String(status ?? '').toLowerCase();
+    if (['ok', 'online', 'success', 'healthy', 'operational'].includes(normalized)) return 'ok';
+    if (['warn', 'warning', 'degraded', 'pending'].includes(normalized)) return 'warn';
+    if (['error', 'down', 'offline', 'failed'].includes(normalized)) return 'danger';
+    return 'neutral';
+  };
+
+  function updateChromeWithSettings(settings) {
+    const envBadge = document.getElementById('envBadge');
+    if (envBadge) {
+      const env = settings?.app?.environment ?? 'unknown';
+      envBadge.textContent = settings?.app?.environment_label ?? (settings ? env.toUpperCase() : 'Sin conexión');
+      envBadge.dataset.status = settings ? env : 'offline';
+    }
+
+    if (settings?.app?.environment) {
+      document.body.dataset.environment = settings.app.environment;
+    } else {
+      delete document.body.dataset.environment;
+    }
+
+    const subtitle = document.getElementById('heroSubtitle');
+    if (subtitle) {
+      const base = subtitle.getAttribute('data-default') || subtitle.textContent;
+      subtitle.textContent = settings?.app?.name ? `${settings.app.name} • ${base}` : base;
+    }
+
+    const lastSyncValue = document.getElementById('heroLastSync');
+    const lastSyncRelative = document.getElementById('heroLastSyncRelative');
+    const lastSync = settings?.database?.metrics?.tickets_last_sync ?? null;
+    if (lastSyncValue) lastSyncValue.textContent = formatDateTime(lastSync);
+    if (lastSyncRelative) {
+      const rel = formatRelativeTime(lastSync);
+      lastSyncRelative.textContent = rel;
+      lastSyncRelative.style.display = rel ? '' : 'none';
+    }
+
+    const metrics = settings?.database?.metrics ?? {};
+
+    const heroInvoicesTotal = document.getElementById('heroInvoicesTotal');
+    if (heroInvoicesTotal) {
+      const invoicesTotal = metrics?.invoices_total;
+      heroInvoicesTotal.textContent = invoicesTotal !== undefined && invoicesTotal !== null
+        ? formatNumber(invoicesTotal)
+        : '—';
+    }
+
+    const heroInvoicesLastSync = document.getElementById('heroInvoicesLastSync');
+    if (heroInvoicesLastSync) {
+      const lastInvoice = metrics?.invoices_last_sync ?? null;
+      if (lastInvoice) {
+        const rel = formatRelativeTime(lastInvoice);
+        const timestamp = formatDateTime(lastInvoice);
+        heroInvoicesLastSync.textContent = rel ? `Última factura ${rel}` : `Última factura ${timestamp}`;
+        heroInvoicesLastSync.style.display = '';
+      } else {
+        heroInvoicesLastSync.textContent = 'Sin facturas registradas';
+        heroInvoicesLastSync.style.display = '';
+      }
+    }
+
+    const heroPendingInvoices = document.getElementById('heroPendingInvoices');
+    const heroPendingDetail = document.getElementById('heroPendingDetail');
+    if (heroPendingInvoices) {
+      const pending = Number(metrics?.pending_invoices ?? 0);
+      let tone = 'neutral';
+      let label = 'Sin datos';
+      if (settings) {
+        if (!Number.isFinite(pending) || pending < 0) {
+          label = 'Sin datos';
+        } else if (pending === 0) {
+          label = 'Sin pendientes';
+          tone = 'ok';
+        } else {
+          label = `${formatNumber(pending)} por certificar`;
+          tone = 'warn';
+        }
+      }
+      heroPendingInvoices.textContent = label;
+      heroPendingInvoices.className = 'hero-highlight-chip';
+      heroPendingInvoices.dataset.tone = tone;
+    }
+    if (heroPendingDetail) {
+      const pending = Number(metrics?.pending_invoices ?? 0);
+      if (settings && Number.isFinite(pending)) {
+        heroPendingDetail.textContent = pending > 0
+          ? `Tickets listos para FEL: ${formatNumber(pending)}`
+          : 'No hay tickets pendientes de certificación';
+      } else {
+        heroPendingDetail.textContent = 'Sincroniza para ver pendientes de certificación';
+      }
+    }
+
+    const heroGeneratedAt = document.getElementById('heroGeneratedAt');
+    if (heroGeneratedAt) {
+      const generated = settings?.generated_at ?? settings?.app?.generated_at ?? null;
+      const label = generated ? `${formatDateTime(generated)} (${formatRelativeTime(generated) || 'recién'})` : 'Sincronización no disponible';
+      heroGeneratedAt.textContent = `Configuración actualizada: ${label}`;
+    }
+  }
+
+  async function loadSettings(force = false) {
+    if (!force) {
+      if (settingsState.cache) return settingsState.cache;
+      if (settingsState.promise) return settingsState.promise;
+    }
+
+    const request = fetchJSON(api('settings'))
+      .then((resp) => {
+        const settings = resp?.settings ?? null;
+        settingsState.cache = settings;
+        updateChromeWithSettings(settings);
+        return settings;
+      })
+      .catch((error) => {
+        console.warn('No se pudo obtener la configuración', error);
+        if (!settingsState.cache) updateChromeWithSettings(null);
+        return null;
+      })
+      .finally(() => {
+        if (settingsState.promise === request) {
+          settingsState.promise = null;
+        }
+      });
+
+    settingsState.promise = request;
+    return request;
+  }
+
+  function buildTimeline(items) {
+    if (!Array.isArray(items) || !items.length) {
+      return '<div class="empty small mb-0">Sin eventos recientes.</div>';
+    }
+    return items.map((item) => {
+      const title = escapeHtml(item?.title ?? 'Evento');
+      const subtitle = item?.subtitle ? `<div class="timeline-subtitle">${escapeHtml(item.subtitle)}</div>` : '';
+      const timestamp = item?.timestamp ?? item?.date ?? item?.when ?? null;
+      const meta = `<div class="timeline-meta"><span>${escapeHtml(formatDateTime(timestamp))}</span>${formatRelativeTime(timestamp) ? `<span class="timeline-relative">${escapeHtml(formatRelativeTime(timestamp))}</span>` : ''}</div>`;
+      return `
+        <div class="timeline-item">
+          <div class="timeline-dot ${statusToClass(item?.status)}"></div>
+          <div>
+            <div class="timeline-title">${title}</div>
+            ${subtitle}
+            ${meta}
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  loadSettings().catch(() => {});
+
+  const refreshBtn = document.getElementById('refreshBtn');
+  if (refreshBtn) {
+    refreshBtn.addEventListener('click', async () => {
+      const active = currentPage || document.querySelector('.nav-link.active[data-page]')?.getAttribute('data-page') || 'dashboard';
+      refreshBtn.classList.add('is-loading');
+      refreshBtn.disabled = true;
+      try {
+        await loadSettings(true);
+        await goToPage(active, { force: true });
+      } catch (err) {
+        console.error(err);
+      } finally {
+        setTimeout(() => {
+          refreshBtn.classList.remove('is-loading');
+          refreshBtn.disabled = false;
+        }, 400);
+      }
+    });
+  }
+
   // ===== Dashboard =====
   async function renderDashboard() {
     try {
-      const { data } = await fetchJSON(api('tickets'));
+      const [ticketsResp, settings] = await Promise.all([
+        fetchJSON(api('tickets')),
+        loadSettings(),
+      ]);
+
+      const data = Array.isArray(ticketsResp?.data) ? ticketsResp.data : [];
       const state = { search: '', page: 1 };
       const pageSize = 20;
 
+      const metrics = settings?.database?.metrics ?? {};
+      const pending = Number(metrics.pending_invoices ?? 0);
+      const summaryCards = [
+        {
+          title: 'Asistencias de hoy',
+          badge: 'En vivo',
+          value: formatNumber(data.length),
+          detail: 'Lecturas registradas en el día',
+          accent: 'primary',
+        },
+        {
+          title: 'Tickets en base de datos',
+          badge: 'Histórico',
+          value: formatNumber(metrics.tickets_total),
+          detail: metrics.tickets_last_sync ? `Último registro ${formatRelativeTime(metrics.tickets_last_sync)}` : 'Sin registros almacenados',
+          accent: 'info',
+        },
+        {
+          title: 'Facturas emitidas',
+          badge: 'FEL',
+          value: formatNumber(metrics.invoices_total),
+          detail: metrics.invoices_last_sync ? `Última emisión ${formatRelativeTime(metrics.invoices_last_sync)}` : 'Sin facturas emitidas',
+          accent: 'success',
+        },
+        {
+          title: 'Pendientes por facturar',
+          badge: pending > 0 ? 'Atención' : 'Al día',
+          value: formatNumber(pending),
+          detail: pending > 0 ? 'Genera FEL desde Facturación' : 'Sin pendientes',
+          accent: pending > 0 ? 'warning' : 'neutral',
+        },
+      ];
+
+      const summaryHtml = summaryCards.map((card) => `
+        <div class="col-xxl-3 col-sm-6">
+          <div class="stat-card" data-accent="${card.accent}">
+            <div class="stat-badge">${escapeHtml(card.badge)}</div>
+            <div class="stat-title">${escapeHtml(card.title)}</div>
+            <div class="stat-value">${escapeHtml(card.value)}</div>
+            <div class="stat-foot">${escapeHtml(card.detail)}</div>
+          </div>
+        </div>
+      `).join('');
+
       app.innerHTML = `
-        <div class="row g-4">
-          <div class="col-md-4">
-            <div class="card shadow-sm">
-              <div class="card-body">
-                <h5 class="card-title">Asistencias de hoy</h5>
-                <p class="display-6 mb-0">${data.length}</p>
-                <span class="badge badge-soft mt-2">Datos de G4S</span>
+        <div class="dashboard-view">
+          <div class="row g-4 dashboard-summary">
+            ${summaryHtml}
+          </div>
+          <div class="row g-4 align-items-stretch">
+            <div class="col-xl-8">
+              <div class="card shadow-sm h-100">
+                <div class="card-body d-flex flex-column gap-3 h-100">
+                  <div class="d-flex flex-wrap gap-2 align-items-start justify-content-between">
+                    <div>
+                      <h5 class="card-title mb-1">Asistencias registradas</h5>
+                      <p class="text-muted small mb-0">Información consolidada desde la base de datos.</p>
+                    </div>
+                    <div class="ms-auto" style="max-width: 260px;">
+                      <input type="search" id="dashSearch" class="form-control form-control-sm" placeholder="Buscar ticket, placa o nombre..." aria-label="Buscar asistencia" />
+                    </div>
+                  </div>
+                  <div class="table-responsive flex-grow-1">
+                    <table class="table table-sm align-middle mb-0">
+                      <thead><tr><th>#</th><th>Nombre</th><th>Entrada</th><th>Salida</th></tr></thead>
+                      <tbody id="dashBody"></tbody>
+                    </table>
+                  </div>
+                  <div class="d-flex flex-wrap gap-2 align-items-center justify-content-between">
+                    <small class="text-muted" id="dashMeta"></small>
+                    <div class="btn-group btn-group-sm" role="group" aria-label="Paginación de asistencias">
+                      <button type="button" class="btn btn-outline-secondary" id="dashPrev">Anterior</button>
+                      <button type="button" class="btn btn-outline-secondary" id="dashNext">Siguiente</button>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
-          </div>
-          <div class="col-md-8">
-            <div class="card shadow-sm">
-              <div class="card-body d-flex flex-column gap-3">
-                <div class="d-flex flex-wrap gap-2 align-items-center justify-content-between">
-                  <h5 class="card-title mb-0">Listado</h5>
-                  <div class="ms-auto" style="max-width: 240px;">
-                    <input type="search" id="dashSearch" class="form-control form-control-sm" placeholder="Buscar..." aria-label="Buscar asistencia" />
+            <div class="col-xl-4">
+              <div class="card shadow-sm h-100">
+                <div class="card-body d-flex flex-column gap-3">
+                  <div class="d-flex align-items-start justify-content-between gap-2">
+                    <div>
+                      <h5 class="card-title mb-1">Actividad reciente</h5>
+                      <p class="text-muted small mb-0">Últimos eventos sincronizados.</p>
+                    </div>
+                    <button class="btn btn-link btn-sm p-0" id="timelineRefresh">Actualizar</button>
                   </div>
-                </div>
-                <div class="table-responsive">
-                  <table class="table table-sm align-middle mb-0">
-                    <thead><tr><th>#</th><th>Nombre</th><th>Entrada</th><th>Salida</th></tr></thead>
-                    <tbody id="dashBody"></tbody>
-                  </table>
-                </div>
-                <div class="d-flex flex-wrap gap-2 align-items-center justify-content-between">
-                  <small class="text-muted" id="dashMeta"></small>
-                  <div class="btn-group btn-group-sm" role="group" aria-label="Paginación de asistencias">
-                    <button type="button" class="btn btn-outline-secondary" id="dashPrev">Anterior</button>
-                    <button type="button" class="btn btn-outline-secondary" id="dashNext">Siguiente</button>
-                  </div>
+                  <div class="timeline" id="activityTimeline"></div>
                 </div>
               </div>
             </div>
           </div>
         </div>`;
+
+      const timelineContainer = document.getElementById('activityTimeline');
+      if (timelineContainer) {
+        timelineContainer.innerHTML = buildTimeline(settings?.activity);
+      }
+
+      const timelineRefresh = document.getElementById('timelineRefresh');
+      if (timelineRefresh) {
+        timelineRefresh.addEventListener('click', async () => {
+          const originalText = timelineRefresh.textContent;
+          timelineRefresh.disabled = true;
+          timelineRefresh.textContent = 'Actualizando…';
+          let hadError = false;
+          try {
+            await loadSettings(true);
+            await renderDashboard();
+          } catch (err) {
+            hadError = true;
+            console.error(err);
+            timelineRefresh.disabled = false;
+            timelineRefresh.textContent = 'Reintentar';
+          } finally {
+            if (!hadError && timelineRefresh.isConnected) {
+              timelineRefresh.textContent = originalText;
+            }
+          }
+        });
+      }
 
       const tbody = document.getElementById('dashBody');
       const meta = document.getElementById('dashMeta');
@@ -102,17 +432,20 @@
           tbody.innerHTML = pageItems
             .map((row, index) => `
               <tr>
-                <td>${start + index + 1}</td>
-                <td>${row.name}</td>
-                <td>${row.checkIn || '-'}</td>
-                <td>${row.checkOut || '-'}</td>
+                <td>${escapeHtml(start + index + 1)}</td>
+                <td>${escapeHtml(row.name)}</td>
+                <td>${escapeHtml(row.checkIn || '-')}</td>
+                <td>${escapeHtml(row.checkOut || '-')}</td>
               </tr>
             `)
             .join('');
         } else {
+          const message = data.length && !filtered.length
+            ? 'No se encontraron resultados'
+            : 'Sin registros disponibles';
           tbody.innerHTML = `
             <tr>
-              <td colspan="4" class="text-center text-muted">${data.length ? 'No se encontraron resultados' : 'Sin registros disponibles'}</td>
+              <td colspan="4" class="text-center text-muted">${escapeHtml(message)}</td>
             </tr>
           `;
         }
@@ -125,49 +458,62 @@
           meta.textContent = 'Sin registros para mostrar';
         }
 
-        prevBtn.disabled = state.page <= 1;
-        nextBtn.disabled = state.page >= totalPages;
+        prevBtn.disabled = state.page <= 1 || !filtered.length;
+        nextBtn.disabled = state.page >= totalPages || !filtered.length;
       }
 
-      searchInput.addEventListener('input', (event) => {
-        state.search = event.target.value.trim();
-        state.page = 1;
-        renderTable();
-      });
-
-      prevBtn.addEventListener('click', () => {
-        if (state.page > 1) {
-          state.page -= 1;
+      if (searchInput) {
+        searchInput.addEventListener('input', (event) => {
+          state.search = event.target.value.trim();
+          state.page = 1;
           renderTable();
-        }
-      });
+        });
+      }
 
-      nextBtn.addEventListener('click', () => {
-        const totalPages = Math.max(1, Math.ceil(filterData().length / pageSize));
-        if (state.page < totalPages) {
-          state.page += 1;
-          renderTable();
-        }
-      });
+      if (prevBtn) {
+        prevBtn.addEventListener('click', () => {
+          if (state.page > 1) {
+            state.page -= 1;
+            renderTable();
+          }
+        });
+      }
+
+      if (nextBtn) {
+        nextBtn.addEventListener('click', () => {
+          const totalPages = Math.max(1, Math.ceil(filterData().length / pageSize));
+          if (state.page < totalPages) {
+            state.page += 1;
+            renderTable();
+          }
+        });
+      }
 
       renderTable();
     } catch (e) {
       app.innerHTML = `
-        <div class="alert alert-danger">
-          No se pudo cargar el dashboard.<br/>
-          <pre class="small mb-0">${String(e).replace(/[<>&]/g,s=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[s]))}</pre>
+        <div class="card shadow-sm">
+          <div class="card-body">
+            <h5 class="card-title text-danger">No se pudo cargar el dashboard</h5>
+            <p class="text-muted">Intenta nuevamente en unos segundos. Si el problema persiste revisa la conexión con la base de datos y las credenciales de las integraciones.</p>
+            <pre class="small mb-0">${escapeHtml(String(e))}</pre>
+          </div>
         </div>`;
     }
   }
 
   // ===== Facturación (tabla + Facturar) =====
   async function renderInvoices() {
+    const settings = await loadSettings();
+    const hourlyRateSetting = settings?.billing?.hourly_rate ?? null;
+
     app.innerHTML = `
       <div class='card p-3'>
-        <div class="d-flex flex-wrap align-items-center gap-3 mb-3">
-          <div>
+        <div class="d-flex flex-wrap align-items-start gap-3 mb-3">
+          <div class="flex-grow-1">
             <h5 class="mb-1">Facturación (BD → G4S)</h5>
-            <p class="text-muted small mb-0">Lista tickets <strong>CLOSED</strong> con pagos (o monto) y <strong>sin factura</strong>.</p>
+            <p class="text-muted small mb-1">Lista tickets <strong>CLOSED</strong> con pagos (o monto) y <strong>sin factura</strong>.</p>
+            <div class="text-muted small" id="invoiceHourlyRateHint"></div>
           </div>
           <div class="ms-auto" style="max-width: 260px;">
             <input type="search" id="invSearch" class="form-control form-control-sm" placeholder="Buscar ticket..." aria-label="Buscar ticket pendiente" />
@@ -204,10 +550,31 @@
     const meta = document.getElementById('invMeta');
     const prevBtn = document.getElementById('invPrev');
     const nextBtn = document.getElementById('invNext');
+    const hourlyRateHint = document.getElementById('invoiceHourlyRateHint');
 
     const state = { search: '', page: 1 };
     const pageSize = 20;
     let allRows = [];
+
+    const formatCurrency = (value) => {
+      if (value === null || value === undefined || value === '') return '—';
+      const num = Number(value);
+      if (!Number.isFinite(num)) return '—';
+      try {
+        return num.toLocaleString('es-GT', { style: 'currency', currency: 'GTQ' });
+      } catch (_) {
+        return `Q${num.toFixed(2)}`;
+      }
+    };
+
+    if (hourlyRateHint) {
+      const rateNumber = Number(hourlyRateSetting);
+      if (Number.isFinite(rateNumber) && rateNumber > 0) {
+        hourlyRateHint.textContent = `Tarifa por hora configurada: ${formatCurrency(rateNumber)}.`;
+      } else {
+        hourlyRateHint.textContent = 'Configura una tarifa por hora en Ajustes para habilitar el cálculo automático.';
+      }
+    }
 
     function filterRows() {
       if (!state.search) return allRows;
@@ -215,6 +582,227 @@
       return allRows.filter((row) =>
         Object.values(row).some((value) => String(value ?? '').toLowerCase().includes(term))
       );
+    }
+
+    const buildPayload = (row) => ({
+      ticket_no: row.ticket_no,
+      receptor_nit: row.receptor || 'CF',
+      serie: row.serie || 'A',
+      numero: row.numero || null,
+      fecha: row.fecha ?? null,
+      total: row.total ?? null,
+      hours: row.hours ?? row.duration_minutes ?? null,
+      duration_minutes: row.duration_minutes ?? null,
+      entry_at: row.entry_at ?? null,
+      exit_at: row.exit_at ?? null,
+    });
+
+    function openInvoiceConfirmation(ticket, hourlyRate) {
+      return new Promise((resolve) => {
+        const hoursValue = typeof ticket.hours === 'number' ? ticket.hours : Number(ticket.hours);
+        const hours = Number.isFinite(hoursValue) && hoursValue > 0 ? Number(hoursValue.toFixed(2)) : null;
+        const minutesValue = typeof ticket.duration_minutes === 'number' ? ticket.duration_minutes : Number(ticket.duration_minutes);
+        const minutes = Number.isFinite(minutesValue) && minutesValue > 0 ? Math.round(minutesValue) : null;
+        const rate = Number.isFinite(Number(hourlyRate)) && Number(hourlyRate) > 0 ? Number(hourlyRate) : null;
+        const hourlyTotal = rate !== null && hours !== null ? Math.round(hours * rate * 100) / 100 : null;
+        const totalFromDb = ticket.total !== null && ticket.total !== undefined && ticket.total !== ''
+          ? Number(ticket.total)
+          : null;
+        const normalizedDbTotal = Number.isFinite(totalFromDb) ? Number(totalFromDb.toFixed(2)) : null;
+        const customDefault = hourlyTotal ?? normalizedDbTotal;
+        const customValue = customDefault !== null ? customDefault.toFixed(2) : '';
+        const canHourly = hourlyTotal !== null;
+        const selectedMode = canHourly ? 'hourly' : 'custom';
+        const rateLabel = rate !== null ? formatCurrency(rate) : null;
+        const hourlyLabel = hourlyTotal !== null ? formatCurrency(hourlyTotal) : null;
+        const defaultLabel = normalizedDbTotal !== null ? formatCurrency(normalizedDbTotal) : '—';
+        const dateCandidate = ticket.exit_at || ticket.entry_at || ticket.fecha || null;
+        const dateLabel = dateCandidate ? formatDateTime(dateCandidate) : '—';
+        const relative = dateCandidate ? formatRelativeTime(dateCandidate) : '';
+        const hoursLabel = hours !== null ? `${hours.toFixed(2)} h${minutes && minutes % 60 ? ` (${minutes} min)` : ''}` : '—';
+
+        const backdrop = document.createElement('div');
+        backdrop.className = 'app-modal-backdrop';
+        const hourlyHelp = hourlyLabel
+          ? `Tarifa ${rateLabel ?? '—'} × ${hours !== null ? `${hours.toFixed(2)} h` : '—'}.`
+          : 'Define una tarifa por hora en Ajustes para habilitar esta opción.';
+
+        backdrop.innerHTML = `
+          <form class="app-modal-card" id="invoiceConfirmForm" role="dialog" aria-modal="true">
+            <div class="app-modal-header">
+              <h5 class="mb-1">Confirmar factura</h5>
+              <p class="text-muted small mb-0">Selecciona el tipo de cobro para el ticket ${escapeHtml(ticket.ticket_no ?? '')}.</p>
+            </div>
+            <div class="app-modal-body">
+              <div class="app-modal-summary">
+                <div class="app-modal-summary-row"><span>Ticket</span><span>${escapeHtml(ticket.ticket_no ?? '')}</span></div>
+                <div class="app-modal-summary-row"><span>Fecha</span><span>${escapeHtml(relative ? `${dateLabel} (${relative})` : dateLabel)}</span></div>
+                <div class="app-modal-summary-row"><span>Horas registradas</span><span>${escapeHtml(hoursLabel)}</span></div>
+                <div class="app-modal-summary-row"><span>Total en BD</span><span>${escapeHtml(defaultLabel)}</span></div>
+                ${hourlyLabel ? `<div class="app-modal-summary-row"><span>Total por hora</span><span>${escapeHtml(hourlyLabel)}</span></div>` : ''}
+              </div>
+              <div class="app-modal-options">
+                <label class="form-check">
+                  <input class="form-check-input" type="radio" name="billingMode" value="hourly" ${canHourly ? 'checked' : 'disabled'} />
+                  <span class="form-check-label">
+                    Cobro por hora ${hourlyLabel ? `<strong class="ms-1">${escapeHtml(hourlyLabel)}</strong>` : ''}
+                    <small class="form-text">${escapeHtml(hourlyHelp)}</small>
+                  </span>
+                </label>
+                <label class="form-check mt-3">
+                  <input class="form-check-input" type="radio" name="billingMode" value="custom" ${selectedMode === 'custom' ? 'checked' : ''} />
+                  <span class="form-check-label">
+                    Cobro personalizado
+                    <small class="form-text">Indica el total que deseas facturar manualmente.</small>
+                  </span>
+                </label>
+                <div class="input-group input-group-sm mt-2" data-role="customWrapper">
+                  <span class="input-group-text">Q</span>
+                  <input type="number" step="0.01" min="0" class="form-control" data-role="customInput" value="${customValue}" ${selectedMode === 'custom' ? '' : 'disabled'} placeholder="0.00" />
+                </div>
+              </div>
+              <div class="app-modal-error text-danger small" data-role="error" hidden></div>
+            </div>
+            <div class="app-modal-footer">
+              <button type="button" class="btn btn-outline-secondary btn-sm" data-action="cancel">Cancelar</button>
+              <button type="submit" class="btn btn-primary btn-sm">Confirmar factura</button>
+            </div>
+          </form>
+        `;
+
+        document.body.appendChild(backdrop);
+        document.body.classList.add('modal-open');
+
+        const form = backdrop.querySelector('#invoiceConfirmForm');
+        const cancelBtn = form.querySelector('[data-action="cancel"]');
+        const customInput = form.querySelector('[data-role="customInput"]');
+        const customWrapper = form.querySelector('[data-role="customWrapper"]');
+        const errorBox = form.querySelector('[data-role="error"]');
+        const radios = Array.from(form.querySelectorAll('input[name="billingMode"]'));
+
+        let resolved = false;
+        const cleanup = (result) => {
+          if (resolved) return;
+          resolved = true;
+          document.body.classList.remove('modal-open');
+          document.removeEventListener('keydown', onKeyDown);
+          backdrop.remove();
+          resolve(result);
+        };
+
+        const updateState = () => {
+          const selected = form.querySelector('input[name="billingMode"]:checked')?.value;
+          const isCustom = selected === 'custom';
+          customInput.disabled = !isCustom;
+          customWrapper.classList.toggle('is-disabled', !isCustom);
+          errorBox.hidden = true;
+        };
+
+        const onKeyDown = (event) => {
+          if (event.key === 'Escape') {
+            event.preventDefault();
+            cleanup(null);
+          }
+        };
+
+        radios.forEach((radio) => radio.addEventListener('change', updateState));
+        cancelBtn.addEventListener('click', () => cleanup(null));
+        backdrop.addEventListener('click', (event) => {
+          if (event.target === backdrop) {
+            cleanup(null);
+          }
+        });
+        document.addEventListener('keydown', onKeyDown);
+        updateState();
+
+        form.addEventListener('submit', (event) => {
+          event.preventDefault();
+          const selected = form.querySelector('input[name="billingMode"]:checked')?.value;
+          if (!selected) {
+            errorBox.textContent = 'Selecciona el tipo de cobro.';
+            errorBox.hidden = false;
+            return;
+          }
+          if (selected === 'hourly') {
+            if (!canHourly || hourlyTotal === null) {
+              errorBox.textContent = 'Configura una tarifa por hora válida en Ajustes para usar esta opción.';
+              errorBox.hidden = false;
+              return;
+            }
+            cleanup({
+              mode: 'hourly',
+              total: hourlyTotal,
+              label: `Cobro por hora ${hourlyLabel ?? ''}`.trim(),
+              description: '',
+            });
+            return;
+          }
+
+          const customVal = parseFloat(customInput.value);
+          if (!Number.isFinite(customVal) || customVal <= 0) {
+            errorBox.textContent = 'Ingresa un total personalizado mayor a cero.';
+            errorBox.hidden = false;
+            return;
+          }
+          const normalized = Math.round(customVal * 100) / 100;
+          cleanup({
+            mode: 'custom',
+            total: normalized,
+            label: `Cobro personalizado ${formatCurrency(normalized)}`,
+            description: '',
+          });
+        });
+      });
+    }
+
+    function attachInvoiceHandlers() {
+      tbody.querySelectorAll('[data-action="invoice"]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const payload = JSON.parse(decodeURIComponent(btn.getAttribute('data-payload')));
+          btn.disabled = true;
+          const originalText = btn.textContent;
+          btn.textContent = 'Confirmando…';
+          try {
+            const settingsSnapshot = await loadSettings();
+            const rateNumber = Number(settingsSnapshot?.billing?.hourly_rate ?? 0);
+            const hourlyRate = Number.isFinite(rateNumber) && rateNumber > 0 ? rateNumber : null;
+            const confirmation = await openInvoiceConfirmation(payload, hourlyRate);
+            if (!confirmation) {
+              btn.disabled = false;
+              btn.textContent = originalText;
+              return;
+            }
+
+            btn.textContent = 'Enviando…';
+            const requestPayload = {
+              ticket_no: payload.ticket_no,
+              receptor_nit: payload.receptor_nit || 'CF',
+              serie: payload.serie || 'A',
+              numero: payload.numero || null,
+              mode: confirmation.mode,
+            };
+            if (confirmation.mode === 'custom') {
+              requestPayload.custom_total = confirmation.total;
+            }
+            if (confirmation.description) {
+              requestPayload.description = confirmation.description;
+            }
+
+            const js = await fetchJSON(api('fel/invoice'), {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(requestPayload)
+            });
+            alert(`Factura enviada (${confirmation.label}). UUID ${js.uuid || '(verifique respuesta)'}`);
+            await loadList();
+          } catch (e) {
+            alert('Error al facturar: ' + e.message);
+          } finally {
+            btn.disabled = false;
+            btn.textContent = originalText;
+          }
+        });
+      });
     }
 
     function renderPage() {
@@ -233,23 +821,16 @@
           : 'No hay pendientes por facturar.';
         tbody.innerHTML = `<tr><td colspan="5" class="text-muted">${message}</td></tr>`;
       } else {
-        tbody.innerHTML = pageRows.map((d, index) => {
-          const totalFmt = (d.total != null)
-            ? Number(d.total).toLocaleString('es-GT', { style: 'currency', currency: 'GTQ' })
-            : '';
-          const payload = encodeURIComponent(JSON.stringify({
-            ticket_no: d.ticket_no,
-            receptor_nit: d.receptor || 'CF',
-            serie: d.serie || 'A',
-            numero: d.numero || null
-          }));
+        tbody.innerHTML = pageRows.map((d) => {
+          const totalFmt = formatCurrency(d.total);
+          const payload = encodeURIComponent(JSON.stringify(buildPayload(d)));
           const disabled = d.uuid ? 'disabled' : '';
           return `
             <tr>
-              <td>${d.ticket_no}</td>
-              <td>${d.fecha ?? ''}</td>
+              <td>${escapeHtml(d.ticket_no ?? '')}</td>
+              <td>${escapeHtml(d.fecha ?? '')}</td>
               <td class="text-end">${totalFmt}</td>
-              <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;">${d.uuid ?? ''}</td>
+              <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(d.uuid ?? '')}</td>
               <td class="text-center">
                 <button class="btn btn-sm btn-outline-success" data-action="invoice" data-payload="${payload}" ${disabled}>
                   Facturar
@@ -257,29 +838,7 @@
               </td>
             </tr>`;
         }).join('');
-
-        tbody.querySelectorAll('[data-action="invoice"]').forEach((btn) => {
-          btn.addEventListener('click', async () => {
-            const payload = JSON.parse(decodeURIComponent(btn.getAttribute('data-payload')));
-            btn.disabled = true;
-            const originalText = btn.textContent;
-            btn.textContent = 'Enviando…';
-            try {
-              const js = await fetchJSON(api('fel/invoice'), {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-              });
-              alert(`OK: UUID ${js.uuid || '(verifique respuesta)'}`);
-              loadList();
-            } catch (e) {
-              alert('Error al facturar: ' + e.message);
-            } finally {
-              btn.disabled = false;
-              btn.textContent = originalText;
-            }
-          });
-        });
+        attachInvoiceHandlers();
       }
 
       if (filtered.length) {
@@ -1301,38 +1860,309 @@
   async function renderSettings() {
     app.innerHTML = `
       <div class="card shadow-sm">
-        <div class="card-body">
-          <h5 class="card-title">Ajustes</h5>
-          <p class="text-muted">Configura variables de entorno en <code>backend/.env</code> (ver <code>.env.sample</code>).</p>
-          <ul>
-            <li><strong>ZKTeco:</strong> ZKTECO_BASE_URL, ZKTECO_APP_KEY, ZKTECO_APP_SECRET</li>
-            <li><strong>G4S FEL:</strong> (usa RequestTransaction) FEL_G4S_* en .env</li>
-            <li><strong>SAT Emisor:</strong> variables SAT_*</li>
-          </ul>
+        <div class="card-body d-flex align-items-center gap-3">
+          <div class="spinner-border text-primary" role="status" aria-hidden="true"></div>
+          <span class="text-muted">Cargando configuración activa…</span>
         </div>
       </div>
     `;
+
+    const settings = await loadSettings(true);
+
+    if (!settings) {
+      app.innerHTML = `
+        <div class="empty">
+          No fue posible obtener la configuración actual.<br />
+          <button class="btn btn-primary btn-sm mt-3" id="retrySettings">Reintentar</button>
+        </div>
+      `;
+      document.getElementById('retrySettings')?.addEventListener('click', () => renderSettings());
+      return;
+    }
+
+    const metrics = settings.database?.metrics ?? {};
+    const hourlyRate = settings.billing?.hourly_rate ?? null;
+    const hourlyRateValue = hourlyRate !== null && hourlyRate !== undefined && hourlyRate !== ''
+      ? Number(hourlyRate).toFixed(2)
+      : '';
+    const env = String(settings.app?.environment ?? '').toLowerCase();
+    let envClass = 'neutral';
+    if (['production', 'prod'].includes(env)) envClass = 'danger';
+    else if (['staging', 'pre', 'testing', 'qa'].includes(env)) envClass = 'warn';
+    else if (env) envClass = 'ok';
+
+    const dbStatus = settings.database?.status ?? 'unknown';
+    const dbLabelMap = {
+      online: 'Conectada',
+      success: 'Conectada',
+      healthy: 'Conectada',
+      offline: 'Desconectada',
+      down: 'Desconectada',
+    };
+    const dbLabel = dbLabelMap[dbStatus] || (dbStatus ? dbStatus.toString().toUpperCase() : 'Desconocido');
+
+    const integrationItems = Object.values(settings.integrations ?? {});
+    const integrationList = integrationItems.length
+      ? integrationItems.map((integration) => {
+          const statusClass = integration?.configured ? 'ok' : 'warn';
+          const statusLabel = integration?.configured ? 'Configurada' : 'Incompleta';
+          const detailParts = [];
+          if (integration?.base_url) detailParts.push(`URL ${integration.base_url}`);
+          if (integration?.mode) detailParts.push(`Modo ${integration.mode}`);
+          if (integration?.requestor) detailParts.push(`ID ${integration.requestor}`);
+          if (integration?.app_key) detailParts.push(`Clave ${integration.app_key}`);
+          const details = detailParts.join(' · ');
+          return `
+            <li class="integration-item">
+              <div>
+                <strong>${escapeHtml(integration?.label ?? 'Integración')}</strong>
+                <div class="integration-meta">${escapeHtml(details || 'Variables pendientes por completar')}</div>
+              </div>
+              <span class="status-pill ${statusClass}">${escapeHtml(statusLabel)}</span>
+            </li>
+          `;
+        }).join('')
+      : '<li class="integration-item"><div><strong>Sin integraciones definidas</strong><div class="integration-meta">Agrega las credenciales correspondientes en el archivo .env.</div></div></li>';
+
+    app.innerHTML = `
+      <div class="row g-4">
+        <div class="col-xl-4 col-lg-6">
+          <div class="card shadow-sm h-100">
+            <div class="card-body d-flex flex-column gap-3">
+              <div class="d-flex justify-content-between align-items-start gap-3">
+                <div>
+                  <h5 class="card-title mb-1">Entorno de ejecución</h5>
+                  <p class="text-muted small mb-0">${escapeHtml(settings.app?.name ?? 'Integración FEL')}</p>
+                </div>
+                <span class="status-pill ${envClass}">${escapeHtml(settings.app?.environment_label ?? 'Desconocido')}</span>
+              </div>
+              <div class="settings-list">
+                <div class="settings-list-item"><span>Zona horaria</span><span>${escapeHtml(settings.app?.timezone ?? '—')}</span></div>
+                <div class="settings-list-item"><span>Servidor</span><span>${escapeHtml(settings.app?.server ?? '—')}</span></div>
+                <div class="settings-list-item"><span>PHP</span><span>${escapeHtml(settings.app?.php_version ?? '—')}</span></div>
+              </div>
+              <small class="text-muted">Actualizado ${escapeHtml(formatRelativeTime(settings.generated_at) || 'recientemente')}.</small>
+            </div>
+          </div>
+        </div>
+        <div class="col-xl-4 col-lg-6">
+          <div class="card shadow-sm h-100">
+            <div class="card-body d-flex flex-column gap-3">
+              <div class="d-flex justify-content-between align-items-start gap-3">
+                <div>
+                  <h5 class="card-title mb-1">Base de datos</h5>
+                  <p class="text-muted small mb-0">${escapeHtml((settings.database?.host && settings.database?.name) ? `${settings.database.host} · ${settings.database.name}` : 'Configura las variables DB_* en el archivo .env')}</p>
+                </div>
+                <span class="status-pill ${statusToClass(dbStatus)}">${escapeHtml(dbLabel)}</span>
+              </div>
+              <div class="settings-list">
+                <div class="settings-list-item"><span>Motor</span><span>${escapeHtml(settings.database?.driver ?? '—')}</span></div>
+                <div class="settings-list-item"><span>Usuario</span><span>${escapeHtml(settings.database?.user ?? '—')}</span></div>
+                <div class="settings-list-item"><span>Tickets</span><span>${escapeHtml(formatNumber(metrics.tickets_total ?? 0))}</span></div>
+                <div class="settings-list-item"><span>Pagos</span><span>${escapeHtml(formatNumber(metrics.payments_total ?? 0))}</span></div>
+                <div class="settings-list-item"><span>Facturas</span><span>${escapeHtml(formatNumber(metrics.invoices_total ?? 0))}</span></div>
+                <div class="settings-list-item"><span>Último ticket</span><span>${escapeHtml(formatDateTime(metrics.tickets_last_sync))}</span></div>
+                <div class="settings-list-item"><span>Último pago</span><span>${escapeHtml(formatDateTime(metrics.payments_last_sync))}</span></div>
+                <div class="settings-list-item"><span>Última factura</span><span>${escapeHtml(formatDateTime(metrics.invoices_last_sync))}</span></div>
+                <div class="settings-list-item"><span>Pendientes FEL</span><span>${escapeHtml(formatNumber(metrics.pending_invoices ?? 0))}</span></div>
+              </div>
+              ${settings.database?.error ? `<div class="alert alert-warning mb-0 small">${escapeHtml(settings.database.error)}</div>` : ''}
+            </div>
+          </div>
+        </div>
+        <div class="col-xl-4">
+          <div class="card shadow-sm h-100">
+            <div class="card-body d-flex flex-column gap-3">
+              <div>
+                <h5 class="card-title mb-1">Seguridad &amp; ingestas</h5>
+                <p class="text-muted small mb-0">Claves utilizadas para la comunicación con ZKTeco y servicios externos.</p>
+              </div>
+              <div class="settings-list">
+                <div class="settings-list-item"><span>Token de ingesta</span><span>${escapeHtml(settings.security?.ingest_key ?? 'No configurado')}</span></div>
+              </div>
+              <small class="text-muted">Las credenciales se leen desde <code>backend/.env</code>.</small>
+            </div>
+          </div>
+        </div>
+        <div class="col-xl-4 col-lg-6">
+          <div class="card shadow-sm h-100">
+            <div class="card-body d-flex flex-column gap-3">
+              <div>
+                <h5 class="card-title mb-1">Facturación automática</h5>
+                <p class="text-muted small mb-0">Define la tarifa por hora para aplicar cobros automáticos en las facturas.</p>
+              </div>
+              <form id="hourlyRateForm" class="d-flex flex-column gap-3" autocomplete="off" novalidate>
+                <div>
+                  <label for="hourlyRateInput" class="form-label small mb-1">Tarifa por hora (GTQ)</label>
+                  <div class="input-group input-group-sm">
+                    <span class="input-group-text">Q</span>
+                    <input type="number" step="0.01" min="0" class="form-control" id="hourlyRateInput" value="${escapeHtml(hourlyRateValue)}" placeholder="0.00" />
+                  </div>
+                  <small class="text-muted d-block mt-1">Se aplicará automáticamente a los tickets facturados por hora.</small>
+                </div>
+                <div class="d-flex gap-2">
+                  <button type="submit" class="btn btn-primary btn-sm" id="hourlyRateSave">Guardar</button>
+                  <button type="button" class="btn btn-outline-secondary btn-sm" id="hourlyRateClear">Limpiar</button>
+                </div>
+                <div class="alert alert-success py-2 px-3 small mb-0 d-none" id="hourlyRateFeedback">Tarifa actualizada correctamente.</div>
+              </form>
+            </div>
+          </div>
+        </div>
+        <div class="col-12">
+          <div class="card shadow-sm">
+            <div class="card-body d-flex flex-column gap-3">
+              <div>
+                <h5 class="card-title mb-1">Integraciones activas</h5>
+                <p class="text-muted small mb-0">Estado actual de cada conector configurado.</p>
+              </div>
+              <ul class="integration-list">${integrationList}</ul>
+            </div>
+          </div>
+        </div>
+        <div class="col-12">
+          <div class="card shadow-sm">
+            <div class="card-body d-flex flex-column gap-3">
+              <div class="d-flex align-items-start justify-content-between gap-2">
+                <div>
+                  <h5 class="card-title mb-1">Actividad de sincronización</h5>
+                  <p class="text-muted small mb-0">Resumen generado ${escapeHtml(formatRelativeTime(settings.generated_at) || 'hace instantes')}.</p>
+                </div>
+                <button class="btn btn-outline-primary btn-sm" id="settingsReload">Actualizar</button>
+              </div>
+              <div class="timeline" id="settingsTimeline">${buildTimeline(settings.activity)}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    const reload = document.getElementById('settingsReload');
+    if (reload) {
+      reload.addEventListener('click', () => {
+        reload.classList.add('is-loading');
+        reload.disabled = true;
+        renderSettings();
+      });
+    }
+
+    const hourlyForm = document.getElementById('hourlyRateForm');
+    const hourlyInput = document.getElementById('hourlyRateInput');
+    const hourlyFeedback = document.getElementById('hourlyRateFeedback');
+    const hourlyClear = document.getElementById('hourlyRateClear');
+    const hourlySave = document.getElementById('hourlyRateSave');
+    if (hourlyForm && hourlyInput) {
+      hourlyInput.addEventListener('input', () => {
+        if (hourlyFeedback) hourlyFeedback.classList.add('d-none');
+      });
+
+      if (hourlyClear) {
+        hourlyClear.addEventListener('click', (event) => {
+          event.preventDefault();
+          hourlyInput.value = '';
+          if (hourlyFeedback) hourlyFeedback.classList.add('d-none');
+        });
+      }
+
+      hourlyForm.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const rawValue = hourlyInput.value.trim();
+        const body = rawValue === '' ? { hourly_rate: null } : { hourly_rate: rawValue };
+        if (hourlySave) {
+          hourlySave.disabled = true;
+          hourlySave.classList.add('is-loading');
+        }
+        if (hourlyFeedback) hourlyFeedback.classList.add('d-none');
+        try {
+          await fetchJSON(api('settings/hourly-rate'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          const refreshed = await loadSettings(true);
+          const refreshedRate = refreshed?.billing?.hourly_rate ?? null;
+          hourlyInput.value = refreshedRate !== null && refreshedRate !== undefined && refreshedRate !== ''
+            ? Number(refreshedRate).toFixed(2)
+            : '';
+          if (hourlyFeedback) {
+            hourlyFeedback.textContent = hourlyInput.value
+              ? 'Tarifa actualizada correctamente.'
+              : 'Tarifa eliminada. Configura un valor para habilitar el cálculo automático.';
+            hourlyFeedback.classList.remove('d-none');
+          }
+        } catch (error) {
+          alert('No se pudo guardar la tarifa: ' + error.message);
+        } finally {
+          if (hourlySave) {
+            hourlySave.classList.remove('is-loading');
+            hourlySave.disabled = false;
+          }
+        }
+      });
+    }
   }
 
   const renderers = { dashboard: renderDashboard, invoices: renderInvoices, reports: renderReports, settings: renderSettings };
 
-  function initNav() {
-    const links = document.querySelectorAll('[data-page]');
-    links.forEach(link => {
-      link.addEventListener('click', (e) => {
-        e.preventDefault();
-        const page = link.getAttribute('data-page');
-        setActive(link);
-        (renderers[page] || renderDashboard)();
-      });
+  async function goToPage(page, { force = false } = {}) {
+    const target = renderers[page] ? page : 'dashboard';
+
+    if (!force && target === currentPage) {
+      const activeLink = document.querySelector(`.nav-link[data-page="${target}"]`);
+      if (activeLink) {
+        setActive(activeLink);
+      }
+      return;
+    }
+
+    const requestId = ++renderGeneration;
+    const link = document.querySelector(`.nav-link[data-page="${target}"]`);
+    if (link) {
+      setActive(link);
+      link.setAttribute('aria-current', 'page');
+    }
+    sidebarLinks.forEach((item) => {
+      if (item !== link) {
+        item.removeAttribute('aria-current');
+      }
     });
-    // Activa la que tenga .active o dashboard por defecto
-    const initial = document.querySelector('.nav-link.active[data-page]') || document.querySelector('[data-page="dashboard"]');
-    if (initial) { setActive(initial); (renderers[initial.getAttribute('data-page')] || renderDashboard)(); }
-    else { renderDashboard(); }
+
+    const renderer = renderers[target] || renderDashboard;
+    try {
+      await renderer();
+    } catch (error) {
+      console.error('Error al renderizar la vista', error);
+    } finally {
+      if (renderGeneration === requestId) {
+        currentPage = target;
+      }
+    }
   }
 
-  
+  function initNav() {
+    sidebarLinks.forEach((link) => {
+      link.addEventListener('click', (event) => {
+        event.preventDefault();
+        const page = link.getAttribute('data-page');
+        if (page) {
+          void goToPage(page);
+        }
+      });
+    });
+
+    document.addEventListener('click', (event) => {
+      const control = event.target.closest('[data-go-page]');
+      if (!control) return;
+      const page = control.getAttribute('data-go-page');
+      if (!page) return;
+      event.preventDefault();
+      void goToPage(page);
+    });
+
+    const initialLink = document.querySelector('.nav-link.active[data-page]') || sidebarLinks[0];
+    const initialPage = initialLink?.getAttribute('data-page') || 'dashboard';
+    void goToPage(initialPage, { force: true });
+  }
 
   initNav();
 })();

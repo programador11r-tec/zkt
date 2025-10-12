@@ -91,6 +91,7 @@
   function setActive(link) {
     document.querySelectorAll('.nav-link').forEach(a => a.classList.remove('active'));
     link.classList.add('active');
+    closeSidebar();
   }
 
   async function fetchJSON(url, opts) {

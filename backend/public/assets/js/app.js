@@ -1926,6 +1926,31 @@
 
     app.innerHTML = `
       <div class="row g-4">
+      <div class="col-xl-4 col-lg-6">
+          <div class="card shadow-sm h-100">
+            <div class="card-body d-flex flex-column gap-3">
+              <div>
+                <h5 class="card-title mb-1">Facturación automática</h5>
+                <p class="text-muted small mb-0">Define la tarifa por hora para aplicar cobros automáticos en las facturas.</p>
+              </div>
+              <form id="hourlyRateForm" class="d-flex flex-column gap-3" autocomplete="off" novalidate>
+                <div>
+                  <label for="hourlyRateInput" class="form-label small mb-1">Tarifa por hora (GTQ)</label>
+                  <div class="input-group input-group-sm">
+                    <span class="input-group-text">Q</span>
+                    <input type="number" step="0.01" min="0" class="form-control" id="hourlyRateInput" value="${escapeHtml(hourlyRateValue)}" placeholder="0.00" />
+                  </div>
+                  <small class="text-muted d-block mt-1">Se aplicará automáticamente a los tickets facturados por hora.</small>
+                </div>
+                <div class="d-flex gap-2">
+                  <button type="submit" class="btn btn-primary btn-sm" id="hourlyRateSave">Guardar</button>
+                  <button type="button" class="btn btn-outline-secondary btn-sm" id="hourlyRateClear">Limpiar</button>
+                </div>
+                <div class="alert alert-success py-2 px-3 small mb-0 d-none" id="hourlyRateFeedback">Tarifa actualizada correctamente.</div>
+              </form>
+            </div>
+          </div>
+        </div>
         <div class="col-xl-4 col-lg-6">
           <div class="card shadow-sm h-100">
             <div class="card-body d-flex flex-column gap-3">
@@ -1967,45 +1992,6 @@
                 <div class="settings-list-item"><span>Pendientes FEL</span><span>${escapeHtml(formatNumber(metrics.pending_invoices ?? 0))}</span></div>
               </div>
               ${settings.database?.error ? `<div class="alert alert-warning mb-0 small">${escapeHtml(settings.database.error)}</div>` : ''}
-            </div>
-          </div>
-        </div>
-        <div class="col-xl-4">
-          <div class="card shadow-sm h-100">
-            <div class="card-body d-flex flex-column gap-3">
-              <div>
-                <h5 class="card-title mb-1">Seguridad &amp; ingestas</h5>
-                <p class="text-muted small mb-0">Claves utilizadas para la comunicación con ZKTeco y servicios externos.</p>
-              </div>
-              <div class="settings-list">
-                <div class="settings-list-item"><span>Token de ingesta</span><span>${escapeHtml(settings.security?.ingest_key ?? 'No configurado')}</span></div>
-              </div>
-              <small class="text-muted">Las credenciales se leen desde <code>backend/.env</code>.</small>
-            </div>
-          </div>
-        </div>
-        <div class="col-xl-4 col-lg-6">
-          <div class="card shadow-sm h-100">
-            <div class="card-body d-flex flex-column gap-3">
-              <div>
-                <h5 class="card-title mb-1">Facturación automática</h5>
-                <p class="text-muted small mb-0">Define la tarifa por hora para aplicar cobros automáticos en las facturas.</p>
-              </div>
-              <form id="hourlyRateForm" class="d-flex flex-column gap-3" autocomplete="off" novalidate>
-                <div>
-                  <label for="hourlyRateInput" class="form-label small mb-1">Tarifa por hora (GTQ)</label>
-                  <div class="input-group input-group-sm">
-                    <span class="input-group-text">Q</span>
-                    <input type="number" step="0.01" min="0" class="form-control" id="hourlyRateInput" value="${escapeHtml(hourlyRateValue)}" placeholder="0.00" />
-                  </div>
-                  <small class="text-muted d-block mt-1">Se aplicará automáticamente a los tickets facturados por hora.</small>
-                </div>
-                <div class="d-flex gap-2">
-                  <button type="submit" class="btn btn-primary btn-sm" id="hourlyRateSave">Guardar</button>
-                  <button type="button" class="btn btn-outline-secondary btn-sm" id="hourlyRateClear">Limpiar</button>
-                </div>
-                <div class="alert alert-success py-2 px-3 small mb-0 d-none" id="hourlyRateFeedback">Tarifa actualizada correctamente.</div>
-              </form>
             </div>
           </div>
         </div>

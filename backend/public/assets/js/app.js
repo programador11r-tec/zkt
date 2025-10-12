@@ -34,6 +34,9 @@
   async function renderDashboard() {
     try {
       const { data } = await fetchJSON(api('tickets'));
+      const state = { search: '', page: 1 };
+      const pageSize = 20;
+
       app.innerHTML = `
         <div class="row g-4">
           <div class="col-md-4">
@@ -47,26 +50,107 @@
           </div>
           <div class="col-md-8">
             <div class="card shadow-sm">
-              <div class="card-body">
-                <h5 class="card-title">Listado</h5>
+              <div class="card-body d-flex flex-column gap-3">
+                <div class="d-flex flex-wrap gap-2 align-items-center justify-content-between">
+                  <h5 class="card-title mb-0">Listado</h5>
+                  <div class="ms-auto" style="max-width: 240px;">
+                    <input type="search" id="dashSearch" class="form-control form-control-sm" placeholder="Buscar..." aria-label="Buscar asistencia" />
+                  </div>
+                </div>
                 <div class="table-responsive">
-                  <table class="table table-sm align-middle">
+                  <table class="table table-sm align-middle mb-0">
                     <thead><tr><th>#</th><th>Nombre</th><th>Entrada</th><th>Salida</th></tr></thead>
-                    <tbody>
-                      ${data.map((r,i)=>`
-                        <tr>
-                          <td>${i+1}</td>
-                          <td>${r.name}</td>
-                          <td>${r.checkIn || '-'}</td>
-                          <td>${r.checkOut || '-'}</td>
-                        </tr>`).join('')}
-                    </tbody>
+                    <tbody id="dashBody"></tbody>
                   </table>
+                </div>
+                <div class="d-flex flex-wrap gap-2 align-items-center justify-content-between">
+                  <small class="text-muted" id="dashMeta"></small>
+                  <div class="btn-group btn-group-sm" role="group" aria-label="Paginación de asistencias">
+                    <button type="button" class="btn btn-outline-secondary" id="dashPrev">Anterior</button>
+                    <button type="button" class="btn btn-outline-secondary" id="dashNext">Siguiente</button>
+                  </div>
                 </div>
               </div>
             </div>
           </div>
         </div>`;
+
+      const tbody = document.getElementById('dashBody');
+      const meta = document.getElementById('dashMeta');
+      const searchInput = document.getElementById('dashSearch');
+      const prevBtn = document.getElementById('dashPrev');
+      const nextBtn = document.getElementById('dashNext');
+
+      function filterData() {
+        if (!state.search) return data;
+        const term = state.search.toLowerCase();
+        return data.filter((row) =>
+          Object.values(row).some((value) => String(value ?? '').toLowerCase().includes(term))
+        );
+      }
+
+      function renderTable() {
+        const filtered = filterData();
+        const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+        if (state.page > totalPages) {
+          state.page = totalPages;
+        }
+        const start = (state.page - 1) * pageSize;
+        const pageItems = filtered.slice(start, start + pageSize);
+
+        if (pageItems.length) {
+          tbody.innerHTML = pageItems
+            .map((row, index) => `
+              <tr>
+                <td>${start + index + 1}</td>
+                <td>${row.name}</td>
+                <td>${row.checkIn || '-'}</td>
+                <td>${row.checkOut || '-'}</td>
+              </tr>
+            `)
+            .join('');
+        } else {
+          tbody.innerHTML = `
+            <tr>
+              <td colspan="4" class="text-center text-muted">${data.length ? 'No se encontraron resultados' : 'Sin registros disponibles'}</td>
+            </tr>
+          `;
+        }
+
+        if (filtered.length) {
+          meta.textContent = `Mostrando ${start + 1} - ${Math.min(start + pageItems.length, filtered.length)} de ${filtered.length} registros`;
+        } else if (data.length) {
+          meta.textContent = 'No se encontraron resultados para la búsqueda actual';
+        } else {
+          meta.textContent = 'Sin registros para mostrar';
+        }
+
+        prevBtn.disabled = state.page <= 1;
+        nextBtn.disabled = state.page >= totalPages;
+      }
+
+      searchInput.addEventListener('input', (event) => {
+        state.search = event.target.value.trim();
+        state.page = 1;
+        renderTable();
+      });
+
+      prevBtn.addEventListener('click', () => {
+        if (state.page > 1) {
+          state.page -= 1;
+          renderTable();
+        }
+      });
+
+      nextBtn.addEventListener('click', () => {
+        const totalPages = Math.max(1, Math.ceil(filterData().length / pageSize));
+        if (state.page < totalPages) {
+          state.page += 1;
+          renderTable();
+        }
+      });
+
+      renderTable();
     } catch (e) {
       app.innerHTML = `
         <div class="alert alert-danger">
@@ -78,13 +162,19 @@
 
   // ===== Facturación (tabla + Facturar) =====
   async function renderInvoices() {
-    const today = new Date().toISOString().slice(0,10);
     app.innerHTML = `
       <div class='card p-3'>
-        <h5 class="mb-3">Facturación (BD → G4S)</h5>
-        <p class="text-muted small">Lista tickets <strong>CLOSED</strong> con pagos (o monto) y <strong>sin factura</strong>.</p>
+        <div class="d-flex flex-wrap align-items-center gap-3 mb-3">
+          <div>
+            <h5 class="mb-1">Facturación (BD → G4S)</h5>
+            <p class="text-muted small mb-0">Lista tickets <strong>CLOSED</strong> con pagos (o monto) y <strong>sin factura</strong>.</p>
+          </div>
+          <div class="ms-auto" style="max-width: 260px;">
+            <input type="search" id="invSearch" class="form-control form-control-sm" placeholder="Buscar ticket..." aria-label="Buscar ticket pendiente" />
+          </div>
+        </div>
         <div class="table-responsive">
-          <table class="table table-sm align-middle">
+          <table class="table table-sm align-middle mb-0">
             <thead class="table-light">
               <tr>
                 <th>Ticket</th>
@@ -99,72 +189,147 @@
             </tbody>
           </table>
         </div>
+        <div class="d-flex flex-wrap gap-2 align-items-center justify-content-between mt-3">
+          <small class="text-muted" id="invMeta"></small>
+          <div class="btn-group btn-group-sm" role="group" aria-label="Paginación de facturas">
+            <button type="button" class="btn btn-outline-secondary" id="invPrev">Anterior</button>
+            <button type="button" class="btn btn-outline-secondary" id="invNext">Siguiente</button>
+          </div>
+        </div>
       </div>
     `;
 
-    const renderRows = (rows=[]) => {
-      const tbody = document.getElementById('invRows');
-      if (!rows.length) {
-        tbody.innerHTML = `<tr><td colspan="5" class="text-muted">No hay pendientes por facturar.</td></tr>`;
-        return;
-      }
-      tbody.innerHTML = rows.map(d => {
-        const totalFmt = (d.total != null) ? Number(d.total).toLocaleString('es-GT', {style:'currency', currency:'GTQ'}) : '';
-        const payload = encodeURIComponent(JSON.stringify({
-          ticket_no: d.ticket_no,
-          receptor_nit: d.receptor || 'CF', // ajusta si guardas NIT en BD
-          serie: d.serie || 'A',
-          numero: d.numero || null
-        }));
-        const disabled = d.uuid ? 'disabled' : '';
-        return `
-          <tr>
-            <td>${d.ticket_no}</td>
-            <td>${d.fecha ?? ''}</td>
-            <td class="text-end">${totalFmt}</td>
-            <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;">${d.uuid ?? ''}</td>
-            <td class="text-center">
-              <button class="btn btn-sm btn-outline-success" data-action="invoice" data-payload="${payload}" ${disabled}>
-                Facturar
-              </button>
-            </td>
-          </tr>`;
-      }).join('');
+    const tbody = document.getElementById('invRows');
+    const searchInput = document.getElementById('invSearch');
+    const meta = document.getElementById('invMeta');
+    const prevBtn = document.getElementById('invPrev');
+    const nextBtn = document.getElementById('invNext');
 
-      document.querySelectorAll('#invRows [data-action="invoice"]').forEach(btn => {
-        btn.addEventListener('click', async () => {
-          const payload = JSON.parse(decodeURIComponent(btn.getAttribute('data-payload')));
-          btn.disabled = true; btn.textContent = 'Enviando…';
-          try {
-            const js = await fetchJSON(api('fel/invoice'), {
-              method: 'POST',
-              headers: {'Content-Type':'application/json'},
-              body: JSON.stringify(payload)
-            });
-            alert(`OK: UUID ${js.uuid || '(verifique respuesta)'}`);
-            // refrescar la lista
-            loadList();
-          } catch (e) {
-            alert('Error al facturar: ' + e.message);
-          } finally {
-            btn.disabled = false; btn.textContent = 'Facturar';
-          }
+    const state = { search: '', page: 1 };
+    const pageSize = 20;
+    let allRows = [];
+
+    function filterRows() {
+      if (!state.search) return allRows;
+      const term = state.search.toLowerCase();
+      return allRows.filter((row) =>
+        Object.values(row).some((value) => String(value ?? '').toLowerCase().includes(term))
+      );
+    }
+
+    function renderPage() {
+      const filtered = filterRows();
+      const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+      if (state.page > totalPages) {
+        state.page = totalPages;
+      }
+
+      const start = (state.page - 1) * pageSize;
+      const pageRows = filtered.slice(start, start + pageSize);
+
+      if (!pageRows.length) {
+        const message = allRows.length && !filtered.length
+          ? 'No se encontraron resultados'
+          : 'No hay pendientes por facturar.';
+        tbody.innerHTML = `<tr><td colspan="5" class="text-muted">${message}</td></tr>`;
+      } else {
+        tbody.innerHTML = pageRows.map((d, index) => {
+          const totalFmt = (d.total != null)
+            ? Number(d.total).toLocaleString('es-GT', { style: 'currency', currency: 'GTQ' })
+            : '';
+          const payload = encodeURIComponent(JSON.stringify({
+            ticket_no: d.ticket_no,
+            receptor_nit: d.receptor || 'CF',
+            serie: d.serie || 'A',
+            numero: d.numero || null
+          }));
+          const disabled = d.uuid ? 'disabled' : '';
+          return `
+            <tr>
+              <td>${d.ticket_no}</td>
+              <td>${d.fecha ?? ''}</td>
+              <td class="text-end">${totalFmt}</td>
+              <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;">${d.uuid ?? ''}</td>
+              <td class="text-center">
+                <button class="btn btn-sm btn-outline-success" data-action="invoice" data-payload="${payload}" ${disabled}>
+                  Facturar
+                </button>
+              </td>
+            </tr>`;
+        }).join('');
+
+        tbody.querySelectorAll('[data-action="invoice"]').forEach((btn) => {
+          btn.addEventListener('click', async () => {
+            const payload = JSON.parse(decodeURIComponent(btn.getAttribute('data-payload')));
+            btn.disabled = true;
+            const originalText = btn.textContent;
+            btn.textContent = 'Enviando…';
+            try {
+              const js = await fetchJSON(api('fel/invoice'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+              });
+              alert(`OK: UUID ${js.uuid || '(verifique respuesta)'}`);
+              loadList();
+            } catch (e) {
+              alert('Error al facturar: ' + e.message);
+            } finally {
+              btn.disabled = false;
+              btn.textContent = originalText;
+            }
+          });
         });
-      });
-    };
+      }
+
+      if (filtered.length) {
+        meta.textContent = `Mostrando ${start + 1} - ${Math.min(start + pageRows.length, filtered.length)} de ${filtered.length} tickets`;
+      } else if (allRows.length) {
+        meta.textContent = 'No se encontraron resultados para la búsqueda actual';
+      } else {
+        meta.textContent = 'Sin tickets pendientes por facturar';
+      }
+
+      prevBtn.disabled = state.page <= 1 || !filtered.length;
+      nextBtn.disabled = state.page >= totalPages || !filtered.length;
+    }
+
+    searchInput.addEventListener('input', (event) => {
+      state.search = event.target.value.trim();
+      state.page = 1;
+      renderPage();
+    });
+
+    prevBtn.addEventListener('click', () => {
+      if (state.page > 1) {
+        state.page -= 1;
+        renderPage();
+      }
+    });
+
+    nextBtn.addEventListener('click', () => {
+      const totalPages = Math.max(1, Math.ceil(filterRows().length / pageSize));
+      if (state.page < totalPages) {
+        state.page += 1;
+        renderPage();
+      }
+    });
 
     async function loadList() {
-      const tbody = document.getElementById('invRows');
       tbody.innerHTML = `<tr><td colspan="5" class="text-muted">Consultando BD…</td></tr>`;
+      meta.textContent = '';
       try {
         const js = await fetchJSON(api('facturacion/list'));
-        renderRows(js.rows || []);
+        if (!js.ok && js.error) throw new Error(js.error);
+        allRows = js.rows || [];
+        state.page = 1;
+        renderPage();
       } catch (e) {
         tbody.innerHTML = `<tr><td colspan="5" class="text-danger">Error: ${e.message}</td></tr>`;
+        meta.textContent = '';
       }
     }
 
-    // Carga inicial
     loadList();
   }
 

@@ -13,40 +13,127 @@
 
   async function renderDashboard() {
     const { data } = await fetchJSON('/api/dummy/attendance');
+    const state = { search: '', page: 1 };
+    const pageSize = 20;
+
     app.innerHTML = `
       <div class="row g-4">
         <div class="col-md-4">
           <div class="card shadow-sm">
             <div class="card-body">
               <h5 class="card-title">Asistencias de hoy</h5>
-              <p class="display-6 mb-0">${data.length}</p>
+              <p class="display-6 mb-0" id="attendanceTotal">${data.length}</p>
               <span class="badge badge-soft mt-2">Dummy</span>
             </div>
           </div>
         </div>
         <div class="col-md-8">
           <div class="card shadow-sm">
-            <div class="card-body">
-              <h5 class="card-title">Listado</h5>
+            <div class="card-body d-flex flex-column gap-3">
+              <div class="d-flex flex-wrap gap-2 align-items-center justify-content-between">
+                <h5 class="card-title mb-0">Listado</h5>
+                <div class="ms-auto" style="max-width: 240px;">
+                  <input type="search" id="attendanceSearch" class="form-control form-control-sm" placeholder="Buscar..." aria-label="Buscar asistencia" />
+                </div>
+              </div>
               <div class="table-responsive">
-                <table class="table table-sm align-middle">
+                <table class="table table-sm align-middle mb-0">
                   <thead><tr><th>#</th><th>Nombre</th><th>Entrada</th><th>Salida</th></tr></thead>
-                  <tbody>
-                    ${data.map((r,i)=>`
-                      <tr>
-                        <td>${i+1}</td>
-                        <td>${r.name}</td>
-                        <td>${r.checkIn}</td>
-                        <td>${r.checkOut}</td>
-                      </tr>`).join('')}
-                  </tbody>
+                  <tbody id="attendanceBody"></tbody>
                 </table>
+              </div>
+              <div class="d-flex flex-wrap gap-2 align-items-center justify-content-between">
+                <small class="text-muted" id="attendanceMeta"></small>
+                <div class="btn-group btn-group-sm" role="group" aria-label="Paginación de asistencias">
+                  <button type="button" class="btn btn-outline-secondary" id="attendancePrev">Anterior</button>
+                  <button type="button" class="btn btn-outline-secondary" id="attendanceNext">Siguiente</button>
+                </div>
               </div>
             </div>
           </div>
         </div>
       </div>
     `;
+
+    const tbody = document.getElementById('attendanceBody');
+    const meta = document.getElementById('attendanceMeta');
+    const searchInput = document.getElementById('attendanceSearch');
+    const prevBtn = document.getElementById('attendancePrev');
+    const nextBtn = document.getElementById('attendanceNext');
+
+    function filterData() {
+      if (!state.search) return data;
+      const term = state.search.toLowerCase();
+      return data.filter((row) =>
+        Object.values(row).some((value) => String(value ?? '').toLowerCase().includes(term))
+      );
+    }
+
+    function renderTable() {
+      const filtered = filterData();
+      const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+      if (state.page > totalPages) {
+        state.page = totalPages;
+      }
+      const start = (state.page - 1) * pageSize;
+      const pageItems = filtered.slice(start, start + pageSize);
+
+      if (pageItems.length) {
+        tbody.innerHTML = pageItems
+          .map((row, index) => `
+            <tr>
+              <td>${start + index + 1}</td>
+              <td>${row.name}</td>
+              <td>${row.checkIn}</td>
+              <td>${row.checkOut}</td>
+            </tr>
+          `)
+          .join('');
+      } else {
+        const message = data.length && !filtered.length
+          ? 'No se encontraron resultados'
+          : 'Sin registros disponibles';
+        tbody.innerHTML = `
+          <tr>
+            <td colspan="4" class="text-center text-muted">${message}</td>
+          </tr>
+        `;
+      }
+
+      if (filtered.length) {
+        meta.textContent = `Mostrando ${start + 1} - ${Math.min(start + pageItems.length, filtered.length)} de ${filtered.length} registros`;
+      } else if (data.length) {
+        meta.textContent = 'No se encontraron resultados para la búsqueda actual';
+      } else {
+        meta.textContent = 'Sin registros para mostrar';
+      }
+
+      prevBtn.disabled = state.page <= 1 || !filtered.length;
+      nextBtn.disabled = state.page >= totalPages || !filtered.length;
+    }
+
+    searchInput.addEventListener('input', (event) => {
+      state.search = event.target.value.trim();
+      state.page = 1;
+      renderTable();
+    });
+
+    prevBtn.addEventListener('click', () => {
+      if (state.page > 1) {
+        state.page -= 1;
+        renderTable();
+      }
+    });
+
+    nextBtn.addEventListener('click', () => {
+      const totalPages = Math.max(1, Math.ceil(filterData().length / pageSize));
+      if (state.page < totalPages) {
+        state.page += 1;
+        renderTable();
+      }
+    });
+
+    renderTable();
   }
 
   async function renderInvoices() {

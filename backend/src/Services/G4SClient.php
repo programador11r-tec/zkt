@@ -50,20 +50,22 @@ class G4SClient
     /* ====================== SecureTransaction helpers ====================== */
 
     public function requestTransaction(array $params): string{
-        $url    = $this->config->get('FEL_G4S_SOAP_URL');
+        $url    = $this->validateSoapUrl((string)$this->config->get('FEL_G4S_SOAP_URL'));
         $action = 'http://www.fact.com.mx/schema/ws/RequestTransaction';
 
         // Campos base (revisa .env)
-        $requestor = $this->config->get('FEL_G4S_REQUESTOR', '');       // GUID
-        $country   = $this->config->get('FEL_G4S_COUNTRY', 'GT');       // GT
-        $entity    = $this->config->get('FEL_G4S_ENTITY', '');          // 81491514
-        $user      = $this->config->get('FEL_G4S_USER', $requestor);    // GUID (usa el mismo del requestor)
-        $username  = $this->config->get('FEL_G4S_USERNAME', '');        // ADMINISTRADOR
+        $requestor = $this->validateGuid((string)$this->config->get('FEL_G4S_REQUESTOR', ''), 'FEL_G4S_REQUESTOR');
+        $country   = $this->validateCountry((string)$this->config->get('FEL_G4S_COUNTRY', 'GT'));
+        $entity    = $this->validateEntity((string)$this->config->get('FEL_G4S_ENTITY', ''));
+        $user      = $this->validateGuid((string)$this->config->get('FEL_G4S_USER', $requestor), 'FEL_G4S_USER');
+        $username  = $this->requireNonEmpty((string)$this->config->get('FEL_G4S_USERNAME', ''), 'FEL_G4S_USERNAME');
 
-        $transaction = $params['Transaction'] ?? 'BASE';
-        $data1       = $params['Data1'] ?? '';
-        $data2       = $params['Data2'] ?? '';
-        $data3       = $params['Data3'] ?? (string)$this->config->get('FEL_G4S_MODE', '');
+        $transaction = $this->normalizeTransaction($params['Transaction'] ?? 'BASE');
+        $data1       = (string)($params['Data1'] ?? '');
+        $data2       = trim((string)($params['Data2'] ?? ''));
+        $data3       = strtoupper(trim((string)($params['Data3'] ?? (string)$this->config->get('FEL_G4S_MODE', ''))));
+
+        $this->validateTransactionPayload($transaction, $data1, $data2, $data3);
 
         // Sobre SOAP 1.1 literal, tal cual WSDL (sin prefijos propios)
         $soapBody = <<<XML
@@ -128,8 +130,13 @@ class G4SClient
     }
 
     private function callSecureTransaction(string $dataExchange): string{
-        $url    = $this->config->get('FEL_G4S_SOAP_URL');
-        $entity = $this->config->get('FEL_G4S_ENTITY');
+        $url    = $this->validateSoapUrl((string)$this->config->get('FEL_G4S_SOAP_URL'));
+        $entity = $this->validateEntity((string)$this->config->get('FEL_G4S_ENTITY'));
+
+        $payload = trim($dataExchange);
+        if ($payload === '') {
+            throw new \InvalidArgumentException('El cuerpo DataExchange para SecureTransaction no puede estar vacío.');
+        }
 
         // --- SOAP 1.1 ---
         $soap11 = $this->buildSecureSoapEnvelope11($entity, $dataExchange);
@@ -167,6 +174,114 @@ class G4SClient
 
     private function xmlEscape(string $s): string{
         return htmlspecialchars($s, ENT_QUOTES | ENT_XML1, 'UTF-8');
+    }
+
+    private function validateSoapUrl(string $url): string
+    {
+        $trimmed = trim($url);
+        if ($trimmed === '') {
+            throw new \InvalidArgumentException('Config FEL_G4S_SOAP_URL requerida para comunicarse con G4S.');
+        }
+        if (!filter_var($trimmed, FILTER_VALIDATE_URL)) {
+            throw new \InvalidArgumentException('FEL_G4S_SOAP_URL debe ser una URL válida (por ejemplo https://pruebasfel.g4sdocumenta.com/webservicefront/factwsfront.asmx).');
+        }
+        return $trimmed;
+    }
+
+    private function normalizeTransaction(mixed $transaction): string
+    {
+        $value = strtoupper(trim((string)($transaction ?? '')));
+        if ($value === '') {
+            throw new \InvalidArgumentException('El campo Transaction es obligatorio para RequestTransaction.');
+        }
+        if (!preg_match('/^[A-Z0-9_]+$/', $value)) {
+            throw new \InvalidArgumentException('Transaction inválido. Debe coincidir con las constantes documentadas por G4S (por ejemplo TIMBRAR, GET_XML, GET_DOCUMENT).');
+        }
+        return $value;
+    }
+
+    private function validateTransactionPayload(string $transaction, string $data1, string $data2, string $data3): void
+    {
+        $needsData1 = [
+            'TIMBRAR',
+            'GET_XML',
+            'GET_DOCUMENT',
+            'GET_XML_AND_HTML',
+            'CANCEL_XML',
+            'CANCEL_XML_BY_INTERNAL_ID',
+            'MARK_XML_AS_PAID',
+            'MARK_XML_AS_UNPAID',
+        ];
+
+        if (in_array($transaction, $needsData1, true) && trim($data1) === '') {
+            throw new \InvalidArgumentException(sprintf('Data1 es obligatorio para la transacción %s según la especificación de RequestTransaction.', $transaction));
+        }
+
+        if ($transaction === 'TIMBRAR') {
+            $encode = strtolower((string)$this->config->get('FEL_G4S_DATAX_ENCODE', 'base64'));
+            if ($encode === 'base64') {
+                $normalized = preg_replace('/\s+/', '', $data1);
+                if ($normalized === '' || base64_decode($normalized, true) === false) {
+                    throw new \InvalidArgumentException('Data1 debe estar codificado en Base64 porque FEL_G4S_DATAX_ENCODE=base64.');
+                }
+            }
+            if ($data2 === '') {
+                throw new \InvalidArgumentException('Data2 (contraseña del firmante) es obligatorio para la transacción TIMBRAR.');
+            }
+            if ($data3 === '') {
+                throw new \InvalidArgumentException('Data3 (modo de operación TEST/PRODUCCION) es obligatorio para la transacción TIMBRAR. Configure FEL_G4S_MODE.');
+            }
+            if (!preg_match('/^[A-Z0-9_]+$/', $data3)) {
+                throw new \InvalidArgumentException('Data3 debe coincidir con un modo válido reconocido por G4S (por ejemplo TEST, PRODUCCION).');
+            }
+        }
+
+        if ($transaction === 'GET_DOCUMENT' && $data2 === '') {
+            throw new \InvalidArgumentException('Data2 (tipo de documento a recuperar, por ejemplo PDF) es obligatorio para GET_DOCUMENT.');
+        }
+    }
+
+    private function validateGuid(string $value, string $envKey): string
+    {
+        $trimmed = trim($value);
+        if ($trimmed === '') {
+            throw new \InvalidArgumentException(sprintf('Config %s requerida. Debe contener el GUID asignado por G4S.', $envKey));
+        }
+        $pattern = '/^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$/';
+        if (!preg_match($pattern, $trimmed)) {
+            throw new \InvalidArgumentException(sprintf('%s debe ser un GUID válido (formato 8-4-4-4-12). Valor recibido: %s', $envKey, $trimmed));
+        }
+        return strtoupper($trimmed);
+    }
+
+    private function validateCountry(string $value): string
+    {
+        $trimmed = strtoupper(trim($value ?: 'GT'));
+        if (!preg_match('/^[A-Z]{2}$/', $trimmed)) {
+            throw new \InvalidArgumentException('FEL_G4S_COUNTRY debe ser el código ISO de dos letras (por ejemplo GT).');
+        }
+        return $trimmed;
+    }
+
+    private function validateEntity(string $value): string
+    {
+        $trimmed = trim($value);
+        if ($trimmed === '') {
+            throw new \InvalidArgumentException('Config FEL_G4S_ENTITY requerida (NIT del emisor sin guiones).');
+        }
+        if (preg_match('/\s/', $trimmed)) {
+            throw new \InvalidArgumentException('FEL_G4S_ENTITY no debe contener espacios.');
+        }
+        return $trimmed;
+    }
+
+    private function requireNonEmpty(string $value, string $envKey): string
+    {
+        $trimmed = trim($value);
+        if ($trimmed === '') {
+            throw new \InvalidArgumentException(sprintf('Config %s es obligatoria para comunicarse con G4S.', $envKey));
+        }
+        return $trimmed;
     }
 
     private function postSoapRequest(string $url, string $body, string $headers, int $timeout, string $errorPrefix): string

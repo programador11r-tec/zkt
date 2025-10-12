@@ -5,6 +5,8 @@
   const sidebarBackdrop = document.getElementById('sidebarBackdrop');
   const sidebarLinks = sidebar ? Array.from(sidebar.querySelectorAll('.nav-link')) : [];
 
+  let sidebarCloseTimer = null;
+
   const syncSidebarAria = (open) => {
     if (sidebarToggle) {
       sidebarToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
@@ -21,11 +23,33 @@
   };
 
   const closeSidebar = () => {
+    if (sidebarCloseTimer) {
+      window.clearTimeout(sidebarCloseTimer);
+      sidebarCloseTimer = null;
+    }
+
+    if (!document.body.classList.contains('sidebar-open') && !document.body.classList.contains('sidebar-closing')) {
+      syncSidebarAria(false);
+      return;
+    }
+
     document.body.classList.remove('sidebar-open');
+    document.body.classList.add('sidebar-closing');
     syncSidebarAria(false);
+
+    sidebarCloseTimer = window.setTimeout(() => {
+      document.body.classList.remove('sidebar-closing');
+      sidebarCloseTimer = null;
+    }, 480);
   };
 
   const openSidebar = () => {
+    if (sidebarCloseTimer) {
+      window.clearTimeout(sidebarCloseTimer);
+      sidebarCloseTimer = null;
+    }
+
+    document.body.classList.remove('sidebar-closing');
     document.body.classList.add('sidebar-open');
     syncSidebarAria(true);
     if (sidebarLinks.length) {
@@ -37,7 +61,7 @@
   };
 
   const toggleSidebar = () => {
-    if (document.body.classList.contains('sidebar-open')) {
+    if (document.body.classList.contains('sidebar-open') || document.body.classList.contains('sidebar-closing')) {
       closeSidebar();
     } else {
       openSidebar();

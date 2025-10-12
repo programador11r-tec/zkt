@@ -1,79 +1,11 @@
 (() => {
   const app = document.getElementById('app');
   const sidebar = document.getElementById('appSidebar');
-  const sidebarToggle = document.getElementById('sidebarToggle');
-  const sidebarBackdrop = document.getElementById('sidebarBackdrop');
   const sidebarLinks = sidebar ? Array.from(sidebar.querySelectorAll('.nav-link')) : [];
 
-  const syncSidebarAria = (open) => {
-    if (sidebarToggle) {
-      sidebarToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
-      sidebarToggle.setAttribute('aria-label', open
-        ? 'Cerrar menú de navegación'
-        : 'Abrir menú de navegación');
-    }
-
-    if (sidebar) {
-      sidebar.setAttribute('aria-hidden', open ? 'false' : 'true');
-    }
-
-    if (sidebarBackdrop) {
-      sidebarBackdrop.setAttribute('aria-hidden', open ? 'false' : 'true');
-    }
-  };
-
-  const closeSidebar = () => {
-    if (!document.body.classList.contains('sidebar-open')) {
-      syncSidebarAria(false);
-      return;
-    }
-
-    document.body.classList.remove('sidebar-open');
-    syncSidebarAria(false);
-  };
-
-  const openSidebar = () => {
-    if (document.body.classList.contains('sidebar-open')) {
-      syncSidebarAria(true);
-      return;
-    }
-
-    document.body.classList.add('sidebar-open');
-    syncSidebarAria(true);
-    if (sidebarLinks.length) {
-      const [firstLink] = sidebarLinks;
-      window.setTimeout(() => {
-        try { firstLink.focus(); } catch (_) { /* noop */ }
-      }, 50);
-    }
-  };
-
-  const toggleSidebar = () => {
-    if (document.body.classList.contains('sidebar-open')) {
-      closeSidebar();
-    } else {
-      openSidebar();
-    }
-  };
-
-  if (sidebarToggle && sidebar) {
-    sidebarToggle.addEventListener('click', (event) => {
-      event.preventDefault();
-      toggleSidebar();
-    });
+  if (sidebar) {
+    sidebar.setAttribute('aria-hidden', 'false');
   }
-
-  if (sidebarBackdrop) {
-    sidebarBackdrop.addEventListener('click', closeSidebar);
-  }
-
-  document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape' && document.body.classList.contains('sidebar-open')) {
-      closeSidebar();
-    }
-  });
-
-  syncSidebarAria(document.body.classList.contains('sidebar-open'));
 
   // Detecta el directorio base (soporta /, /zkt/backend/public/, etc.)
   const base = (() => {

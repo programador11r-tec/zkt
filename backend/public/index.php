@@ -30,6 +30,7 @@ $router->get('/api/tickets', fn() => $api->getTicketsFromDB());
 // Facturación (desde BD + acciones)
 $router->get('/api/facturacion/list',     fn() => $api->facturacionList());
 $router->get('/api/facturacion/emitidas', fn() => $api->facturacionEmitidas());
+$router->get('/api/reports/tickets',      fn() => $api->reportsTickets());
 $router->post('/api/fel/invoice',         fn() => $api->invoiceOne());
 $router->get('/api/fel/pdf',              fn() => $api->felPdf());
 $router->get('/api/fel/xml',              fn() => $api->felXml());

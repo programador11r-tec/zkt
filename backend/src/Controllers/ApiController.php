@@ -602,6 +602,195 @@ class ApiController {
         }
     }
 
+    public function reportsTickets() {
+        try {
+            $pdo = \App\Utils\DB::pdo($this->config);
+
+            $status = strtoupper(trim((string)($_GET['status'] ?? 'ANY')));
+            if ($status === 'ALL') { $status = 'ANY'; }
+
+            $filters = [
+                'from' => $_GET['from'] ?? null,
+                'to' => $_GET['to'] ?? null,
+            ];
+
+            $sql = "
+                SELECT
+                    t.ticket_no,
+                    t.plate,
+                    t.receptor_nit,
+                    t.status,
+                    t.entry_at,
+                    t.exit_at,
+                    t.duration_min,
+                    COALESCE(SUM(p.amount), t.amount, 0)        AS total,
+                    COUNT(p.id)                                  AS payments_count,
+                    MIN(p.paid_at)                               AS first_payment_at,
+                    MAX(p.paid_at)                               AS last_payment_at
+                FROM tickets t
+                LEFT JOIN payments p ON p.ticket_no = t.ticket_no
+                WHERE 1=1
+            ";
+
+            $args = [];
+            if ($filters['from']) {
+                $sql .= " AND COALESCE(t.exit_at, t.entry_at) >= :from";
+                $args[':from'] = $filters['from'] . ' 00:00:00';
+            }
+            if ($filters['to']) {
+                $sql .= " AND COALESCE(t.exit_at, t.entry_at) <= :to";
+                $args[':to'] = $filters['to'] . ' 23:59:59';
+            }
+            if ($status !== 'ANY') {
+                $sql .= " AND t.status = :status";
+                $args[':status'] = $status;
+            }
+
+            $sql .= "
+                GROUP BY
+                    t.ticket_no,
+                    t.plate,
+                    t.receptor_nit,
+                    t.status,
+                    t.entry_at,
+                    t.exit_at,
+                    t.duration_min,
+                    t.amount
+                ORDER BY COALESCE(t.exit_at, t.entry_at) DESC, t.ticket_no DESC
+                LIMIT 1000
+            ";
+
+            $st = $pdo->prepare($sql);
+            $st->execute($args);
+            $rows = $st->fetchAll(\PDO::FETCH_ASSOC);
+
+            $plate = trim((string)($_GET['plate'] ?? ''));
+            $nitRaw = trim((string)($_GET['nit'] ?? ''));
+            $nitFilter = $nitRaw === '' ? '' : strtoupper($nitRaw);
+            $minTotal = isset($_GET['min_total']) && $_GET['min_total'] !== '' ? (float)$_GET['min_total'] : null;
+            $maxTotal = isset($_GET['max_total']) && $_GET['max_total'] !== '' ? (float)$_GET['max_total'] : null;
+
+            $rows = array_values(array_filter($rows, function ($row) use ($plate, $nitFilter, $minTotal, $maxTotal) {
+                if ($plate !== '' && stripos((string)($row['plate'] ?? ''), $plate) === false) {
+                    return false;
+                }
+                if ($nitFilter !== '') {
+                    $rowNit = strtoupper(trim((string)($row['receptor_nit'] ?? '')));
+                    if ($nitFilter === 'CF') {
+                        if ($rowNit !== '' && $rowNit !== 'CF') {
+                            return false;
+                        }
+                    } elseif ($rowNit !== $nitFilter) {
+                        return false;
+                    }
+                }
+                $amount = (float)($row['total'] ?? 0);
+                if ($minTotal !== null && $amount < $minTotal) {
+                    return false;
+                }
+                if ($maxTotal !== null && $amount > $maxTotal) {
+                    return false;
+                }
+                return true;
+            }));
+
+            if ($rows) {
+                $ticketNos = array_column($rows, 'ticket_no');
+                $placeholders = implode(',', array_fill(0, count($ticketNos), '?'));
+                $payStmt = $pdo->prepare("SELECT ticket_no, amount, method, paid_at FROM payments WHERE ticket_no IN ($placeholders) ORDER BY paid_at ASC");
+                $payStmt->execute($ticketNos);
+                $paymentMap = [];
+                while ($p = $payStmt->fetch(\PDO::FETCH_ASSOC)) {
+                    $ticket = $p['ticket_no'];
+                    if (!isset($paymentMap[$ticket])) {
+                        $paymentMap[$ticket] = [];
+                    }
+                    $paymentMap[$ticket][] = [
+                        'amount' => (float)($p['amount'] ?? 0),
+                        'method' => $p['method'] ?? null,
+                        'paid_at'=> $p['paid_at'] ?? null,
+                    ];
+                }
+            } else {
+                $paymentMap = [];
+            }
+
+            $totalTickets = count($rows);
+            $totalAmount = 0.0;
+            $withPayments = 0;
+            $statusBreakdown = [];
+            $totalMinutes = 0;
+            $countDuration = 0;
+
+            foreach ($rows as &$row) {
+                $amount = (float)($row['total'] ?? 0);
+                $totalAmount += $amount;
+
+                $row['payments'] = $paymentMap[$row['ticket_no']] ?? [];
+                $row['payments_count'] = count($row['payments']);
+                if ($row['payments_count'] > 0) {
+                    $withPayments++;
+                }
+
+                $statusKey = strtoupper((string)($row['status'] ?? 'DESCONOCIDO'));
+                if (!isset($statusBreakdown[$statusKey])) {
+                    $statusBreakdown[$statusKey] = 0;
+                }
+                $statusBreakdown[$statusKey]++;
+
+                $duration = $row['duration_min'];
+                if ($duration === null && !empty($row['entry_at']) && !empty($row['exit_at'])) {
+                    $entryTs = strtotime((string)$row['entry_at']);
+                    $exitTs = strtotime((string)$row['exit_at']);
+                    if ($entryTs && $exitTs && $exitTs >= $entryTs) {
+                        $duration = (int) floor(($exitTs - $entryTs) / 60);
+                    }
+                }
+                if ($duration !== null) {
+                    $duration = (int) $duration;
+                    if ($duration >= 0) {
+                        $totalMinutes += $duration;
+                        $countDuration++;
+                    }
+                }
+                $row['duration_min'] = $duration;
+
+                $row['total'] = round($amount, 2);
+            }
+            unset($row);
+
+            $averageAmount = $totalTickets > 0 ? round($totalAmount / $totalTickets, 2) : 0.0;
+            $averageMinutes = $countDuration > 0 ? (int) round($totalMinutes / $countDuration) : null;
+
+            \App\Utils\Http::json([
+                'ok' => true,
+                'generated_at' => date('c'),
+                'filters' => [
+                    'from' => $filters['from'],
+                    'to' => $filters['to'],
+                    'status' => $status !== 'ANY' ? $status : 'ANY',
+                    'plate' => $plate !== '' ? $plate : null,
+                    'nit' => $nitRaw !== '' ? $nitRaw : null,
+                    'min_total' => $minTotal,
+                    'max_total' => $maxTotal,
+                ],
+                'summary' => [
+                    'total_tickets' => $totalTickets,
+                    'total_amount' => round($totalAmount, 2),
+                    'average_amount' => $averageAmount,
+                    'with_payments' => $withPayments,
+                    'without_payments' => $totalTickets - $withPayments,
+                    'total_minutes' => $totalMinutes,
+                    'average_minutes' => $averageMinutes,
+                    'status_breakdown' => $statusBreakdown,
+                ],
+                'rows' => $rows,
+            ]);
+        } catch (\Throwable $e) {
+            \App\Utils\Http::json(['ok' => false, 'error' => $e->getMessage()], 500);
+        }
+    }
+
     public function facturacionEmitidas() {
         try {
             $pdo = \App\Utils\DB::pdo($this->config);

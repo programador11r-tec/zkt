@@ -22,6 +22,140 @@ class ApiController {
         Http::json(['ok' => true, 'time' => date('c')]);
     }
 
+    public function settingsOverview() {
+        $environment = strtolower((string) $this->config->get('APP_ENV', 'local'));
+        $label = match ($environment) {
+            'production', 'prod' => 'Producción',
+            'staging', 'pre', 'preprod', 'qa' => 'Preproducción',
+            'testing', 'test' => 'Pruebas',
+            'development', 'dev' => 'Desarrollo',
+            'local' => 'Local',
+            default => $environment ? ucfirst($environment) : 'Desconocido',
+        };
+
+        $settings = [
+            'generated_at' => date('c'),
+            'app' => [
+                'name' => $this->config->get('APP_NAME', 'Integración FEL'),
+                'environment' => $environment,
+                'environment_label' => $label,
+                'timezone' => date_default_timezone_get(),
+                'php_version' => PHP_VERSION,
+                'server' => php_uname('n') ?: php_uname('s'),
+                'generated_at' => date('c'),
+            ],
+            'integrations' => [
+                'zkteco' => [
+                    'label' => 'ZKTeco BioTime',
+                    'configured' => $this->isConfigured(['ZKTECO_BASE_URL', 'ZKTECO_APP_KEY', 'ZKTECO_APP_SECRET']),
+                    'base_url' => $this->config->get('ZKTECO_BASE_URL'),
+                    'app_key' => $this->mask($this->config->get('ZKTECO_APP_KEY'), 3),
+                ],
+                'g4s' => [
+                    'label' => 'G4S FEL',
+                    'configured' => $this->isConfigured(['FEL_G4S_SOAP_URL', 'FEL_G4S_REQUESTOR', 'FEL_G4S_USER', 'FEL_G4S_PASS']),
+                    'base_url' => $this->config->get('FEL_G4S_SOAP_URL'),
+                    'mode' => $this->config->get('FEL_G4S_MODE', 'REQUEST'),
+                    'requestor' => $this->mask($this->config->get('FEL_G4S_REQUESTOR'), 4),
+                ],
+            ],
+            'security' => [
+                'ingest_key' => $this->mask($this->config->get('INGEST_KEY'), 4),
+            ],
+        ];
+
+        $settings['database'] = [
+            'status' => 'offline',
+            'driver' => strtolower((string) $this->config->get('DB_CONNECTION', 'mysql')),
+            'host' => $this->config->get('DB_HOST', '127.0.0.1'),
+            'name' => $this->config->get('DB_DATABASE', 'zkt'),
+            'user' => $this->config->get('DB_USERNAME', 'root'),
+        ];
+
+        $activity = [];
+        try {
+            $pdo = DB::pdo($this->config);
+            $settings['database']['status'] = 'online';
+            $driver = $pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
+            if ($driver) {
+                $settings['database']['driver'] = $driver;
+            }
+
+            $fetchColumn = static function (PDO $pdo, string $sql) {
+                try {
+                    $stmt = $pdo->query($sql);
+                    return $stmt ? $stmt->fetchColumn() : null;
+                } catch (\Throwable $e) {
+                    return null;
+                }
+            };
+
+            $metrics = [
+                'tickets_total' => (int) ($fetchColumn($pdo, 'SELECT COUNT(*) FROM tickets') ?? 0),
+                'tickets_last_sync' => $fetchColumn($pdo, 'SELECT MAX(created_at) FROM tickets'),
+                'payments_total' => (int) ($fetchColumn($pdo, 'SELECT COUNT(*) FROM payments') ?? 0),
+                'payments_last_sync' => $fetchColumn($pdo, 'SELECT MAX(created_at) FROM payments'),
+                'invoices_total' => (int) ($fetchColumn($pdo, 'SELECT COUNT(*) FROM invoices') ?? 0),
+                'invoices_last_sync' => $fetchColumn($pdo, 'SELECT MAX(created_at) FROM invoices'),
+            ];
+
+            $pendingSql = "
+                SELECT COUNT(1)
+                FROM tickets t
+                WHERE t.status = 'CLOSED'
+                  AND EXISTS (SELECT 1 FROM payments p WHERE p.ticket_no = t.ticket_no)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM invoices i2
+                    WHERE i2.ticket_no = t.ticket_no
+                      AND i2.status IN ('PENDING','OK')
+                  )
+            ";
+            $metrics['pending_invoices'] = (int) ($fetchColumn($pdo, $pendingSql) ?? 0);
+
+            $settings['database']['metrics'] = $metrics;
+
+            if (!empty($metrics['tickets_last_sync'])) {
+                $activity[] = [
+                    'title' => 'Ticket sincronizado',
+                    'subtitle' => 'Registro más reciente almacenado en BD',
+                    'timestamp' => $metrics['tickets_last_sync'],
+                    'status' => 'online',
+                ];
+            }
+            if (!empty($metrics['payments_last_sync'])) {
+                $activity[] = [
+                    'title' => 'Pago registrado',
+                    'subtitle' => 'Último pago recibido desde ZKTeco',
+                    'timestamp' => $metrics['payments_last_sync'],
+                    'status' => 'online',
+                ];
+            }
+            if (!empty($metrics['invoices_last_sync'])) {
+                $activity[] = [
+                    'title' => 'Factura emitida',
+                    'subtitle' => 'Última certificación FEL registrada',
+                    'timestamp' => $metrics['invoices_last_sync'],
+                    'status' => 'online',
+                ];
+            }
+            if (($metrics['pending_invoices'] ?? 0) > 0) {
+                $activity[] = [
+                    'title' => 'Pendientes por facturar',
+                    'subtitle' => sprintf('%d tickets listos para certificarse', (int) $metrics['pending_invoices']),
+                    'timestamp' => date('c'),
+                    'status' => 'warning',
+                ];
+            }
+        } catch (\Throwable $e) {
+            $settings['database']['status'] = 'offline';
+            $settings['database']['error'] = $e->getMessage();
+        }
+
+        $settings['activity'] = $activity;
+
+        Http::json(['ok' => true, 'settings' => $settings]);
+    }
+
     public function simulateFelInvoice() {
         $body = Http::body();
         $invoice = $body['invoice'] ?? [
@@ -888,7 +1022,32 @@ class ApiController {
     }
 
 
+    private function mask($value, int $visible = 4): ?string {
+        if ($value === null) {
+            return null;
+        }
+        $value = (string) $value;
+        if ($value === '') {
+            return null;
+        }
+        $length = strlen($value);
+        if ($length <= $visible * 2) {
+            return str_repeat('•', max($length, 4));
+        }
+        return substr($value, 0, $visible)
+            . str_repeat('•', max(3, $length - ($visible * 2)))
+            . substr($value, -$visible);
+    }
 
+    private function isConfigured(array $keys): bool {
+        foreach ($keys as $key) {
+            $value = $this->config->get($key);
+            if ($value === null || trim((string) $value) === '') {
+                return false;
+            }
+        }
+        return true;
+    }
 }
 
     

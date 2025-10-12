@@ -18,7 +18,11 @@
         <span class="fw-semibold text-primary-600">ZKTeco ↔ G4S</span>
       </a>
       <div class="d-flex align-items-center gap-2">
-        <span class="badge env-badge">Local</span>
+        <button class="sidebar-toggle" type="button" id="sidebarToggle" aria-controls="appSidebar" aria-expanded="false" aria-label="Abrir menú de navegación">
+          <span class="sidebar-toggle-icon" aria-hidden="true"></span>
+          <span class="sidebar-toggle-text">Menú</span>
+        </button>
+        <span class="env-badge" id="envBadge" data-status="local">Local</span>
       </div>
     </div>
   </nav>
@@ -26,7 +30,7 @@
   <!-- Layout -->
   <div class="layout">
     <!-- Sidebar -->
-    <aside class="sidebar">
+    <aside class="sidebar" id="appSidebar" aria-hidden="true" aria-label="Menú principal">
       <div class="sidebar-inner">
         <div class="sidebar-header">
           <div class="text-muted small">Menú</div>
@@ -60,23 +64,46 @@
         </div>
       </div>
     </aside>
+    <div class="sidebar-backdrop" id="sidebarBackdrop" aria-hidden="true"></div>
 
     <!-- Content -->
     <main class="content">
       <!-- Hero header -->
       <section class="hero card shadow-sm">
-        <div class="card-body d-flex flex-wrap align-items-center justify-content-between gap-3">
-          <div>
-            <h1 class="h4 mb-1">Panel de Integración</h1>
-            <p class="text-muted mb-0">ZKTeco → Backend → FEL G4S → SAT</p>
+        <div class="card-body hero-body">
+          <div class="hero-text">
+            <span class="hero-eyebrow">Integración web centralizada</span>
+            <h1 class="h4 mb-2">Panel de Integración</h1>
+            <p class="text-muted mb-3" id="heroSubtitle" data-default="Monitorea sincronizaciones, genera facturas FEL y gestiona la operación desde una sola consola web.">Monitorea sincronizaciones, genera facturas FEL y gestiona la operación desde una sola consola web.</p>
+            <div class="hero-highlights">
+              <div class="hero-highlight">
+                <span class="hero-highlight-label">Último ticket</span>
+                <span class="hero-highlight-value" id="heroLastSync">—</span>
+                <span class="hero-highlight-foot" id="heroLastSyncRelative"></span>
+              </div>
+              <div class="hero-highlight">
+                <span class="hero-highlight-label">Facturas FEL</span>
+                <span class="hero-highlight-value" id="heroInvoicesTotal">—</span>
+                <span class="hero-highlight-foot" id="heroInvoicesLastSync"></span>
+              </div>
+              <div class="hero-highlight">
+                <span class="hero-highlight-label">Pendientes</span>
+                <span class="hero-highlight-chip" id="heroPendingInvoices" data-tone="neutral">Sin datos</span>
+                <span class="hero-highlight-detail" id="heroPendingDetail">Sincroniza para ver pendientes de certificación</span>
+              </div>
+            </div>
+            <small class="hero-generated text-muted" id="heroGeneratedAt">Configuración actualizada: —</small>
           </div>
-          <div class="d-flex gap-2">
-            <button id="refreshBtn" class="btn btn-primary btn-sm">
-              Actualizar
-            </button>
-            <a class="btn btn-outline-primary btn-sm" href="api/health" target="_blank" rel="noopener">
-              Comprobar API
-            </a>
+          <div class="hero-actions">
+            <div class="d-flex flex-wrap gap-2 hero-actions-row">
+              <button id="refreshBtn" class="btn btn-primary btn-sm">
+                Actualizar datos
+              </button>
+              <button class="btn btn-outline-primary btn-sm" type="button" data-go-page="reports">
+                Ver reportes
+              </button>
+            </div>
+            <small class="hero-hint text-muted">Sincroniza cuando quieras para revisar datos actualizados en segundos.</small>
           </div>
         </div>
       </section>
@@ -87,7 +114,7 @@
       <!-- Footer -->
       <footer class="page-footer">
         <div class="text-muted small">
-          © <span id="y"></span> Integración ANPR / FEL — Demo
+          © <span id="y"></span> Integración ANPR / FEL
         </div>
       </footer>
     </main>
@@ -109,10 +136,6 @@
       pill.classList.add('pill-bad');
     });
     // trigger refresh (re-render) si la vista lo implementa
-    document.getElementById('refreshBtn').addEventListener('click', () => {
-      const active = document.querySelector('.nav-link.active')?.getAttribute('data-page');
-      document.querySelector(`.nav-link[data-page="${active}"]`)?.click();
-    });
   </script>
 
   <script src="/assets/js/app.js"></script>

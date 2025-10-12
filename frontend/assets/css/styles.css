@@ -224,15 +224,19 @@ body.sidebar-open .sidebar-toggle-icon::after {
   margin: 0 auto;
   padding: 2rem var(--layout-padding) 3rem;
   display: grid;
-  grid-template-columns: 0 1fr;
+  grid-template-columns: 0 minmax(0, 1fr);
   gap: 0;
-  transition: grid-template-columns 0.3s ease, column-gap 0.3s ease, max-width 0.3s ease;
+  transition: grid-template-columns 0.3s ease, column-gap 0.3s ease, max-width 0.3s ease, margin 0.3s ease, padding 0.3s ease;
 }
 
 body.sidebar-open .layout {
-  grid-template-columns: var(--sidebar-width) 1fr;
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
   column-gap: var(--sidebar-gap);
   max-width: calc(var(--layout-max) + var(--sidebar-width) + var(--sidebar-gap));
+  margin-left: 0;
+  margin-right: auto;
+  padding-left: 0;
+  padding-right: var(--layout-padding);
 }
 
 .sidebar {

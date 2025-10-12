@@ -1,5 +1,79 @@
 (() => {
   const app = document.getElementById('app');
+  const sidebar = document.getElementById('appSidebar');
+  const sidebarToggle = document.getElementById('sidebarToggle');
+  const sidebarBackdrop = document.getElementById('sidebarBackdrop');
+  const sidebarLinks = sidebar ? Array.from(sidebar.querySelectorAll('.nav-link')) : [];
+
+  const syncSidebarAria = (open) => {
+    if (sidebarToggle) {
+      sidebarToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+      sidebarToggle.setAttribute('aria-label', open
+        ? 'Cerrar menú de navegación'
+        : 'Abrir menú de navegación');
+    }
+
+    if (sidebar) {
+      sidebar.setAttribute('aria-hidden', open ? 'false' : 'true');
+    }
+
+    if (sidebarBackdrop) {
+      sidebarBackdrop.setAttribute('aria-hidden', open ? 'false' : 'true');
+    }
+  };
+
+  const closeSidebar = () => {
+    if (!document.body.classList.contains('sidebar-open')) {
+      syncSidebarAria(false);
+      return;
+    }
+
+    document.body.classList.remove('sidebar-open');
+    syncSidebarAria(false);
+  };
+
+  const openSidebar = () => {
+    if (document.body.classList.contains('sidebar-open')) {
+      syncSidebarAria(true);
+      return;
+    }
+
+    document.body.classList.add('sidebar-open');
+    syncSidebarAria(true);
+    if (sidebarLinks.length) {
+      const [firstLink] = sidebarLinks;
+      window.setTimeout(() => {
+        try { firstLink.focus(); } catch (_) { /* noop */ }
+      }, 50);
+    }
+  };
+
+  const toggleSidebar = () => {
+    if (document.body.classList.contains('sidebar-open')) {
+      closeSidebar();
+    } else {
+      openSidebar();
+    }
+  };
+
+  if (sidebarToggle && sidebar) {
+    sidebarToggle.addEventListener('click', (event) => {
+      event.preventDefault();
+      toggleSidebar();
+    });
+  }
+
+  if (sidebarBackdrop) {
+    sidebarBackdrop.addEventListener('click', closeSidebar);
+  }
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && document.body.classList.contains('sidebar-open')) {
+      closeSidebar();
+    }
+  });
+
+  syncSidebarAria(document.body.classList.contains('sidebar-open'));
 
   // Detecta el directorio base (soporta /, /zkt/backend/public/, etc.)
   const base = (() => {
@@ -30,50 +104,370 @@
     }
   }
 
+  const settingsState = { cache: null, promise: null };
+
+  const escapeHtml = (value) => String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
+  const formatNumber = (value) => {
+    if (value === null || value === undefined) return '—';
+    const num = Number(value);
+    if (Number.isNaN(num)) return String(value);
+    try {
+      return num.toLocaleString('es-GT');
+    } catch (_) {
+      return num.toString();
+    }
+  };
+
+  const formatDateTime = (value) => {
+    if (!value) return '—';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    try {
+      return date.toLocaleString('es-GT', { dateStyle: 'medium', timeStyle: 'short' });
+    } catch (_) {
+      return date.toISOString();
+    }
+  };
+
+  const formatRelativeTime = (value) => {
+    if (!value) return '';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '';
+    const diff = date.getTime() - Date.now();
+    const units = [
+      { unit: 'day', ms: 86400000 },
+      { unit: 'hour', ms: 3600000 },
+      { unit: 'minute', ms: 60000 },
+      { unit: 'second', ms: 1000 },
+    ];
+    try {
+      const rtf = new Intl.RelativeTimeFormat('es', { numeric: 'auto' });
+      for (const { unit, ms } of units) {
+        if (Math.abs(diff) >= ms || unit === 'second') {
+          return rtf.format(Math.round(diff / ms), unit);
+        }
+      }
+    } catch (_) {
+      // noop
+    }
+    const minutes = Math.round(Math.abs(diff) / 60000);
+    return diff < 0 ? `hace ${minutes} min` : `en ${minutes} min`;
+  };
+
+  const statusToClass = (status) => {
+    const normalized = String(status ?? '').toLowerCase();
+    if (['ok', 'online', 'success', 'healthy', 'operational'].includes(normalized)) return 'ok';
+    if (['warn', 'warning', 'degraded', 'pending'].includes(normalized)) return 'warn';
+    if (['error', 'down', 'offline', 'failed'].includes(normalized)) return 'danger';
+    return 'neutral';
+  };
+
+  function updateChromeWithSettings(settings) {
+    const envBadge = document.getElementById('envBadge');
+    if (envBadge) {
+      const env = settings?.app?.environment ?? 'unknown';
+      envBadge.textContent = settings?.app?.environment_label ?? (settings ? env.toUpperCase() : 'Sin conexión');
+      envBadge.dataset.status = settings ? env : 'offline';
+    }
+
+    if (settings?.app?.environment) {
+      document.body.dataset.environment = settings.app.environment;
+    } else {
+      delete document.body.dataset.environment;
+    }
+
+    const subtitle = document.getElementById('heroSubtitle');
+    if (subtitle) {
+      const base = subtitle.getAttribute('data-default') || subtitle.textContent;
+      subtitle.textContent = settings?.app?.name ? `${settings.app.name} • ${base}` : base;
+    }
+
+    const lastSyncValue = document.getElementById('heroLastSync');
+    const lastSyncRelative = document.getElementById('heroLastSyncRelative');
+    const lastSync = settings?.database?.metrics?.tickets_last_sync ?? null;
+    if (lastSyncValue) lastSyncValue.textContent = formatDateTime(lastSync);
+    if (lastSyncRelative) {
+      const rel = formatRelativeTime(lastSync);
+      lastSyncRelative.textContent = rel;
+      lastSyncRelative.style.display = rel ? '' : 'none';
+    }
+
+    const metrics = settings?.database?.metrics ?? {};
+
+    const heroInvoicesTotal = document.getElementById('heroInvoicesTotal');
+    if (heroInvoicesTotal) {
+      const invoicesTotal = metrics?.invoices_total;
+      heroInvoicesTotal.textContent = invoicesTotal !== undefined && invoicesTotal !== null
+        ? formatNumber(invoicesTotal)
+        : '—';
+    }
+
+    const heroInvoicesLastSync = document.getElementById('heroInvoicesLastSync');
+    if (heroInvoicesLastSync) {
+      const lastInvoice = metrics?.invoices_last_sync ?? null;
+      if (lastInvoice) {
+        const rel = formatRelativeTime(lastInvoice);
+        const timestamp = formatDateTime(lastInvoice);
+        heroInvoicesLastSync.textContent = rel ? `Última factura ${rel}` : `Última factura ${timestamp}`;
+        heroInvoicesLastSync.style.display = '';
+      } else {
+        heroInvoicesLastSync.textContent = 'Sin facturas registradas';
+        heroInvoicesLastSync.style.display = '';
+      }
+    }
+
+    const heroPendingInvoices = document.getElementById('heroPendingInvoices');
+    const heroPendingDetail = document.getElementById('heroPendingDetail');
+    if (heroPendingInvoices) {
+      const pending = Number(metrics?.pending_invoices ?? 0);
+      let tone = 'neutral';
+      let label = 'Sin datos';
+      if (settings) {
+        if (!Number.isFinite(pending) || pending < 0) {
+          label = 'Sin datos';
+        } else if (pending === 0) {
+          label = 'Sin pendientes';
+          tone = 'ok';
+        } else {
+          label = `${formatNumber(pending)} por certificar`;
+          tone = 'warn';
+        }
+      }
+      heroPendingInvoices.textContent = label;
+      heroPendingInvoices.className = 'hero-highlight-chip';
+      heroPendingInvoices.dataset.tone = tone;
+    }
+    if (heroPendingDetail) {
+      const pending = Number(metrics?.pending_invoices ?? 0);
+      if (settings && Number.isFinite(pending)) {
+        heroPendingDetail.textContent = pending > 0
+          ? `Tickets listos para FEL: ${formatNumber(pending)}`
+          : 'No hay tickets pendientes de certificación';
+      } else {
+        heroPendingDetail.textContent = 'Sincroniza para ver pendientes de certificación';
+      }
+    }
+
+    const heroGeneratedAt = document.getElementById('heroGeneratedAt');
+    if (heroGeneratedAt) {
+      const generated = settings?.generated_at ?? settings?.app?.generated_at ?? null;
+      const label = generated ? `${formatDateTime(generated)} (${formatRelativeTime(generated) || 'recién'})` : 'Sincronización no disponible';
+      heroGeneratedAt.textContent = `Configuración actualizada: ${label}`;
+    }
+  }
+
+  async function loadSettings(force = false) {
+    if (!force) {
+      if (settingsState.cache) return settingsState.cache;
+      if (settingsState.promise) return settingsState.promise;
+    }
+
+    const request = fetchJSON(api('settings'))
+      .then((resp) => {
+        const settings = resp?.settings ?? null;
+        settingsState.cache = settings;
+        updateChromeWithSettings(settings);
+        return settings;
+      })
+      .catch((error) => {
+        console.warn('No se pudo obtener la configuración', error);
+        if (!settingsState.cache) updateChromeWithSettings(null);
+        return null;
+      })
+      .finally(() => {
+        if (settingsState.promise === request) {
+          settingsState.promise = null;
+        }
+      });
+
+    settingsState.promise = request;
+    return request;
+  }
+
+  function buildTimeline(items) {
+    if (!Array.isArray(items) || !items.length) {
+      return '<div class="empty small mb-0">Sin eventos recientes.</div>';
+    }
+    return items.map((item) => {
+      const title = escapeHtml(item?.title ?? 'Evento');
+      const subtitle = item?.subtitle ? `<div class="timeline-subtitle">${escapeHtml(item.subtitle)}</div>` : '';
+      const timestamp = item?.timestamp ?? item?.date ?? item?.when ?? null;
+      const meta = `<div class="timeline-meta"><span>${escapeHtml(formatDateTime(timestamp))}</span>${formatRelativeTime(timestamp) ? `<span class="timeline-relative">${escapeHtml(formatRelativeTime(timestamp))}</span>` : ''}</div>`;
+      return `
+        <div class="timeline-item">
+          <div class="timeline-dot ${statusToClass(item?.status)}"></div>
+          <div>
+            <div class="timeline-title">${title}</div>
+            ${subtitle}
+            ${meta}
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  loadSettings().catch(() => {});
+
+  const refreshBtn = document.getElementById('refreshBtn');
+  if (refreshBtn) {
+    refreshBtn.addEventListener('click', async () => {
+      const active = document.querySelector('.nav-link.active[data-page]')?.getAttribute('data-page') || 'dashboard';
+      refreshBtn.classList.add('is-loading');
+      refreshBtn.disabled = true;
+      try {
+        await loadSettings(true);
+        document.querySelector(`.nav-link[data-page="${active}"]`)?.click();
+      } catch (err) {
+        console.error(err);
+      } finally {
+        setTimeout(() => {
+          refreshBtn.classList.remove('is-loading');
+          refreshBtn.disabled = false;
+        }, 400);
+      }
+    });
+  }
+
   // ===== Dashboard =====
   async function renderDashboard() {
     try {
-      const { data } = await fetchJSON(api('tickets'));
+      const [ticketsResp, settings] = await Promise.all([
+        fetchJSON(api('tickets')),
+        loadSettings(),
+      ]);
+
+      const data = Array.isArray(ticketsResp?.data) ? ticketsResp.data : [];
       const state = { search: '', page: 1 };
       const pageSize = 20;
 
+      const metrics = settings?.database?.metrics ?? {};
+      const pending = Number(metrics.pending_invoices ?? 0);
+      const summaryCards = [
+        {
+          title: 'Asistencias de hoy',
+          badge: 'En vivo',
+          value: formatNumber(data.length),
+          detail: 'Lecturas registradas en el día',
+          accent: 'primary',
+        },
+        {
+          title: 'Tickets en base de datos',
+          badge: 'Histórico',
+          value: formatNumber(metrics.tickets_total),
+          detail: metrics.tickets_last_sync ? `Último registro ${formatRelativeTime(metrics.tickets_last_sync)}` : 'Sin registros almacenados',
+          accent: 'info',
+        },
+        {
+          title: 'Facturas emitidas',
+          badge: 'FEL',
+          value: formatNumber(metrics.invoices_total),
+          detail: metrics.invoices_last_sync ? `Última emisión ${formatRelativeTime(metrics.invoices_last_sync)}` : 'Sin facturas emitidas',
+          accent: 'success',
+        },
+        {
+          title: 'Pendientes por facturar',
+          badge: pending > 0 ? 'Atención' : 'Al día',
+          value: formatNumber(pending),
+          detail: pending > 0 ? 'Genera FEL desde Facturación' : 'Sin pendientes',
+          accent: pending > 0 ? 'warning' : 'neutral',
+        },
+      ];
+
+      const summaryHtml = summaryCards.map((card) => `
+        <div class="col-xxl-3 col-sm-6">
+          <div class="stat-card" data-accent="${card.accent}">
+            <div class="stat-badge">${escapeHtml(card.badge)}</div>
+            <div class="stat-title">${escapeHtml(card.title)}</div>
+            <div class="stat-value">${escapeHtml(card.value)}</div>
+            <div class="stat-foot">${escapeHtml(card.detail)}</div>
+          </div>
+        </div>
+      `).join('');
+
       app.innerHTML = `
-        <div class="row g-4">
-          <div class="col-md-4">
-            <div class="card shadow-sm">
-              <div class="card-body">
-                <h5 class="card-title">Asistencias de hoy</h5>
-                <p class="display-6 mb-0">${data.length}</p>
-                <span class="badge badge-soft mt-2">Datos de G4S</span>
+        <div class="dashboard-view">
+          <div class="row g-4 dashboard-summary">
+            ${summaryHtml}
+          </div>
+          <div class="row g-4 align-items-stretch">
+            <div class="col-xl-8">
+              <div class="card shadow-sm h-100">
+                <div class="card-body d-flex flex-column gap-3 h-100">
+                  <div class="d-flex flex-wrap gap-2 align-items-start justify-content-between">
+                    <div>
+                      <h5 class="card-title mb-1">Asistencias registradas</h5>
+                      <p class="text-muted small mb-0">Información consolidada desde la base de datos.</p>
+                    </div>
+                    <div class="ms-auto" style="max-width: 260px;">
+                      <input type="search" id="dashSearch" class="form-control form-control-sm" placeholder="Buscar ticket, placa o nombre..." aria-label="Buscar asistencia" />
+                    </div>
+                  </div>
+                  <div class="table-responsive flex-grow-1">
+                    <table class="table table-sm align-middle mb-0">
+                      <thead><tr><th>#</th><th>Nombre</th><th>Entrada</th><th>Salida</th></tr></thead>
+                      <tbody id="dashBody"></tbody>
+                    </table>
+                  </div>
+                  <div class="d-flex flex-wrap gap-2 align-items-center justify-content-between">
+                    <small class="text-muted" id="dashMeta"></small>
+                    <div class="btn-group btn-group-sm" role="group" aria-label="Paginación de asistencias">
+                      <button type="button" class="btn btn-outline-secondary" id="dashPrev">Anterior</button>
+                      <button type="button" class="btn btn-outline-secondary" id="dashNext">Siguiente</button>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
-          </div>
-          <div class="col-md-8">
-            <div class="card shadow-sm">
-              <div class="card-body d-flex flex-column gap-3">
-                <div class="d-flex flex-wrap gap-2 align-items-center justify-content-between">
-                  <h5 class="card-title mb-0">Listado</h5>
-                  <div class="ms-auto" style="max-width: 240px;">
-                    <input type="search" id="dashSearch" class="form-control form-control-sm" placeholder="Buscar..." aria-label="Buscar asistencia" />
+            <div class="col-xl-4">
+              <div class="card shadow-sm h-100">
+                <div class="card-body d-flex flex-column gap-3">
+                  <div class="d-flex align-items-start justify-content-between gap-2">
+                    <div>
+                      <h5 class="card-title mb-1">Actividad reciente</h5>
+                      <p class="text-muted small mb-0">Últimos eventos sincronizados.</p>
+                    </div>
+                    <button class="btn btn-link btn-sm p-0" id="timelineRefresh">Actualizar</button>
                   </div>
-                </div>
-                <div class="table-responsive">
-                  <table class="table table-sm align-middle mb-0">
-                    <thead><tr><th>#</th><th>Nombre</th><th>Entrada</th><th>Salida</th></tr></thead>
-                    <tbody id="dashBody"></tbody>
-                  </table>
-                </div>
-                <div class="d-flex flex-wrap gap-2 align-items-center justify-content-between">
-                  <small class="text-muted" id="dashMeta"></small>
-                  <div class="btn-group btn-group-sm" role="group" aria-label="Paginación de asistencias">
-                    <button type="button" class="btn btn-outline-secondary" id="dashPrev">Anterior</button>
-                    <button type="button" class="btn btn-outline-secondary" id="dashNext">Siguiente</button>
-                  </div>
+                  <div class="timeline" id="activityTimeline"></div>
                 </div>
               </div>
             </div>
           </div>
         </div>`;
+
+      const timelineContainer = document.getElementById('activityTimeline');
+      if (timelineContainer) {
+        timelineContainer.innerHTML = buildTimeline(settings?.activity);
+      }
+
+      const timelineRefresh = document.getElementById('timelineRefresh');
+      if (timelineRefresh) {
+        timelineRefresh.addEventListener('click', async () => {
+          const originalText = timelineRefresh.textContent;
+          timelineRefresh.disabled = true;
+          timelineRefresh.textContent = 'Actualizando…';
+          let hadError = false;
+          try {
+            await loadSettings(true);
+            await renderDashboard();
+          } catch (err) {
+            hadError = true;
+            console.error(err);
+            timelineRefresh.disabled = false;
+            timelineRefresh.textContent = 'Reintentar';
+          } finally {
+            if (!hadError && timelineRefresh.isConnected) {
+              timelineRefresh.textContent = originalText;
+            }
+          }
+        });
+      }
 
       const tbody = document.getElementById('dashBody');
       const meta = document.getElementById('dashMeta');
@@ -102,17 +496,20 @@
           tbody.innerHTML = pageItems
             .map((row, index) => `
               <tr>
-                <td>${start + index + 1}</td>
-                <td>${row.name}</td>
-                <td>${row.checkIn || '-'}</td>
-                <td>${row.checkOut || '-'}</td>
+                <td>${escapeHtml(start + index + 1)}</td>
+                <td>${escapeHtml(row.name)}</td>
+                <td>${escapeHtml(row.checkIn || '-')}</td>
+                <td>${escapeHtml(row.checkOut || '-')}</td>
               </tr>
             `)
             .join('');
         } else {
+          const message = data.length && !filtered.length
+            ? 'No se encontraron resultados'
+            : 'Sin registros disponibles';
           tbody.innerHTML = `
             <tr>
-              <td colspan="4" class="text-center text-muted">${data.length ? 'No se encontraron resultados' : 'Sin registros disponibles'}</td>
+              <td colspan="4" class="text-center text-muted">${escapeHtml(message)}</td>
             </tr>
           `;
         }
@@ -125,37 +522,46 @@
           meta.textContent = 'Sin registros para mostrar';
         }
 
-        prevBtn.disabled = state.page <= 1;
-        nextBtn.disabled = state.page >= totalPages;
+        prevBtn.disabled = state.page <= 1 || !filtered.length;
+        nextBtn.disabled = state.page >= totalPages || !filtered.length;
       }
 
-      searchInput.addEventListener('input', (event) => {
-        state.search = event.target.value.trim();
-        state.page = 1;
-        renderTable();
-      });
-
-      prevBtn.addEventListener('click', () => {
-        if (state.page > 1) {
-          state.page -= 1;
+      if (searchInput) {
+        searchInput.addEventListener('input', (event) => {
+          state.search = event.target.value.trim();
+          state.page = 1;
           renderTable();
-        }
-      });
+        });
+      }
 
-      nextBtn.addEventListener('click', () => {
-        const totalPages = Math.max(1, Math.ceil(filterData().length / pageSize));
-        if (state.page < totalPages) {
-          state.page += 1;
-          renderTable();
-        }
-      });
+      if (prevBtn) {
+        prevBtn.addEventListener('click', () => {
+          if (state.page > 1) {
+            state.page -= 1;
+            renderTable();
+          }
+        });
+      }
+
+      if (nextBtn) {
+        nextBtn.addEventListener('click', () => {
+          const totalPages = Math.max(1, Math.ceil(filterData().length / pageSize));
+          if (state.page < totalPages) {
+            state.page += 1;
+            renderTable();
+          }
+        });
+      }
 
       renderTable();
     } catch (e) {
       app.innerHTML = `
-        <div class="alert alert-danger">
-          No se pudo cargar el dashboard.<br/>
-          <pre class="small mb-0">${String(e).replace(/[<>&]/g,s=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[s]))}</pre>
+        <div class="card shadow-sm">
+          <div class="card-body">
+            <h5 class="card-title text-danger">No se pudo cargar el dashboard</h5>
+            <p class="text-muted">Intenta nuevamente en unos segundos. Si el problema persiste revisa la conexión con la base de datos y las credenciales de las integraciones.</p>
+            <pre class="small mb-0">${escapeHtml(String(e))}</pre>
+          </div>
         </div>`;
     }
   }
@@ -1301,20 +1707,173 @@
   async function renderSettings() {
     app.innerHTML = `
       <div class="card shadow-sm">
-        <div class="card-body">
-          <h5 class="card-title">Ajustes</h5>
-          <p class="text-muted">Configura variables de entorno en <code>backend/.env</code> (ver <code>.env.sample</code>).</p>
-          <ul>
-            <li><strong>ZKTeco:</strong> ZKTECO_BASE_URL, ZKTECO_APP_KEY, ZKTECO_APP_SECRET</li>
-            <li><strong>G4S FEL:</strong> (usa RequestTransaction) FEL_G4S_* en .env</li>
-            <li><strong>SAT Emisor:</strong> variables SAT_*</li>
-          </ul>
+        <div class="card-body d-flex align-items-center gap-3">
+          <div class="spinner-border text-primary" role="status" aria-hidden="true"></div>
+          <span class="text-muted">Cargando configuración activa…</span>
         </div>
       </div>
     `;
+
+    const settings = await loadSettings(true);
+
+    if (!settings) {
+      app.innerHTML = `
+        <div class="empty">
+          No fue posible obtener la configuración actual.<br />
+          <button class="btn btn-primary btn-sm mt-3" id="retrySettings">Reintentar</button>
+        </div>
+      `;
+      document.getElementById('retrySettings')?.addEventListener('click', () => renderSettings());
+      return;
+    }
+
+    const metrics = settings.database?.metrics ?? {};
+    const env = String(settings.app?.environment ?? '').toLowerCase();
+    let envClass = 'neutral';
+    if (['production', 'prod'].includes(env)) envClass = 'danger';
+    else if (['staging', 'pre', 'testing', 'qa'].includes(env)) envClass = 'warn';
+    else if (env) envClass = 'ok';
+
+    const dbStatus = settings.database?.status ?? 'unknown';
+    const dbLabelMap = {
+      online: 'Conectada',
+      success: 'Conectada',
+      healthy: 'Conectada',
+      offline: 'Desconectada',
+      down: 'Desconectada',
+    };
+    const dbLabel = dbLabelMap[dbStatus] || (dbStatus ? dbStatus.toString().toUpperCase() : 'Desconocido');
+
+    const integrationItems = Object.values(settings.integrations ?? {});
+    const integrationList = integrationItems.length
+      ? integrationItems.map((integration) => {
+          const statusClass = integration?.configured ? 'ok' : 'warn';
+          const statusLabel = integration?.configured ? 'Configurada' : 'Incompleta';
+          const detailParts = [];
+          if (integration?.base_url) detailParts.push(`URL ${integration.base_url}`);
+          if (integration?.mode) detailParts.push(`Modo ${integration.mode}`);
+          if (integration?.requestor) detailParts.push(`ID ${integration.requestor}`);
+          if (integration?.app_key) detailParts.push(`Clave ${integration.app_key}`);
+          const details = detailParts.join(' · ');
+          return `
+            <li class="integration-item">
+              <div>
+                <strong>${escapeHtml(integration?.label ?? 'Integración')}</strong>
+                <div class="integration-meta">${escapeHtml(details || 'Variables pendientes por completar')}</div>
+              </div>
+              <span class="status-pill ${statusClass}">${escapeHtml(statusLabel)}</span>
+            </li>
+          `;
+        }).join('')
+      : '<li class="integration-item"><div><strong>Sin integraciones definidas</strong><div class="integration-meta">Agrega las credenciales correspondientes en el archivo .env.</div></div></li>';
+
+    app.innerHTML = `
+      <div class="row g-4">
+        <div class="col-xl-4 col-lg-6">
+          <div class="card shadow-sm h-100">
+            <div class="card-body d-flex flex-column gap-3">
+              <div class="d-flex justify-content-between align-items-start gap-3">
+                <div>
+                  <h5 class="card-title mb-1">Entorno de ejecución</h5>
+                  <p class="text-muted small mb-0">${escapeHtml(settings.app?.name ?? 'Integración FEL')}</p>
+                </div>
+                <span class="status-pill ${envClass}">${escapeHtml(settings.app?.environment_label ?? 'Desconocido')}</span>
+              </div>
+              <div class="settings-list">
+                <div class="settings-list-item"><span>Zona horaria</span><span>${escapeHtml(settings.app?.timezone ?? '—')}</span></div>
+                <div class="settings-list-item"><span>Servidor</span><span>${escapeHtml(settings.app?.server ?? '—')}</span></div>
+                <div class="settings-list-item"><span>PHP</span><span>${escapeHtml(settings.app?.php_version ?? '—')}</span></div>
+              </div>
+              <small class="text-muted">Actualizado ${escapeHtml(formatRelativeTime(settings.generated_at) || 'recientemente')}.</small>
+            </div>
+          </div>
+        </div>
+        <div class="col-xl-4 col-lg-6">
+          <div class="card shadow-sm h-100">
+            <div class="card-body d-flex flex-column gap-3">
+              <div class="d-flex justify-content-between align-items-start gap-3">
+                <div>
+                  <h5 class="card-title mb-1">Base de datos</h5>
+                  <p class="text-muted small mb-0">${escapeHtml((settings.database?.host && settings.database?.name) ? `${settings.database.host} · ${settings.database.name}` : 'Configura las variables DB_* en el archivo .env')}</p>
+                </div>
+                <span class="status-pill ${statusToClass(dbStatus)}">${escapeHtml(dbLabel)}</span>
+              </div>
+              <div class="settings-list">
+                <div class="settings-list-item"><span>Motor</span><span>${escapeHtml(settings.database?.driver ?? '—')}</span></div>
+                <div class="settings-list-item"><span>Usuario</span><span>${escapeHtml(settings.database?.user ?? '—')}</span></div>
+                <div class="settings-list-item"><span>Tickets</span><span>${escapeHtml(formatNumber(metrics.tickets_total ?? 0))}</span></div>
+                <div class="settings-list-item"><span>Pagos</span><span>${escapeHtml(formatNumber(metrics.payments_total ?? 0))}</span></div>
+                <div class="settings-list-item"><span>Facturas</span><span>${escapeHtml(formatNumber(metrics.invoices_total ?? 0))}</span></div>
+                <div class="settings-list-item"><span>Último ticket</span><span>${escapeHtml(formatDateTime(metrics.tickets_last_sync))}</span></div>
+                <div class="settings-list-item"><span>Último pago</span><span>${escapeHtml(formatDateTime(metrics.payments_last_sync))}</span></div>
+                <div class="settings-list-item"><span>Última factura</span><span>${escapeHtml(formatDateTime(metrics.invoices_last_sync))}</span></div>
+                <div class="settings-list-item"><span>Pendientes FEL</span><span>${escapeHtml(formatNumber(metrics.pending_invoices ?? 0))}</span></div>
+              </div>
+              ${settings.database?.error ? `<div class="alert alert-warning mb-0 small">${escapeHtml(settings.database.error)}</div>` : ''}
+            </div>
+          </div>
+        </div>
+        <div class="col-xl-4">
+          <div class="card shadow-sm h-100">
+            <div class="card-body d-flex flex-column gap-3">
+              <div>
+                <h5 class="card-title mb-1">Seguridad &amp; ingestas</h5>
+                <p class="text-muted small mb-0">Claves utilizadas para la comunicación con ZKTeco y servicios externos.</p>
+              </div>
+              <div class="settings-list">
+                <div class="settings-list-item"><span>Token de ingesta</span><span>${escapeHtml(settings.security?.ingest_key ?? 'No configurado')}</span></div>
+              </div>
+              <small class="text-muted">Las credenciales se leen desde <code>backend/.env</code>.</small>
+            </div>
+          </div>
+        </div>
+        <div class="col-12">
+          <div class="card shadow-sm">
+            <div class="card-body d-flex flex-column gap-3">
+              <div>
+                <h5 class="card-title mb-1">Integraciones activas</h5>
+                <p class="text-muted small mb-0">Estado actual de cada conector configurado.</p>
+              </div>
+              <ul class="integration-list">${integrationList}</ul>
+            </div>
+          </div>
+        </div>
+        <div class="col-12">
+          <div class="card shadow-sm">
+            <div class="card-body d-flex flex-column gap-3">
+              <div class="d-flex align-items-start justify-content-between gap-2">
+                <div>
+                  <h5 class="card-title mb-1">Actividad de sincronización</h5>
+                  <p class="text-muted small mb-0">Resumen generado ${escapeHtml(formatRelativeTime(settings.generated_at) || 'hace instantes')}.</p>
+                </div>
+                <button class="btn btn-outline-primary btn-sm" id="settingsReload">Actualizar</button>
+              </div>
+              <div class="timeline" id="settingsTimeline">${buildTimeline(settings.activity)}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    const reload = document.getElementById('settingsReload');
+    if (reload) {
+      reload.addEventListener('click', () => {
+        reload.classList.add('is-loading');
+        reload.disabled = true;
+        renderSettings();
+      });
+    }
   }
 
   const renderers = { dashboard: renderDashboard, invoices: renderInvoices, reports: renderReports, settings: renderSettings };
+
+  function goToPage(page) {
+    const link = document.querySelector(`.nav-link[data-page="${page}"]`);
+    if (link) {
+      setActive(link);
+    }
+    (renderers[page] || renderDashboard)();
+  }
 
   function initNav() {
     const links = document.querySelectorAll('[data-page]');
@@ -1322,17 +1881,26 @@
       link.addEventListener('click', (e) => {
         e.preventDefault();
         const page = link.getAttribute('data-page');
-        setActive(link);
-        (renderers[page] || renderDashboard)();
+        goToPage(page);
       });
     });
-    // Activa la que tenga .active o dashboard por defecto
-    const initial = document.querySelector('.nav-link.active[data-page]') || document.querySelector('[data-page="dashboard"]');
-    if (initial) { setActive(initial); (renderers[initial.getAttribute('data-page')] || renderDashboard)(); }
-    else { renderDashboard(); }
-  }
 
-  
+    document.querySelectorAll('[data-go-page]').forEach((control) => {
+      control.addEventListener('click', () => {
+        const page = control.getAttribute('data-go-page');
+        if (page) {
+          goToPage(page);
+        }
+      });
+    });
+
+    const initial = document.querySelector('.nav-link.active[data-page]') || document.querySelector('[data-page="dashboard"]');
+    if (initial) {
+      goToPage(initial.getAttribute('data-page'));
+    } else {
+      renderDashboard();
+    }
+  }
 
   initNav();
 })();

@@ -43,6 +43,8 @@
   --radius-sm: 10px;
   --radius-xs: 8px;
   --layout-padding: clamp(1rem, 3vw, 2rem);
+  --sidebar-width: clamp(220px, 26vw, 280px);
+  --sidebar-gap: clamp(1.5rem, 3vw, 2.5rem);
 }
 
 *, *::before, *::after {
@@ -60,10 +62,6 @@ body {
   color: var(--neutral-800);
   background: linear-gradient(180deg, rgba(13, 202, 240, 0.12) 0%, rgba(236, 248, 255, 0.92) 100%);
   -webkit-font-smoothing: antialiased;
-}
-
-body.sidebar-open {
-  overflow: hidden;
 }
 
 img {
@@ -225,28 +223,34 @@ body.sidebar-open .sidebar-toggle-icon::after {
   max-width: var(--layout-max);
   margin: 0 auto;
   padding: 2rem var(--layout-padding) 3rem;
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: 0 1fr;
   gap: 0;
+  transition: grid-template-columns 0.3s ease, column-gap 0.3s ease, max-width 0.3s ease;
+}
+
+body.sidebar-open .layout {
+  grid-template-columns: var(--sidebar-width) 1fr;
+  column-gap: var(--sidebar-gap);
+  max-width: calc(var(--layout-max) + var(--sidebar-width) + var(--sidebar-gap));
 }
 
 .sidebar {
-  position: fixed;
+  position: sticky;
   top: var(--nav-height);
-  left: 0;
-  width: min(320px, 90vw);
   height: calc(100vh - var(--nav-height));
+  width: var(--sidebar-width);
   border-radius: 0 var(--radius-lg) var(--radius-lg) 0;
   background: var(--surface-card);
   box-shadow: var(--shadow-lg);
   border: 1px solid rgba(13, 202, 240, 0.18);
   overflow-y: auto;
-  transform: translateX(-110%);
+  transform: translateX(calc(-1 * var(--sidebar-width)));
   opacity: 0;
   pointer-events: none;
   visibility: hidden;
-  transition: transform 0.3s ease, opacity 0.3s ease;
-  z-index: 1050;
+  transition: transform 0.3s ease, opacity 0.3s ease, visibility 0.3s ease;
+  z-index: 1;
 }
 
 body.sidebar-open .sidebar {
@@ -345,26 +349,11 @@ body.sidebar-open .sidebar {
 .pill-warn { background: rgba(251, 191, 36, 0.2); color: #b45309; }
 
 .sidebar-backdrop {
-  position: fixed;
-  top: var(--nav-height);
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: rgba(12, 74, 110, 0.35);
-  opacity: 0;
-  pointer-events: none;
-  visibility: hidden;
-  transition: opacity 0.3s ease;
-  z-index: 1040;
-}
-
-body.sidebar-open .sidebar-backdrop {
-  opacity: 1;
-  pointer-events: auto;
-  visibility: visible;
+  display: none;
 }
 
 .content {
+  grid-column: 2;
   display: flex;
   flex-direction: column;
   gap: 1.75rem;

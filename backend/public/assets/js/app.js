@@ -57,12 +57,6 @@
     sidebarBackdrop.addEventListener('click', closeSidebar);
   }
 
-  sidebarLinks.forEach((link) => {
-    link.addEventListener('click', () => {
-      closeSidebar();
-    });
-  });
-
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape' && document.body.classList.contains('sidebar-open')) {
       closeSidebar();

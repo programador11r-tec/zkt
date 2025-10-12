@@ -6,23 +6,27 @@
 <dte:SAT ClaseDocumento="dte">
     <dte:DTE ID="DatosCertificados">
     <dte:DatosEmision ID="DatosEmision">
-        <dte:DatosGenerales FechaHoraEmision="" Tipo="FACT" CodigoMoneda="GTQ"/>
-        <dte:Emisor NITEmisor="81491514" NombreEmisor="PARQUEO OBELISCO REFORMA" AfiliacionIVA="GEN" CodigoEstablecimiento="4" >
+        <dte:DatosGenerales FechaHoraEmision="2025-10-11T04:30:13-06:00" Tipo="FACT" CodigoMoneda="GTQ"/>
+        <dte:Emisor NITEmisor="81491514"
+                    NombreEmisor="PARQUEO OBELISCO REFORMA"
+                    AfiliacionIVA="GEN"
+                    CodigoEstablecimiento="4">
         <dte:DireccionEmisor>
-    <dte:Direccion>Ciudad</dte:Direccion>
-    <dte:CodigoPostal>01001</dte:CodigoPostal>
-    <dte:Municipio>Guatemala</dte:Municipio>
-    <dte:Departamento>Guatemala</dte:Departamento>
-    <dte:Pais>GT</dte:Pais>
+<dte:Direccion>Ciudad</dte:Direccion>
+<dte:CodigoPostal>01001</dte:CodigoPostal>
+<dte:Municipio>Guatemala</dte:Municipio>
+<dte:Departamento>Guatemala</dte:Departamento>
+<dte:Pais>GT</dte:Pais>
 </dte:DireccionEmisor>
         </dte:Emisor>
-        <dte:Receptor IDReceptor="CF" NombreReceptor="Consumidor Final" CorreoReceptor="">
+        <dte:Receptor IDReceptor="CF"
+                    NombreReceptor="Consumidor Final">
         <dte:DireccionReceptor>
-    <dte:Direccion>Ciudad</dte:Direccion>
-    <dte:CodigoPostal>01001</dte:CodigoPostal>
-    <dte:Municipio>Guatemala</dte:Municipio>
-    <dte:Departamento>Guatemala</dte:Departamento>
-    <dte:Pais>GT</dte:Pais>
+<dte:Direccion>Ciudad</dte:Direccion>
+<dte:CodigoPostal>01001</dte:CodigoPostal>
+<dte:Municipio>Guatemala</dte:Municipio>
+<dte:Departamento>Guatemala</dte:Departamento>
+<dte:Pais>GT</dte:Pais>
 </dte:DireccionReceptor>
         </dte:Receptor>
         <dte:Frases>
@@ -33,25 +37,25 @@
             <dte:Cantidad>1</dte:Cantidad>
             <dte:UnidadMedida>UNI</dte:UnidadMedida>
             <dte:Descripcion>Ticket de parqueo</dte:Descripcion>
-            <dte:PrecioUnitario>22.321429</dte:PrecioUnitario>
-            <dte:Precio>22.321429</dte:Precio>
+            <dte:PrecioUnitario>16.071429</dte:PrecioUnitario>
+            <dte:Precio>16.071429</dte:Precio>
             <dte:Descuento>0.000000</dte:Descuento>
             <dte:Impuestos>
             <dte:Impuesto>
                 <dte:NombreCorto>IVA</dte:NombreCorto>
                 <dte:CodigoUnidadGravable>1</dte:CodigoUnidadGravable>
-                <dte:MontoGravable>22.321429</dte:MontoGravable>
-                <dte:MontoImpuesto>2.678571</dte:MontoImpuesto>
+                <dte:MontoGravable>16.071429</dte:MontoGravable>
+                <dte:MontoImpuesto>1.928571</dte:MontoImpuesto>
             </dte:Impuesto>
             </dte:Impuestos>
-            <dte:Total>22.321429</dte:Total>
+            <dte:Total>16.071429</dte:Total>
         </dte:Item>
         </dte:Items>
         <dte:Totales>
         <dte:TotalImpuestos>
-            <dte:TotalImpuesto NombreCorto="IVA" TotalMontoImpuesto="2.678571"/>
+            <dte:TotalImpuesto NombreCorto="IVA" TotalMontoImpuesto="1.928571"/>
         </dte:TotalImpuestos>
-        <dte:GranTotal>25.00</dte:GranTotal>
+        <dte:GranTotal>18.00</dte:GranTotal>
         </dte:Totales>
     </dte:DatosEmision>
     </dte:DTE>

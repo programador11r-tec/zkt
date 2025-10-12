@@ -15,6 +15,8 @@ class Router {
 
     public function dispatch(string $method, string $uri) {
         $path = parse_url($uri, PHP_URL_PATH);
+        $path = rtrim($path, '/');
+        if ($path === '') $path = '/';
         $handler = $this->routes[$method][$path] ?? null;
         if (!$handler) {
             http_response_code(404);

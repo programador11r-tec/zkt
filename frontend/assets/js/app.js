@@ -65,7 +65,7 @@
       if (!state.search) return data;
       const term = state.search.toLowerCase();
       return data.filter((row) =>
-        Object.values(row).some((value) => String(value).toLowerCase().includes(term))
+        Object.values(row).some((value) => String(value ?? '').toLowerCase().includes(term))
       );
     }
 
@@ -78,29 +78,38 @@
       const start = (state.page - 1) * pageSize;
       const pageItems = filtered.slice(start, start + pageSize);
 
-      tbody.innerHTML = pageItems.length
-        ? pageItems
-            .map((row, index) => `
-              <tr>
-                <td>${start + index + 1}</td>
-                <td>${row.name}</td>
-                <td>${row.checkIn}</td>
-                <td>${row.checkOut}</td>
-              </tr>
-            `)
-            .join('')
-        : `
+      if (pageItems.length) {
+        tbody.innerHTML = pageItems
+          .map((row, index) => `
+            <tr>
+              <td>${start + index + 1}</td>
+              <td>${row.name}</td>
+              <td>${row.checkIn}</td>
+              <td>${row.checkOut}</td>
+            </tr>
+          `)
+          .join('');
+      } else {
+        const message = data.length && !filtered.length
+          ? 'No se encontraron resultados'
+          : 'Sin registros disponibles';
+        tbody.innerHTML = `
           <tr>
-            <td colspan="4" class="text-center text-muted">No se encontraron resultados</td>
+            <td colspan="4" class="text-center text-muted">${message}</td>
           </tr>
         `;
+      }
 
-      meta.textContent = filtered.length
-        ? `Mostrando ${start + 1} - ${Math.min(start + pageItems.length, filtered.length)} de ${filtered.length} registros`
-        : 'Sin registros para mostrar';
+      if (filtered.length) {
+        meta.textContent = `Mostrando ${start + 1} - ${Math.min(start + pageItems.length, filtered.length)} de ${filtered.length} registros`;
+      } else if (data.length) {
+        meta.textContent = 'No se encontraron resultados para la búsqueda actual';
+      } else {
+        meta.textContent = 'Sin registros para mostrar';
+      }
 
-      prevBtn.disabled = state.page <= 1;
-      nextBtn.disabled = state.page >= totalPages;
+      prevBtn.disabled = state.page <= 1 || !filtered.length;
+      nextBtn.disabled = state.page >= totalPages || !filtered.length;
     }
 
     searchInput.addEventListener('input', (event) => {

@@ -1,5 +1,11 @@
 (() => {
   const app = document.getElementById('app');
+  const sidebar = document.getElementById('appSidebar');
+  const sidebarLinks = sidebar ? Array.from(sidebar.querySelectorAll('.nav-link')) : [];
+
+  if (sidebar) {
+    sidebar.setAttribute('aria-hidden', 'false');
+  }
 
   function setActive(link) {
     document.querySelectorAll('.nav-link').forEach(a => a.classList.remove('active'));
@@ -214,19 +220,39 @@
 
   const renderers = { dashboard: renderDashboard, invoices: renderInvoices, settings: renderSettings };
 
+  function goToPage(page) {
+    const link = document.querySelector(`.nav-link[data-page="${page}"]`);
+    if (link) {
+      setActive(link);
+    }
+    (renderers[page] || renderDashboard)();
+  }
+
   function initNav() {
     const links = document.querySelectorAll('[data-page]');
     links.forEach(link => {
       link.addEventListener('click', (e) => {
         e.preventDefault();
         const page = link.getAttribute('data-page');
-        setActive(link);
-        renderers[page]();
+        goToPage(page);
       });
     });
-    // default
-    setActive(document.querySelector('[data-page="dashboard"]'));
-    renderDashboard();
+
+    document.querySelectorAll('[data-go-page]').forEach((control) => {
+      control.addEventListener('click', () => {
+        const page = control.getAttribute('data-go-page');
+        if (page) {
+          goToPage(page);
+        }
+      });
+    });
+
+    const initial = document.querySelector('.nav-link.active[data-page]') || document.querySelector('[data-page="dashboard"]');
+    if (initial) {
+      goToPage(initial.getAttribute('data-page'));
+    } else {
+      renderDashboard();
+    }
   }
 
   initNav();

@@ -428,14 +428,6 @@
     }
   }
 
-  function goToPage(page) {
-    const link = document.querySelector(`.nav-link[data-page="${page}"]`);
-    if (link) {
-      setActive(link);
-    }
-    (renderers[page] || renderDashboard)();
-  }
-
   function initNav() {
     sidebarLinks.forEach((link) => {
       link.addEventListener('click', (event) => {

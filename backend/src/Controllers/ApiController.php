@@ -18,6 +18,54 @@ class ApiController {
         $this->config = new Config(__DIR__ . '/../../.env');
     }
 
+    private function ensureSettingsTable(PDO $pdo): void {
+        $pdo->exec(
+            'CREATE TABLE IF NOT EXISTS app_settings (
+                `key` VARCHAR(64) PRIMARY KEY,
+                `value` TEXT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            )'
+        );
+    }
+
+    private function getAppSetting(PDO $pdo, string $key, mixed $default = null): mixed {
+        $stmt = $pdo->prepare('SELECT `value` FROM app_settings WHERE `key` = :key LIMIT 1');
+        $stmt->execute([':key' => $key]);
+        $value = $stmt->fetchColumn();
+        return $value !== false ? $value : $default;
+    }
+
+    private function setAppSetting(PDO $pdo, string $key, ?string $value): void {
+        $this->ensureSettingsTable($pdo);
+
+        if ($value === null) {
+            $stmt = $pdo->prepare('DELETE FROM app_settings WHERE `key` = :key');
+            $stmt->execute([':key' => $key]);
+            return;
+        }
+
+        $driver = strtolower((string) $pdo->getAttribute(PDO::ATTR_DRIVER_NAME));
+        if ($driver === 'sqlite') {
+            $sql = 'INSERT INTO app_settings (`key`, `value`, updated_at) VALUES (:key, :value, CURRENT_TIMESTAMP)
+                    ON CONFLICT(`key`) DO UPDATE SET `value` = excluded.`value`, updated_at = CURRENT_TIMESTAMP';
+        } else {
+            $sql = 'INSERT INTO app_settings (`key`, `value`, updated_at) VALUES (:key, :value, CURRENT_TIMESTAMP)
+                    ON DUPLICATE KEY UPDATE `value` = VALUES(`value`), updated_at = CURRENT_TIMESTAMP';
+        }
+
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute([':key' => $key, ':value' => $value]);
+    }
+
+    private function getHourlyRate(PDO $pdo): ?float {
+        $raw = $this->getAppSetting($pdo, 'billing.hourly_rate');
+        if ($raw === null || $raw === '') {
+            return null;
+        }
+        $rate = (float) $raw;
+        return $rate > 0 ? $rate : null;
+    }
+
     public function health() {
         Http::json(['ok' => true, 'time' => date('c')]);
     }
@@ -62,6 +110,9 @@ class ApiController {
             'security' => [
                 'ingest_key' => $this->mask($this->config->get('INGEST_KEY'), 4),
             ],
+            'billing' => [
+                'hourly_rate' => null,
+            ],
         ];
 
         $settings['database'] = [
@@ -80,6 +131,10 @@ class ApiController {
             if ($driver) {
                 $settings['database']['driver'] = $driver;
             }
+
+            $this->ensureSettingsTable($pdo);
+            $rate = $this->getHourlyRate($pdo);
+            $settings['billing']['hourly_rate'] = $rate;
 
             $fetchColumn = static function (PDO $pdo, string $sql) {
                 try {
@@ -154,6 +209,34 @@ class ApiController {
         $settings['activity'] = $activity;
 
         Http::json(['ok' => true, 'settings' => $settings]);
+    }
+
+    public function updateHourlyRate() {
+        try {
+            $body = Http::body();
+            $rawRate = $body['hourly_rate'] ?? null;
+            $value = null;
+            if ($rawRate !== null && $rawRate !== '') {
+                if (!is_numeric($rawRate)) {
+                    throw new \InvalidArgumentException('La tarifa por hora debe ser un número.');
+                }
+                $value = (float) $rawRate;
+                if ($value <= 0) {
+                    throw new \InvalidArgumentException('La tarifa por hora debe ser mayor a cero.');
+                }
+            }
+
+            $pdo = DB::pdo($this->config);
+            $formatted = $value === null ? null : number_format($value, 2, '.', '');
+            $this->setAppSetting($pdo, 'billing.hourly_rate', $formatted);
+
+            Http::json([
+                'ok' => true,
+                'hourly_rate' => $value === null ? null : (float) $formatted,
+            ]);
+        } catch (\Throwable $e) {
+            Http::json(['ok' => false, 'error' => $e->getMessage()], 400);
+        }
     }
 
     public function simulateFelInvoice() {
@@ -364,20 +447,83 @@ class ApiController {
 
             $pdo = \App\Utils\DB::pdo($this->config);
             $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
+            $this->ensureSettingsTable($pdo);
 
             // total
             $st = $pdo->prepare("
-                SELECT t.ticket_no, COALESCE(SUM(p.amount), t.amount, 0) AS total,
-                    t.entry_at, t.exit_at
+                SELECT
+                    t.ticket_no,
+                    COALESCE(SUM(p.amount), t.amount, 0) AS total,
+                    t.entry_at,
+                    t.exit_at,
+                    t.duration_min,
+                    t.amount AS ticket_amount
                 FROM tickets t
                 LEFT JOIN payments p ON p.ticket_no = t.ticket_no
                 WHERE t.ticket_no = :t
+                GROUP BY t.ticket_no, t.entry_at, t.exit_at, t.duration_min, t.amount
             ");
             $st->execute([':t'=>$ticketNo]);
             $row = $st->fetch(\PDO::FETCH_ASSOC);
             if (!$row) throw new \RuntimeException('Ticket no encontrado');
+            $mode = strtolower((string)($b['mode'] ?? ''));
+            $description = trim((string)($b['description'] ?? ''));
+
+            $durationMin = isset($row['duration_min']) ? (int) $row['duration_min'] : null;
+            if (($durationMin === null || $durationMin <= 0) && !empty($row['entry_at']) && !empty($row['exit_at'])) {
+                $entryTs = strtotime((string) $row['entry_at']);
+                $exitTs = strtotime((string) $row['exit_at']);
+                if ($entryTs && $exitTs && $exitTs > $entryTs) {
+                    $durationMin = (int) round(($exitTs - $entryTs) / 60);
+                }
+            }
+            $hours = $durationMin !== null && $durationMin > 0 ? round($durationMin / 60, 2) : null;
+
             $total = (float)($row['total'] ?? 0);
+            $itemQuantity = 1.0;
+            $itemPrice = $total;
+            $concept = $description !== '' ? $description : 'Ticket de parqueo';
+
+            if ($mode === 'hourly') {
+                $hourlyRate = $this->getHourlyRate($pdo);
+                if ($hourlyRate === null) {
+                    throw new \RuntimeException('Configura la tarifa por hora en Ajustes antes de facturar por tiempo.');
+                }
+                if ($hours === null || $hours <= 0) {
+                    throw new \RuntimeException('No se pudo calcular la duración del ticket para aplicar la tarifa por hora.');
+                }
+                $total = round($hours * $hourlyRate, 2);
+                if ($total <= 0) {
+                    throw new \RuntimeException('El total calculado por hora es inválido.');
+                }
+                $itemQuantity = round($hours, 2);
+                $itemPrice = $hourlyRate;
+                if ($description === '') {
+                    $concept = sprintf('Servicio de parqueo %.2f h x Q%.2f', $itemQuantity, $hourlyRate);
+                }
+            } elseif ($mode === 'custom') {
+                $customRaw = $b['custom_total'] ?? null;
+                if ($customRaw === null || $customRaw === '') {
+                    throw new \InvalidArgumentException('Ingresa el total personalizado para facturar.');
+                }
+                if (!is_numeric($customRaw)) {
+                    throw new \InvalidArgumentException('El total personalizado debe ser numérico.');
+                }
+                $total = round((float) $customRaw, 2);
+                if ($total <= 0) {
+                    throw new \InvalidArgumentException('El total personalizado debe ser mayor a cero.');
+                }
+                $itemQuantity = 1.0;
+                $itemPrice = $total;
+                if ($description === '') {
+                    $concept = 'Servicio personalizado de parqueo';
+                }
+            }
+
             if ($total <= 0) throw new \RuntimeException('Total 0 para facturar');
+
+            $ticketUpdate = $pdo->prepare('UPDATE tickets SET amount = :amount WHERE ticket_no = :ticket');
+            $ticketUpdate->execute([':amount' => $total, ':ticket' => $ticketNo]);
 
             // ya facturado/en proceso
             $chk = $pdo->prepare("SELECT status, uuid FROM invoices WHERE ticket_no=:t LIMIT 1");
@@ -394,6 +540,8 @@ class ApiController {
                     'ticketNo'    => $ticketNo,
                     'external_id' => $ticketNo,
                     'issueDate'   => $row['exit_at'] ?? $row['entry_at'] ?? date('c'),
+                    'billing_mode'=> $mode ?: 'default',
+                    'hours'       => $hours,
                 ],
                 'emisor' => [
                     'nit' => $this->config->get('FEL_G4S_ENTITY', ''),
@@ -407,7 +555,7 @@ class ApiController {
                     'numero' => $numero,
                     'moneda' => 'GTQ',
                     'items'  => [
-                        ['descripcion'=>'Ticket de parqueo', 'cantidad'=>1, 'precio'=>$total, 'iva'=>0, 'total'=>$total]
+                        ['descripcion'=>$concept, 'cantidad'=>$itemQuantity, 'precio'=>$itemPrice, 'iva'=>0, 'total'=>$total]
                     ],
                     'total'  => $total
                 ]
@@ -710,6 +858,10 @@ class ApiController {
                 COALESCE(t.exit_at, t.entry_at) AS fecha,
                 COALESCE(SUM(p.amount), t.amount, 0) AS total,
                 t.receptor_nit AS receptor,
+                t.duration_min,
+                t.entry_at,
+                t.exit_at,
+                t.amount AS ticket_amount,
                 NULL AS uuid,
                 NULL AS estado
             FROM tickets t
@@ -724,12 +876,28 @@ class ApiController {
                 t.ticket_no,
                 COALESCE(t.exit_at, t.entry_at),
                 t.amount,
-                t.receptor_nit
+                t.receptor_nit,
+                t.duration_min,
+                t.entry_at,
+                t.exit_at
             ORDER BY fecha DESC
             LIMIT 500
             ";
 
             $rows = $pdo->query($sql)->fetchAll(\PDO::FETCH_ASSOC);
+            foreach ($rows as &$row) {
+                $durationMin = isset($row['duration_min']) ? (int) $row['duration_min'] : null;
+                if (($durationMin === null || $durationMin <= 0) && !empty($row['entry_at']) && !empty($row['exit_at'])) {
+                    $entryTs = strtotime((string) $row['entry_at']);
+                    $exitTs = strtotime((string) $row['exit_at']);
+                    if ($entryTs && $exitTs && $exitTs > $entryTs) {
+                        $durationMin = (int) round(($exitTs - $entryTs) / 60);
+                    }
+                }
+                $row['duration_minutes'] = $durationMin;
+                $row['hours'] = $durationMin !== null && $durationMin > 0 ? round($durationMin / 60, 2) : null;
+            }
+            unset($row);
             \App\Utils\Http::json(['ok'=>true,'rows'=>$rows]);
         } catch (\Throwable $e) {
             \App\Utils\Http::json(['ok'=>false,'error'=>$e->getMessage()], 500);

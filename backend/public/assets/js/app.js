@@ -504,12 +504,16 @@
 
   // ===== Facturación (tabla + Facturar) =====
   async function renderInvoices() {
+    const settings = await loadSettings();
+    const hourlyRateSetting = settings?.billing?.hourly_rate ?? null;
+
     app.innerHTML = `
       <div class='card p-3'>
-        <div class="d-flex flex-wrap align-items-center gap-3 mb-3">
-          <div>
+        <div class="d-flex flex-wrap align-items-start gap-3 mb-3">
+          <div class="flex-grow-1">
             <h5 class="mb-1">Facturación (BD → G4S)</h5>
-            <p class="text-muted small mb-0">Lista tickets <strong>CLOSED</strong> con pagos (o monto) y <strong>sin factura</strong>.</p>
+            <p class="text-muted small mb-1">Lista tickets <strong>CLOSED</strong> con pagos (o monto) y <strong>sin factura</strong>.</p>
+            <div class="text-muted small" id="invoiceHourlyRateHint"></div>
           </div>
           <div class="ms-auto" style="max-width: 260px;">
             <input type="search" id="invSearch" class="form-control form-control-sm" placeholder="Buscar ticket..." aria-label="Buscar ticket pendiente" />
@@ -546,10 +550,31 @@
     const meta = document.getElementById('invMeta');
     const prevBtn = document.getElementById('invPrev');
     const nextBtn = document.getElementById('invNext');
+    const hourlyRateHint = document.getElementById('invoiceHourlyRateHint');
 
     const state = { search: '', page: 1 };
     const pageSize = 20;
     let allRows = [];
+
+    const formatCurrency = (value) => {
+      if (value === null || value === undefined || value === '') return '—';
+      const num = Number(value);
+      if (!Number.isFinite(num)) return '—';
+      try {
+        return num.toLocaleString('es-GT', { style: 'currency', currency: 'GTQ' });
+      } catch (_) {
+        return `Q${num.toFixed(2)}`;
+      }
+    };
+
+    if (hourlyRateHint) {
+      const rateNumber = Number(hourlyRateSetting);
+      if (Number.isFinite(rateNumber) && rateNumber > 0) {
+        hourlyRateHint.textContent = `Tarifa por hora configurada: ${formatCurrency(rateNumber)}.`;
+      } else {
+        hourlyRateHint.textContent = 'Configura una tarifa por hora en Ajustes para habilitar el cálculo automático.';
+      }
+    }
 
     function filterRows() {
       if (!state.search) return allRows;
@@ -557,6 +582,227 @@
       return allRows.filter((row) =>
         Object.values(row).some((value) => String(value ?? '').toLowerCase().includes(term))
       );
+    }
+
+    const buildPayload = (row) => ({
+      ticket_no: row.ticket_no,
+      receptor_nit: row.receptor || 'CF',
+      serie: row.serie || 'A',
+      numero: row.numero || null,
+      fecha: row.fecha ?? null,
+      total: row.total ?? null,
+      hours: row.hours ?? row.duration_minutes ?? null,
+      duration_minutes: row.duration_minutes ?? null,
+      entry_at: row.entry_at ?? null,
+      exit_at: row.exit_at ?? null,
+    });
+
+    function openInvoiceConfirmation(ticket, hourlyRate) {
+      return new Promise((resolve) => {
+        const hoursValue = typeof ticket.hours === 'number' ? ticket.hours : Number(ticket.hours);
+        const hours = Number.isFinite(hoursValue) && hoursValue > 0 ? Number(hoursValue.toFixed(2)) : null;
+        const minutesValue = typeof ticket.duration_minutes === 'number' ? ticket.duration_minutes : Number(ticket.duration_minutes);
+        const minutes = Number.isFinite(minutesValue) && minutesValue > 0 ? Math.round(minutesValue) : null;
+        const rate = Number.isFinite(Number(hourlyRate)) && Number(hourlyRate) > 0 ? Number(hourlyRate) : null;
+        const hourlyTotal = rate !== null && hours !== null ? Math.round(hours * rate * 100) / 100 : null;
+        const totalFromDb = ticket.total !== null && ticket.total !== undefined && ticket.total !== ''
+          ? Number(ticket.total)
+          : null;
+        const normalizedDbTotal = Number.isFinite(totalFromDb) ? Number(totalFromDb.toFixed(2)) : null;
+        const customDefault = hourlyTotal ?? normalizedDbTotal;
+        const customValue = customDefault !== null ? customDefault.toFixed(2) : '';
+        const canHourly = hourlyTotal !== null;
+        const selectedMode = canHourly ? 'hourly' : 'custom';
+        const rateLabel = rate !== null ? formatCurrency(rate) : null;
+        const hourlyLabel = hourlyTotal !== null ? formatCurrency(hourlyTotal) : null;
+        const defaultLabel = normalizedDbTotal !== null ? formatCurrency(normalizedDbTotal) : '—';
+        const dateCandidate = ticket.exit_at || ticket.entry_at || ticket.fecha || null;
+        const dateLabel = dateCandidate ? formatDateTime(dateCandidate) : '—';
+        const relative = dateCandidate ? formatRelativeTime(dateCandidate) : '';
+        const hoursLabel = hours !== null ? `${hours.toFixed(2)} h${minutes && minutes % 60 ? ` (${minutes} min)` : ''}` : '—';
+
+        const backdrop = document.createElement('div');
+        backdrop.className = 'app-modal-backdrop';
+        const hourlyHelp = hourlyLabel
+          ? `Tarifa ${rateLabel ?? '—'} × ${hours !== null ? `${hours.toFixed(2)} h` : '—'}.`
+          : 'Define una tarifa por hora en Ajustes para habilitar esta opción.';
+
+        backdrop.innerHTML = `
+          <form class="app-modal-card" id="invoiceConfirmForm" role="dialog" aria-modal="true">
+            <div class="app-modal-header">
+              <h5 class="mb-1">Confirmar factura</h5>
+              <p class="text-muted small mb-0">Selecciona el tipo de cobro para el ticket ${escapeHtml(ticket.ticket_no ?? '')}.</p>
+            </div>
+            <div class="app-modal-body">
+              <div class="app-modal-summary">
+                <div class="app-modal-summary-row"><span>Ticket</span><span>${escapeHtml(ticket.ticket_no ?? '')}</span></div>
+                <div class="app-modal-summary-row"><span>Fecha</span><span>${escapeHtml(relative ? `${dateLabel} (${relative})` : dateLabel)}</span></div>
+                <div class="app-modal-summary-row"><span>Horas registradas</span><span>${escapeHtml(hoursLabel)}</span></div>
+                <div class="app-modal-summary-row"><span>Total en BD</span><span>${escapeHtml(defaultLabel)}</span></div>
+                ${hourlyLabel ? `<div class="app-modal-summary-row"><span>Total por hora</span><span>${escapeHtml(hourlyLabel)}</span></div>` : ''}
+              </div>
+              <div class="app-modal-options">
+                <label class="form-check">
+                  <input class="form-check-input" type="radio" name="billingMode" value="hourly" ${canHourly ? 'checked' : 'disabled'} />
+                  <span class="form-check-label">
+                    Cobro por hora ${hourlyLabel ? `<strong class="ms-1">${escapeHtml(hourlyLabel)}</strong>` : ''}
+                    <small class="form-text">${escapeHtml(hourlyHelp)}</small>
+                  </span>
+                </label>
+                <label class="form-check mt-3">
+                  <input class="form-check-input" type="radio" name="billingMode" value="custom" ${selectedMode === 'custom' ? 'checked' : ''} />
+                  <span class="form-check-label">
+                    Cobro personalizado
+                    <small class="form-text">Indica el total que deseas facturar manualmente.</small>
+                  </span>
+                </label>
+                <div class="input-group input-group-sm mt-2" data-role="customWrapper">
+                  <span class="input-group-text">Q</span>
+                  <input type="number" step="0.01" min="0" class="form-control" data-role="customInput" value="${customValue}" ${selectedMode === 'custom' ? '' : 'disabled'} placeholder="0.00" />
+                </div>
+              </div>
+              <div class="app-modal-error text-danger small" data-role="error" hidden></div>
+            </div>
+            <div class="app-modal-footer">
+              <button type="button" class="btn btn-outline-secondary btn-sm" data-action="cancel">Cancelar</button>
+              <button type="submit" class="btn btn-primary btn-sm">Confirmar factura</button>
+            </div>
+          </form>
+        `;
+
+        document.body.appendChild(backdrop);
+        document.body.classList.add('modal-open');
+
+        const form = backdrop.querySelector('#invoiceConfirmForm');
+        const cancelBtn = form.querySelector('[data-action="cancel"]');
+        const customInput = form.querySelector('[data-role="customInput"]');
+        const customWrapper = form.querySelector('[data-role="customWrapper"]');
+        const errorBox = form.querySelector('[data-role="error"]');
+        const radios = Array.from(form.querySelectorAll('input[name="billingMode"]'));
+
+        let resolved = false;
+        const cleanup = (result) => {
+          if (resolved) return;
+          resolved = true;
+          document.body.classList.remove('modal-open');
+          document.removeEventListener('keydown', onKeyDown);
+          backdrop.remove();
+          resolve(result);
+        };
+
+        const updateState = () => {
+          const selected = form.querySelector('input[name="billingMode"]:checked')?.value;
+          const isCustom = selected === 'custom';
+          customInput.disabled = !isCustom;
+          customWrapper.classList.toggle('is-disabled', !isCustom);
+          errorBox.hidden = true;
+        };
+
+        const onKeyDown = (event) => {
+          if (event.key === 'Escape') {
+            event.preventDefault();
+            cleanup(null);
+          }
+        };
+
+        radios.forEach((radio) => radio.addEventListener('change', updateState));
+        cancelBtn.addEventListener('click', () => cleanup(null));
+        backdrop.addEventListener('click', (event) => {
+          if (event.target === backdrop) {
+            cleanup(null);
+          }
+        });
+        document.addEventListener('keydown', onKeyDown);
+        updateState();
+
+        form.addEventListener('submit', (event) => {
+          event.preventDefault();
+          const selected = form.querySelector('input[name="billingMode"]:checked')?.value;
+          if (!selected) {
+            errorBox.textContent = 'Selecciona el tipo de cobro.';
+            errorBox.hidden = false;
+            return;
+          }
+          if (selected === 'hourly') {
+            if (!canHourly || hourlyTotal === null) {
+              errorBox.textContent = 'Configura una tarifa por hora válida en Ajustes para usar esta opción.';
+              errorBox.hidden = false;
+              return;
+            }
+            cleanup({
+              mode: 'hourly',
+              total: hourlyTotal,
+              label: `Cobro por hora ${hourlyLabel ?? ''}`.trim(),
+              description: '',
+            });
+            return;
+          }
+
+          const customVal = parseFloat(customInput.value);
+          if (!Number.isFinite(customVal) || customVal <= 0) {
+            errorBox.textContent = 'Ingresa un total personalizado mayor a cero.';
+            errorBox.hidden = false;
+            return;
+          }
+          const normalized = Math.round(customVal * 100) / 100;
+          cleanup({
+            mode: 'custom',
+            total: normalized,
+            label: `Cobro personalizado ${formatCurrency(normalized)}`,
+            description: '',
+          });
+        });
+      });
+    }
+
+    function attachInvoiceHandlers() {
+      tbody.querySelectorAll('[data-action="invoice"]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const payload = JSON.parse(decodeURIComponent(btn.getAttribute('data-payload')));
+          btn.disabled = true;
+          const originalText = btn.textContent;
+          btn.textContent = 'Confirmando…';
+          try {
+            const settingsSnapshot = await loadSettings();
+            const rateNumber = Number(settingsSnapshot?.billing?.hourly_rate ?? 0);
+            const hourlyRate = Number.isFinite(rateNumber) && rateNumber > 0 ? rateNumber : null;
+            const confirmation = await openInvoiceConfirmation(payload, hourlyRate);
+            if (!confirmation) {
+              btn.disabled = false;
+              btn.textContent = originalText;
+              return;
+            }
+
+            btn.textContent = 'Enviando…';
+            const requestPayload = {
+              ticket_no: payload.ticket_no,
+              receptor_nit: payload.receptor_nit || 'CF',
+              serie: payload.serie || 'A',
+              numero: payload.numero || null,
+              mode: confirmation.mode,
+            };
+            if (confirmation.mode === 'custom') {
+              requestPayload.custom_total = confirmation.total;
+            }
+            if (confirmation.description) {
+              requestPayload.description = confirmation.description;
+            }
+
+            const js = await fetchJSON(api('fel/invoice'), {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(requestPayload)
+            });
+            alert(`Factura enviada (${confirmation.label}). UUID ${js.uuid || '(verifique respuesta)'}`);
+            await loadList();
+          } catch (e) {
+            alert('Error al facturar: ' + e.message);
+          } finally {
+            btn.disabled = false;
+            btn.textContent = originalText;
+          }
+        });
+      });
     }
 
     function renderPage() {
@@ -575,23 +821,16 @@
           : 'No hay pendientes por facturar.';
         tbody.innerHTML = `<tr><td colspan="5" class="text-muted">${message}</td></tr>`;
       } else {
-        tbody.innerHTML = pageRows.map((d, index) => {
-          const totalFmt = (d.total != null)
-            ? Number(d.total).toLocaleString('es-GT', { style: 'currency', currency: 'GTQ' })
-            : '';
-          const payload = encodeURIComponent(JSON.stringify({
-            ticket_no: d.ticket_no,
-            receptor_nit: d.receptor || 'CF',
-            serie: d.serie || 'A',
-            numero: d.numero || null
-          }));
+        tbody.innerHTML = pageRows.map((d) => {
+          const totalFmt = formatCurrency(d.total);
+          const payload = encodeURIComponent(JSON.stringify(buildPayload(d)));
           const disabled = d.uuid ? 'disabled' : '';
           return `
             <tr>
-              <td>${d.ticket_no}</td>
-              <td>${d.fecha ?? ''}</td>
+              <td>${escapeHtml(d.ticket_no ?? '')}</td>
+              <td>${escapeHtml(d.fecha ?? '')}</td>
               <td class="text-end">${totalFmt}</td>
-              <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;">${d.uuid ?? ''}</td>
+              <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(d.uuid ?? '')}</td>
               <td class="text-center">
                 <button class="btn btn-sm btn-outline-success" data-action="invoice" data-payload="${payload}" ${disabled}>
                   Facturar
@@ -599,29 +838,7 @@
               </td>
             </tr>`;
         }).join('');
-
-        tbody.querySelectorAll('[data-action="invoice"]').forEach((btn) => {
-          btn.addEventListener('click', async () => {
-            const payload = JSON.parse(decodeURIComponent(btn.getAttribute('data-payload')));
-            btn.disabled = true;
-            const originalText = btn.textContent;
-            btn.textContent = 'Enviando…';
-            try {
-              const js = await fetchJSON(api('fel/invoice'), {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-              });
-              alert(`OK: UUID ${js.uuid || '(verifique respuesta)'}`);
-              loadList();
-            } catch (e) {
-              alert('Error al facturar: ' + e.message);
-            } finally {
-              btn.disabled = false;
-              btn.textContent = originalText;
-            }
-          });
-        });
+        attachInvoiceHandlers();
       }
 
       if (filtered.length) {
@@ -1664,6 +1881,10 @@
     }
 
     const metrics = settings.database?.metrics ?? {};
+    const hourlyRate = settings.billing?.hourly_rate ?? null;
+    const hourlyRateValue = hourlyRate !== null && hourlyRate !== undefined && hourlyRate !== ''
+      ? Number(hourlyRate).toFixed(2)
+      : '';
     const env = String(settings.app?.environment ?? '').toLowerCase();
     let envClass = 'neutral';
     if (['production', 'prod'].includes(env)) envClass = 'danger';
@@ -1763,6 +1984,31 @@
             </div>
           </div>
         </div>
+        <div class="col-xl-4 col-lg-6">
+          <div class="card shadow-sm h-100">
+            <div class="card-body d-flex flex-column gap-3">
+              <div>
+                <h5 class="card-title mb-1">Facturación automática</h5>
+                <p class="text-muted small mb-0">Define la tarifa por hora para aplicar cobros automáticos en las facturas.</p>
+              </div>
+              <form id="hourlyRateForm" class="d-flex flex-column gap-3" autocomplete="off" novalidate>
+                <div>
+                  <label for="hourlyRateInput" class="form-label small mb-1">Tarifa por hora (GTQ)</label>
+                  <div class="input-group input-group-sm">
+                    <span class="input-group-text">Q</span>
+                    <input type="number" step="0.01" min="0" class="form-control" id="hourlyRateInput" value="${escapeHtml(hourlyRateValue)}" placeholder="0.00" />
+                  </div>
+                  <small class="text-muted d-block mt-1">Se aplicará automáticamente a los tickets facturados por hora.</small>
+                </div>
+                <div class="d-flex gap-2">
+                  <button type="submit" class="btn btn-primary btn-sm" id="hourlyRateSave">Guardar</button>
+                  <button type="button" class="btn btn-outline-secondary btn-sm" id="hourlyRateClear">Limpiar</button>
+                </div>
+                <div class="alert alert-success py-2 px-3 small mb-0 d-none" id="hourlyRateFeedback">Tarifa actualizada correctamente.</div>
+              </form>
+            </div>
+          </div>
+        </div>
         <div class="col-12">
           <div class="card shadow-sm">
             <div class="card-body d-flex flex-column gap-3">
@@ -1797,6 +2043,61 @@
         reload.classList.add('is-loading');
         reload.disabled = true;
         renderSettings();
+      });
+    }
+
+    const hourlyForm = document.getElementById('hourlyRateForm');
+    const hourlyInput = document.getElementById('hourlyRateInput');
+    const hourlyFeedback = document.getElementById('hourlyRateFeedback');
+    const hourlyClear = document.getElementById('hourlyRateClear');
+    const hourlySave = document.getElementById('hourlyRateSave');
+    if (hourlyForm && hourlyInput) {
+      hourlyInput.addEventListener('input', () => {
+        if (hourlyFeedback) hourlyFeedback.classList.add('d-none');
+      });
+
+      if (hourlyClear) {
+        hourlyClear.addEventListener('click', (event) => {
+          event.preventDefault();
+          hourlyInput.value = '';
+          if (hourlyFeedback) hourlyFeedback.classList.add('d-none');
+        });
+      }
+
+      hourlyForm.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const rawValue = hourlyInput.value.trim();
+        const body = rawValue === '' ? { hourly_rate: null } : { hourly_rate: rawValue };
+        if (hourlySave) {
+          hourlySave.disabled = true;
+          hourlySave.classList.add('is-loading');
+        }
+        if (hourlyFeedback) hourlyFeedback.classList.add('d-none');
+        try {
+          await fetchJSON(api('settings/hourly-rate'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          const refreshed = await loadSettings(true);
+          const refreshedRate = refreshed?.billing?.hourly_rate ?? null;
+          hourlyInput.value = refreshedRate !== null && refreshedRate !== undefined && refreshedRate !== ''
+            ? Number(refreshedRate).toFixed(2)
+            : '';
+          if (hourlyFeedback) {
+            hourlyFeedback.textContent = hourlyInput.value
+              ? 'Tarifa actualizada correctamente.'
+              : 'Tarifa eliminada. Configura un valor para habilitar el cálculo automático.';
+            hourlyFeedback.classList.remove('d-none');
+          }
+        } catch (error) {
+          alert('No se pudo guardar la tarifa: ' + error.message);
+        } finally {
+          if (hourlySave) {
+            hourlySave.classList.remove('is-loading');
+            hourlySave.disabled = false;
+          }
+        }
       });
     }
   }

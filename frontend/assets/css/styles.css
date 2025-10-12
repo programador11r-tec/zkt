@@ -228,9 +228,7 @@ body.sidebar-open .sidebar-toggle-icon::after {
 .layout {
   position: relative;
   max-width: var(--layout-max);
-  margin: 0;
-  margin-left: 0;
-  margin-right: auto;
+  margin: 0 auto;
   padding: 0 var(--layout-padding) 3rem;
   display: grid;
   grid-template-columns: minmax(0, var(--sidebar-track)) minmax(0, 1fr);
@@ -239,15 +237,12 @@ body.sidebar-open .sidebar-toggle-icon::after {
     grid-template-columns 0.45s cubic-bezier(0.33, 1, 0.68, 1),
     column-gap 0.45s cubic-bezier(0.33, 1, 0.68, 1),
     padding 0.45s ease,
-    max-width 0.45s ease;
+    max-width 0.45s ease,
+    margin 0.45s ease;
 }
 
 body.sidebar-open .layout {
   max-width: calc(var(--layout-max) + var(--sidebar-width) + var(--sidebar-gap));
-  margin-left: 0;
-  margin-right: auto;
-  padding-left: 0;
-  padding-right: var(--layout-padding);
 }
 
 .sidebar {
@@ -378,16 +373,13 @@ body.sidebar-open .sidebar {
 
 .content {
   grid-column: 2;
+  justify-self: center;
+  width: min(100%, var(--layout-max));
   display: flex;
   flex-direction: column;
   gap: 1.75rem;
   padding: 2rem var(--layout-padding) 3rem;
   transition: padding 0.45s ease;
-}
-
-body.sidebar-open .content {
-  padding-left: 0;
-  padding-right: var(--layout-padding);
 }
 
 .card {

@@ -18,6 +18,8 @@ $api    = new ApiController();
 
 // Salud
 $router->get('/api/health', fn() => $api->health());
+$router->get('/api/settings', fn() => $api->settingsOverview());
+$router->post('/api/settings/hourly-rate', fn() => $api->updateHourlyRate());
 
 // Ingesta desde ZKBio / externos (PLURAL y métodos existentes)
 $router->post('/api/ingest/tickets',  fn() => $api->ingestTickets());

@@ -39,3 +39,9 @@ CREATE TABLE IF NOT EXISTS invoices (
   INDEX idx_invoices_uuid (uuid),
   CONSTRAINT fk_invoices_ticket FOREIGN KEY (ticket_no) REFERENCES tickets(ticket_no)
 );
+
+CREATE TABLE IF NOT EXISTS app_settings (
+  `key`       VARCHAR(64) PRIMARY KEY,
+  `value`     TEXT NULL,
+  updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);

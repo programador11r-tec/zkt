@@ -2,6 +2,8 @@
   const app = document.getElementById('app');
   const sidebar = document.getElementById('appSidebar');
   const sidebarLinks = sidebar ? Array.from(sidebar.querySelectorAll('.nav-link')) : [];
+  let currentPage = null;
+  let renderGeneration = 0;
 
   if (sidebar) {
     sidebar.setAttribute('aria-hidden', 'false');
@@ -21,9 +23,10 @@
   }
 
   function setActive(link) {
-    document.querySelectorAll('.nav-link').forEach(a => a.classList.remove('active'));
-    link.classList.add('active');
-    closeSidebar();
+    sidebarLinks.forEach((a) => a.classList.remove('active'));
+    if (link) {
+      link.classList.add('active');
+    }
   }
 
   async function fetchJSON(url, opts) {
@@ -250,12 +253,12 @@
   const refreshBtn = document.getElementById('refreshBtn');
   if (refreshBtn) {
     refreshBtn.addEventListener('click', async () => {
-      const active = document.querySelector('.nav-link.active[data-page]')?.getAttribute('data-page') || 'dashboard';
+      const active = currentPage || document.querySelector('.nav-link.active[data-page]')?.getAttribute('data-page') || 'dashboard';
       refreshBtn.classList.add('is-loading');
       refreshBtn.disabled = true;
       try {
         await loadSettings(true);
-        document.querySelector(`.nav-link[data-page="${active}"]`)?.click();
+        await goToPage(active, { force: true });
       } catch (err) {
         console.error(err);
       } finally {
@@ -1800,39 +1803,64 @@
 
   const renderers = { dashboard: renderDashboard, invoices: renderInvoices, reports: renderReports, settings: renderSettings };
 
-  function goToPage(page) {
-    const link = document.querySelector(`.nav-link[data-page="${page}"]`);
+  async function goToPage(page, { force = false } = {}) {
+    const target = renderers[page] ? page : 'dashboard';
+
+    if (!force && target === currentPage) {
+      const activeLink = document.querySelector(`.nav-link[data-page="${target}"]`);
+      if (activeLink) {
+        setActive(activeLink);
+      }
+      return;
+    }
+
+    const requestId = ++renderGeneration;
+    const link = document.querySelector(`.nav-link[data-page="${target}"]`);
     if (link) {
       setActive(link);
+      link.setAttribute('aria-current', 'page');
     }
-    (renderers[page] || renderDashboard)();
+    sidebarLinks.forEach((item) => {
+      if (item !== link) {
+        item.removeAttribute('aria-current');
+      }
+    });
+
+    const renderer = renderers[target] || renderDashboard;
+    try {
+      await renderer();
+    } catch (error) {
+      console.error('Error al renderizar la vista', error);
+    } finally {
+      if (renderGeneration === requestId) {
+        currentPage = target;
+      }
+    }
   }
 
   function initNav() {
-    const links = document.querySelectorAll('[data-page]');
-    links.forEach(link => {
-      link.addEventListener('click', (e) => {
-        e.preventDefault();
+    sidebarLinks.forEach((link) => {
+      link.addEventListener('click', (event) => {
+        event.preventDefault();
         const page = link.getAttribute('data-page');
-        goToPage(page);
-      });
-    });
-
-    document.querySelectorAll('[data-go-page]').forEach((control) => {
-      control.addEventListener('click', () => {
-        const page = control.getAttribute('data-go-page');
         if (page) {
-          goToPage(page);
+          void goToPage(page);
         }
       });
     });
 
-    const initial = document.querySelector('.nav-link.active[data-page]') || document.querySelector('[data-page="dashboard"]');
-    if (initial) {
-      goToPage(initial.getAttribute('data-page'));
-    } else {
-      renderDashboard();
-    }
+    document.addEventListener('click', (event) => {
+      const control = event.target.closest('[data-go-page]');
+      if (!control) return;
+      const page = control.getAttribute('data-go-page');
+      if (!page) return;
+      event.preventDefault();
+      void goToPage(page);
+    });
+
+    const initialLink = document.querySelector('.nav-link.active[data-page]') || sidebarLinks[0];
+    const initialPage = initialLink?.getAttribute('data-page') || 'dashboard';
+    void goToPage(initialPage, { force: true });
   }
 
   initNav();

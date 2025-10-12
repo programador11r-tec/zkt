@@ -2,21 +2,31 @@
   const app = document.getElementById('app');
   const sidebar = document.getElementById('appSidebar');
   const sidebarLinks = sidebar ? Array.from(sidebar.querySelectorAll('.nav-link')) : [];
+  let currentPage = null;
+  let renderGeneration = 0;
 
   if (sidebar) {
     sidebar.setAttribute('aria-hidden', 'false');
   }
 
   function setActive(link) {
-    document.querySelectorAll('.nav-link').forEach(a => a.classList.remove('active'));
-    link.classList.add('active');
-    closeSidebar();
+    sidebarLinks.forEach((a) => a.classList.remove('active'));
+    if (link) {
+      link.classList.add('active');
+    }
   }
 
   async function fetchJSON(url, opts) {
     const res = await fetch(url, opts);
     return res.json();
   }
+
+  const escapeHtml = (value) => String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 
   async function renderDashboard() {
     const { data } = await fetchJSON('/api/dummy/attendance');
@@ -203,6 +213,129 @@
     });
   }
 
+  async function renderReports() {
+    const { data } = await fetchJSON('/api/dummy/attendance');
+    const rows = Array.isArray(data) ? data : [];
+
+    const normaliseDate = (value) => {
+      if (!value) return null;
+      const safe = value.includes('T') ? value : value.replace(' ', 'T');
+      const dt = new Date(safe);
+      return Number.isNaN(dt.getTime()) ? null : dt;
+    };
+
+    const uniquePeople = new Set();
+    const dayBuckets = new Map();
+
+    rows.forEach((row) => {
+      if (row?.name) {
+        uniquePeople.add(row.name);
+      }
+
+      const when = normaliseDate(row?.checkIn) || normaliseDate(row?.checkOut);
+      const key = when ? when.toISOString().slice(0, 10) : 'unknown';
+      const label = when
+        ? when.toLocaleDateString('es-GT', { weekday: 'short', day: '2-digit', month: 'short' })
+        : 'Sin fecha';
+
+      const bucket = dayBuckets.get(key) || { key, label, count: 0 };
+      bucket.count += 1;
+      dayBuckets.set(key, bucket);
+    });
+
+    const totalsByDay = Array.from(dayBuckets.values()).sort((a, b) => b.key.localeCompare(a.key));
+    const topDays = totalsByDay.slice(0, 5);
+
+    const lastEntries = rows.slice().sort((a, b) => {
+      const aDate = normaliseDate(a?.checkIn) || normaliseDate(a?.checkOut);
+      const bDate = normaliseDate(b?.checkIn) || normaliseDate(b?.checkOut);
+      const aTime = aDate ? aDate.getTime() : 0;
+      const bTime = bDate ? bDate.getTime() : 0;
+      return bTime - aTime;
+    }).slice(0, 6);
+
+    const renderDayList = () => {
+      if (!topDays.length) {
+        return '<li class="text-muted small">Sin datos disponibles</li>';
+      }
+
+      return topDays.map((day) => `
+        <li class="d-flex align-items-center justify-content-between">
+          <span>${escapeHtml(day.label)}</span>
+          <span class="badge bg-primary-subtle text-primary">${day.count}</span>
+        </li>
+      `).join('');
+    };
+
+    const renderRecent = () => {
+      if (!lastEntries.length) {
+        return '<div class="text-muted small">Sin registros recientes</div>';
+      }
+
+      return lastEntries.map((row) => {
+        const when = normaliseDate(row?.checkIn) || normaliseDate(row?.checkOut);
+        const whenLabel = when
+          ? when.toLocaleString('es-GT', { dateStyle: 'medium', timeStyle: 'short' })
+          : 'Sin fecha';
+        return `
+          <div class="report-entry">
+            <div class="fw-semibold">${escapeHtml(row?.name ?? 'Sin nombre')}</div>
+            <div class="text-muted small">${escapeHtml(whenLabel)}</div>
+          </div>
+        `;
+      }).join('');
+    };
+
+    app.innerHTML = `
+      <div class="row g-4">
+        <div class="col-xl-4">
+          <div class="card shadow-sm h-100">
+            <div class="card-body d-flex flex-column gap-3">
+              <div>
+                <h5 class="card-title mb-1">Reportes de asistencia</h5>
+                <p class="text-muted small mb-0">Visualiza métricas generadas a partir de los datos dummy.</p>
+              </div>
+              <ul class="list-unstyled mb-0 d-flex flex-column gap-2">
+                <li class="d-flex justify-content-between align-items-center">
+                  <span>Total de registros</span>
+                  <strong>${rows.length}</strong>
+                </li>
+                <li class="d-flex justify-content-between align-items-center">
+                  <span>Colaboradores únicos</span>
+                  <strong>${uniquePeople.size}</strong>
+                </li>
+                <li class="d-flex justify-content-between align-items-center">
+                  <span>Días con actividad</span>
+                  <strong>${totalsByDay.length}</strong>
+                </li>
+              </ul>
+            </div>
+          </div>
+        </div>
+        <div class="col-xl-4">
+          <div class="card shadow-sm h-100">
+            <div class="card-body">
+              <h6 class="text-uppercase text-muted fs-7 mb-3">Días con más registros</h6>
+              <ul class="list-unstyled mb-0 d-flex flex-column gap-2">
+                ${renderDayList()}
+              </ul>
+            </div>
+          </div>
+        </div>
+        <div class="col-xl-4">
+          <div class="card shadow-sm h-100">
+            <div class="card-body">
+              <h6 class="text-uppercase text-muted fs-7 mb-3">Últimos ingresos</h6>
+              <div class="d-flex flex-column gap-2">
+                ${renderRecent()}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
   async function renderSettings() {
     app.innerHTML = `
       <div class="card shadow-sm">
@@ -219,7 +352,42 @@
     `;
   }
 
-  const renderers = { dashboard: renderDashboard, invoices: renderInvoices, settings: renderSettings };
+  const renderers = { dashboard: renderDashboard, invoices: renderInvoices, reports: renderReports, settings: renderSettings };
+
+  async function goToPage(page, { force = false } = {}) {
+    const target = renderers[page] ? page : 'dashboard';
+
+    if (!force && target === currentPage) {
+      const activeLink = document.querySelector(`.nav-link[data-page="${target}"]`);
+      if (activeLink) {
+        setActive(activeLink);
+      }
+      return;
+    }
+
+    const requestId = ++renderGeneration;
+    const link = document.querySelector(`.nav-link[data-page="${target}"]`);
+    if (link) {
+      setActive(link);
+      link.setAttribute('aria-current', 'page');
+    }
+    sidebarLinks.forEach((item) => {
+      if (item !== link) {
+        item.removeAttribute('aria-current');
+      }
+    });
+
+    const renderer = renderers[target] || renderDashboard;
+    try {
+      await renderer();
+    } catch (error) {
+      console.error('Error al renderizar la vista dummy', error);
+    } finally {
+      if (renderGeneration === requestId) {
+        currentPage = target;
+      }
+    }
+  }
 
   function goToPage(page) {
     const link = document.querySelector(`.nav-link[data-page="${page}"]`);
@@ -230,30 +398,28 @@
   }
 
   function initNav() {
-    const links = document.querySelectorAll('[data-page]');
-    links.forEach(link => {
-      link.addEventListener('click', (e) => {
-        e.preventDefault();
+    sidebarLinks.forEach((link) => {
+      link.addEventListener('click', (event) => {
+        event.preventDefault();
         const page = link.getAttribute('data-page');
-        goToPage(page);
-      });
-    });
-
-    document.querySelectorAll('[data-go-page]').forEach((control) => {
-      control.addEventListener('click', () => {
-        const page = control.getAttribute('data-go-page');
         if (page) {
-          goToPage(page);
+          void goToPage(page);
         }
       });
     });
 
-    const initial = document.querySelector('.nav-link.active[data-page]') || document.querySelector('[data-page="dashboard"]');
-    if (initial) {
-      goToPage(initial.getAttribute('data-page'));
-    } else {
-      renderDashboard();
-    }
+    document.addEventListener('click', (event) => {
+      const control = event.target.closest('[data-go-page]');
+      if (!control) return;
+      const page = control.getAttribute('data-go-page');
+      if (!page) return;
+      event.preventDefault();
+      void goToPage(page);
+    });
+
+    const initialLink = document.querySelector('.nav-link.active[data-page]') || sidebarLinks[0];
+    const initialPage = initialLink?.getAttribute('data-page') || 'dashboard';
+    void goToPage(initialPage, { force: true });
   }
 
   initNav();

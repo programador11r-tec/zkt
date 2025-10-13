@@ -7,10 +7,7 @@ CREATE TABLE IF NOT EXISTS tickets (
   exit_at      DATETIME NULL,
   duration_min INT NULL,
   amount       DECIMAL(12,2) DEFAULT 0,
-  source       VARCHAR(32) DEFAULT 'external',
-  raw_json     MEDIUMTEXT,
-  created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+  created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX idx_tickets_status ON tickets(status);

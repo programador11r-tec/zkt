@@ -41,6 +41,7 @@ $router->get('/api/fel/xml',              fn() => $api->felXml());
 
 // (Si aún usas estas)
 $router->get('/api/sync/tickets',  fn() => $api->syncTicketsAndPayments());
+$router->post('/api/sync/park-records/hamachi', fn() => $api->syncRemoteParkRecords());
 $router->post('/api/invoice/tickets', fn() => $api->invoiceClosedTickets());
 $router->get('/api/fel/issued-rt', fn() => $api->felIssuedRT());
 

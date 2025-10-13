@@ -299,6 +299,430 @@ class ApiController {
         }
     }
 
+    public function syncRemoteParkRecords() {
+        try {
+            $baseUrl = rtrim((string) $this->config->get('HAMACHI_PARK_BASE_URL', ''), '/');
+            if ($baseUrl === '') {
+                Http::json(['ok' => false, 'error' => 'HAMACHI_PARK_BASE_URL no está configurado.'], 400);
+                return;
+            }
+
+            $accessToken = (string) ($_GET['access_token'] ?? $this->config->get('HAMACHI_PARK_ACCESS_TOKEN', ''));
+            if ($accessToken === '') {
+                Http::json(['ok' => false, 'error' => 'HAMACHI_PARK_ACCESS_TOKEN no está configurado.'], 400);
+                return;
+            }
+
+            $pageNo = (int) ($_GET['pageNo'] ?? $_GET['page'] ?? 1);
+            if ($pageNo < 1) {
+                $pageNo = 1;
+            }
+            $pageSize = (int) ($_GET['pageSize'] ?? $_GET['limit'] ?? 100);
+            if ($pageSize <= 0) {
+                $pageSize = 100;
+            }
+            $pageSize = min($pageSize, 1000);
+
+            $query = [
+                'pageNo' => $pageNo,
+                'pageSize' => $pageSize,
+                'access_token' => $accessToken,
+            ];
+
+            $endpoint = $baseUrl . '/api/v2/parkTransaction/listParkRecordin?' . http_build_query($query);
+            $headers = ['Accept: application/json'];
+            $hostHeader = trim((string) $this->config->get('HAMACHI_PARK_HOST_HEADER', ''));
+            if ($hostHeader !== '') {
+                $headers[] = 'Host: ' . $hostHeader;
+            }
+
+            $verifySsl = strtolower((string) $this->config->get('HAMACHI_PARK_VERIFY_SSL', 'false')) === 'true';
+
+            $ch = curl_init($endpoint);
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_CONNECTTIMEOUT => 10,
+                CURLOPT_TIMEOUT => 30,
+                CURLOPT_HTTPHEADER => $headers,
+            ]);
+            if (!$verifySsl) {
+                curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+                curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+            }
+
+            $raw = curl_exec($ch);
+            if ($raw === false) {
+                $err = curl_error($ch) ?: 'Error desconocido';
+                curl_close($ch);
+                throw new \RuntimeException('Error al contactar API remota: ' . $err);
+            }
+            $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+
+            if ($status < 200 || $status >= 300) {
+                $preview = substr($raw, 0, 500);
+                throw new \RuntimeException('API remota respondió ' . $status . ': ' . $preview);
+            }
+
+            $payload = json_decode($raw, true);
+            if (!is_array($payload)) {
+                throw new \RuntimeException('Respuesta remota inválida, no es JSON.');
+            }
+
+            $records = $this->extractParkRecords($payload);
+            if (!$records) {
+                Http::json([
+                    'ok' => true,
+                    'endpoint' => $endpoint,
+                    'fetched' => 0,
+                    'upserted' => 0,
+                    'skipped' => 0,
+                    'message' => 'La API remota no devolvió registros.',
+                ]);
+                return;
+            }
+
+            $normalized = [];
+            $skipped = 0;
+            foreach ($records as $row) {
+                if (!is_array($row)) {
+                    $skipped++;
+                    continue;
+                }
+                $ticket = $this->normalizeParkRecordRow($row);
+                if ($ticket === null) {
+                    $skipped++;
+                    continue;
+                }
+                $normalized[] = $ticket;
+            }
+
+            if (!$normalized) {
+                Http::json([
+                    'ok' => true,
+                    'endpoint' => $endpoint,
+                    'fetched' => count($records),
+                    'upserted' => 0,
+                    'skipped' => $skipped,
+                ]);
+                return;
+            }
+
+            $pdo = DB::pdo($this->config);
+            $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+
+            $upserted = $this->persistTickets($pdo, $normalized);
+
+            Logger::info('remote.park.sync_success', [
+                'endpoint' => $endpoint,
+                'normalized' => $upserted,
+                'skipped' => $skipped,
+            ]);
+
+            Http::json([
+                'ok' => true,
+                'endpoint' => $endpoint,
+                'fetched' => count($records),
+                'upserted' => $upserted,
+                'skipped' => $skipped,
+            ]);
+        } catch (\Throwable $e) {
+            Logger::error('remote.park.sync_failed', ['error' => $e->getMessage()]);
+            Http::json(['ok' => false, 'error' => $e->getMessage()], 500);
+        }
+    }
+
+    private function persistTickets(PDO $pdo, array $rows): int {
+        if (!$rows) {
+            return 0;
+        }
+
+        try {
+            $driver = strtolower((string) $pdo->getAttribute(PDO::ATTR_DRIVER_NAME));
+        } catch (\Throwable $e) {
+            $driver = 'mysql';
+        }
+
+        if ($driver === 'sqlite') {
+            $sql = "
+                INSERT INTO tickets (ticket_no, plate, status, entry_at, exit_at, duration_min, amount, source, raw_json, created_at, updated_at)
+                VALUES (:ticket_no,:plate,:status,:entry_at,:exit_at,:duration_min,:amount,:source,:raw_json, datetime('now'), datetime('now'))
+                ON CONFLICT(ticket_no) DO UPDATE SET
+                    plate=excluded.plate,
+                    status=excluded.status,
+                    entry_at=excluded.entry_at,
+                    exit_at=excluded.exit_at,
+                    duration_min=excluded.duration_min,
+                    amount=excluded.amount,
+                    source=excluded.source,
+                    raw_json=excluded.raw_json,
+                    updated_at=datetime('now')
+            ";
+        } else {
+            $sql = "
+                INSERT INTO tickets (ticket_no, plate, status, entry_at, exit_at, duration_min, amount, source, raw_json, created_at, updated_at)
+                VALUES (:ticket_no,:plate,:status,:entry_at,:exit_at,:duration_min,:amount,:source,:raw_json, NOW(), NOW())
+                ON DUPLICATE KEY UPDATE
+                    plate=VALUES(plate),
+                    status=VALUES(status),
+                    entry_at=VALUES(entry_at),
+                    exit_at=VALUES(exit_at),
+                    duration_min=VALUES(duration_min),
+                    amount=VALUES(amount),
+                    source=VALUES(source),
+                    raw_json=VALUES(raw_json),
+                    updated_at=NOW()
+            ";
+        }
+
+        $stmt = $pdo->prepare($sql);
+        $touched = 0;
+        foreach ($rows as $row) {
+            $stmt->execute([
+                ':ticket_no' => $row['ticket_no'],
+                ':plate' => $row['plate'],
+                ':status' => $row['status'],
+                ':entry_at' => $row['entry_at'],
+                ':exit_at' => $row['exit_at'],
+                ':duration_min' => $row['duration_min'],
+                ':amount' => $row['amount'],
+                ':source' => $row['source'] ?? null,
+                ':raw_json' => $row['raw_json'] ?? null,
+            ]);
+            $touched++;
+        }
+
+        return $touched;
+    }
+
+    private function extractParkRecords(array $payload): array {
+        $candidates = [];
+        if (isset($payload['data']) && is_array($payload['data'])) {
+            $data = $payload['data'];
+            if (isset($data['data']) && is_array($data['data'])) {
+                $candidates[] = $data['data'];
+            }
+            if (isset($data['records']) && is_array($data['records'])) {
+                $candidates[] = $data['records'];
+            }
+            if (isset($data['rows']) && is_array($data['rows'])) {
+                $candidates[] = $data['rows'];
+            }
+            if (isset($data['list']) && is_array($data['list'])) {
+                $candidates[] = $data['list'];
+            }
+            if ($this->isListArray($data)) {
+                $candidates[] = $data;
+            }
+        }
+
+        if (isset($payload['records']) && is_array($payload['records'])) {
+            $candidates[] = $payload['records'];
+        }
+        if (isset($payload['rows']) && is_array($payload['rows'])) {
+            $candidates[] = $payload['rows'];
+        }
+        if (isset($payload['list']) && is_array($payload['list'])) {
+            $candidates[] = $payload['list'];
+        }
+        if ($this->isListArray($payload)) {
+            $candidates[] = $payload;
+        }
+
+        foreach ($candidates as $candidate) {
+            if (is_array($candidate) && $this->isListArray($candidate)) {
+                return $candidate;
+            }
+        }
+
+        return [];
+    }
+
+    private function normalizeParkRecordRow(array $row): ?array {
+        $ticketNo = $row['ticketNo']
+            ?? $row['ticket_no']
+            ?? $row['id']
+            ?? $row['recordId']
+            ?? $row['orderNo']
+            ?? $row['parkRecordId']
+            ?? $row['serialNo']
+            ?? null;
+
+        if ($ticketNo === null) {
+            return null;
+        }
+
+        $ticketNo = trim((string) $ticketNo);
+        if ($ticketNo === '') {
+            return null;
+        }
+
+        $plate = $row['plate']
+            ?? $row['plateNo']
+            ?? $row['carNumber']
+            ?? $row['carNo']
+            ?? $row['vehicleNumber']
+            ?? $row['vehicleNo']
+            ?? null;
+        $plate = $plate !== null ? trim((string) $plate) : null;
+        if ($plate === '') {
+            $plate = null;
+        }
+
+        $entry = $row['checkInTime']
+            ?? $row['enterTime']
+            ?? $row['entryTime']
+            ?? $row['inTime']
+            ?? $row['in_time']
+            ?? $row['parkInTime']
+            ?? null;
+        $entry = $this->normalizeDateTime($entry);
+
+        $exit = $row['checkOutTime']
+            ?? $row['leaveTime']
+            ?? $row['exitTime']
+            ?? $row['outTime']
+            ?? $row['out_time']
+            ?? $row['parkOutTime']
+            ?? null;
+        $exit = $this->normalizeDateTime($exit);
+
+        $duration = null;
+        if (isset($row['parkingTime'])) {
+            $duration = $this->parseDurationMinutes($row['parkingTime']);
+        }
+        if ($duration === null && isset($row['parkingDuration'])) {
+            $duration = $this->parseDurationMinutes($row['parkingDuration']);
+        }
+        if ($duration === null && isset($row['duration'])) {
+            $duration = $this->parseDurationMinutes($row['duration']);
+        }
+        if ($duration === null && isset($row['durationMin'])) {
+            $duration = $this->parseDurationMinutes($row['durationMin']);
+        }
+
+        if ($duration === null && $entry !== null && $exit !== null) {
+            $entryTs = strtotime($entry) ?: null;
+            $exitTs = strtotime($exit) ?: null;
+            if ($entryTs !== null && $exitTs !== null && $exitTs >= $entryTs) {
+                $duration = (int) ceil(($exitTs - $entryTs) / 60);
+            }
+        }
+
+        if ($duration !== null && $entry === null && $exit !== null) {
+            $exitTs = strtotime($exit) ?: null;
+            if ($exitTs !== null) {
+                $entry = date('Y-m-d H:i:s', $exitTs - ($duration * 60));
+            }
+        }
+
+        $amount = $row['amount']
+            ?? $row['payAmount']
+            ?? $row['payMoney']
+            ?? $row['receivableMoney']
+            ?? $row['chargeFee']
+            ?? $row['shouldMoney']
+            ?? null;
+        if ($amount !== null && $amount !== '') {
+            $amount = round((float) $amount, 2);
+        } else {
+            $amount = null;
+        }
+
+        $status = strtoupper((string) ($row['status'] ?? ''));
+        if (!in_array($status, ['OPEN', 'CLOSED', 'PAID'], true)) {
+            $status = $exit !== null ? 'CLOSED' : 'OPEN';
+        }
+
+        $rawJson = json_encode($row, JSON_UNESCAPED_UNICODE);
+        if ($rawJson === false) {
+            $rawJson = json_encode($row);
+        }
+
+        return [
+            'ticket_no' => $ticketNo,
+            'plate' => $plate,
+            'status' => $status,
+            'entry_at' => $entry,
+            'exit_at' => $exit,
+            'duration_min' => $duration,
+            'amount' => $amount,
+            'source' => 'hamachi_remote',
+            'raw_json' => $rawJson,
+        ];
+    }
+
+    private function normalizeDateTime($value): ?string {
+        if ($value === null) {
+            return null;
+        }
+        $value = trim((string) $value);
+        if ($value === '') {
+            return null;
+        }
+
+        if (ctype_digit($value) && strlen($value) >= 10) {
+            $timestamp = (int) substr($value, 0, 10);
+            return date('Y-m-d H:i:s', $timestamp);
+        }
+
+        $value = str_replace('T', ' ', $value);
+        $value = str_replace('/', '-', $value);
+        $value = preg_replace('/\.(\d{1,6})/', '', $value, 1);
+
+        $timestamp = strtotime($value);
+        if ($timestamp === false) {
+            return null;
+        }
+
+        return date('Y-m-d H:i:s', $timestamp);
+    }
+
+    private function parseDurationMinutes($value): ?int {
+        if ($value === null) {
+            return null;
+        }
+
+        if (is_numeric($value)) {
+            $minutes = (int) round((float) $value);
+            return $minutes >= 0 ? $minutes : null;
+        }
+
+        $value = trim((string) $value);
+        if ($value === '') {
+            return null;
+        }
+
+        if (preg_match('/^(\d{1,2}):(\d{2})(?::(\d{2}))?/', $value, $m)) {
+            $hours = (int) $m[1];
+            $minutes = (int) $m[2];
+            $seconds = isset($m[3]) ? (int) $m[3] : 0;
+            $total = ($hours * 60) + $minutes + ($seconds > 0 ? 1 : 0);
+            return $total >= 0 ? $total : null;
+        }
+
+        if (preg_match('/(\d+)(?=\s*min)/i', $value, $m)) {
+            $minutes = (int) $m[1];
+            return $minutes >= 0 ? $minutes : null;
+        }
+
+        return null;
+    }
+
+    private function isListArray(array $array): bool {
+        if (function_exists('array_is_list')) {
+            return array_is_list($array);
+        }
+        $expected = 0;
+        foreach ($array as $key => $_) {
+            if ($key !== $expected) {
+                return false;
+            }
+            $expected++;
+        }
+        return true;
+    }
+
     public function invoiceClosedTickets() {
         try {
             $pdo = DB::pdo($this->config);

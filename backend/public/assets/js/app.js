@@ -2102,6 +2102,26 @@
     }
   }
 
+  const PAGE_STORAGE_KEY = 'zkt:lastPage';
+
+  function rememberPage(page) {
+    if (!window.localStorage || !page) return;
+    try {
+      window.localStorage.setItem(PAGE_STORAGE_KEY, page);
+    } catch (error) {
+      /* ignore storage errors */
+    }
+  }
+
+  function restorePage() {
+    if (!window.localStorage) return null;
+    try {
+      return window.localStorage.getItem(PAGE_STORAGE_KEY);
+    } catch (error) {
+      return null;
+    }
+  }
+
   const renderers = { dashboard: renderDashboard, invoices: renderInvoices, reports: renderReports, settings: renderSettings };
 
   async function goToPage(page, { force = false } = {}) {
@@ -2135,6 +2155,7 @@
     } finally {
       if (renderGeneration === requestId) {
         currentPage = target;
+        rememberPage(target);
       }
     }
   }
@@ -2159,8 +2180,20 @@
       void goToPage(page);
     });
 
+    const availablePages = new Set(
+      sidebarLinks
+        .map((link) => link.getAttribute('data-page'))
+        .filter(Boolean)
+    );
+
+    const storedPage = restorePage();
     const initialLink = document.querySelector('.nav-link.active[data-page]') || sidebarLinks[0];
-    const initialPage = initialLink?.getAttribute('data-page') || 'dashboard';
+    let initialPage = initialLink?.getAttribute('data-page') || 'dashboard';
+
+    if (storedPage && availablePages.has(storedPage)) {
+      initialPage = storedPage;
+    }
+
     void goToPage(initialPage, { force: true });
   }
 

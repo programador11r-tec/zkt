@@ -9,6 +9,7 @@ use App\Services\ZKTecoClient;
 use App\Services\G4SClient;
 use Config\Config;
 use App\Utils\DB;
+use App\Utils\Schema;
 use PDO;
 
 class ApiController {
@@ -302,48 +303,85 @@ class ApiController {
         try {
             $pdo = DB::pdo($this->config);
             $g4s = new G4SClient($this->config);
+            Schema::ensureInvoiceMetadataColumns($pdo);
+
+            $hourlyRate = $this->getHourlyRate($pdo);
+            try {
+                $driver = strtolower((string) $pdo->getAttribute(PDO::ATTR_DRIVER_NAME));
+            } catch (\Throwable $e) {
+                $driver = 'mysql';
+            }
+            $nowExpr = $driver === 'sqlite' ? "datetime('now')" : 'NOW()';
 
             // Seleccionar tickets CERRADOS con pagos y sin factura
             $sql = "SELECT t.* FROM tickets t
-                    WHERE t.status='CLOSED' 
+                    WHERE t.status='CLOSED'
                     AND EXISTS (SELECT 1 FROM payments p WHERE p.ticket_no=t.ticket_no)
                     AND NOT EXISTS (SELECT 1 FROM invoices i WHERE i.ticket_no=t.ticket_no)";
             $tickets = $pdo->query($sql)->fetchAll();
 
             $results = [];
             foreach ($tickets as $t) {
-                // pagos del ticket
-                $ps = $pdo->prepare("SELECT * FROM payments WHERE ticket_no=?");
+                $ps = $pdo->prepare("SELECT amount, method, paid_at FROM payments WHERE ticket_no=? ORDER BY paid_at ASC");
                 $ps->execute([$t['ticket_no']]);
                 $payments = $ps->fetchAll();
+                $paymentsTotal = 0.0;
+                foreach ($payments as $p) {
+                    $paymentsTotal += (float)($p['amount'] ?? 0);
+                }
 
-                // construir payload
-                $payload = $g4s->buildInvoiceFromTicket($t, $payments);
+                $ticketContext = $t;
+                $ticketContext['payments_total'] = $paymentsTotal;
+                $billing = $this->calculateTicketBilling($ticketContext, $hourlyRate, true);
+                if ($billing['total'] <= 0) {
+                    continue;
+                }
 
-                // enviar a G4S
+                $ticketContext['amount'] = $billing['total'];
+                if ($billing['duration_minutes'] !== null) {
+                    $ticketContext['duration_min'] = $billing['duration_minutes'];
+                }
+
+                $paidAt = $t['exit_at'] ?? $t['entry_at'] ?? date('Y-m-d H:i:s');
+                $syntheticPayment = [
+                    'ticket_no' => $t['ticket_no'],
+                    'amount' => $billing['total'],
+                    'method' => $billing['mode'] === 'hourly' ? 'hourly' : 'auto',
+                    'paid_at' => $paidAt,
+                ];
+
+                $payload = $g4s->buildInvoiceFromTicket($ticketContext, [$syntheticPayment]);
+
                 $resp = $g4s->submitInvoice($payload);
 
                 $uuid = $resp['uuid'] ?? $resp['UUID'] ?? null;
                 $status = $uuid ? 'OK' : 'ERROR';
 
-                // guardar resultado
-                $ins = $pdo->prepare("INSERT INTO invoices (ticket_no, total, uuid, status, request_json, response_json, created_at)
-                                    VALUES (:ticket_no, :total, :uuid, :status, :request_json, :response_json, datetime('now'))");
-                $total = 0.0; foreach ($payments as $p) $total += (float)$p['amount'];
+                $insertSql = "INSERT INTO invoices (ticket_no, total, uuid, status, request_json, response_json, receptor_nit, entry_at, exit_at, duration_min, hours_billed, billing_mode, hourly_rate, created_at)
+                                VALUES (:ticket_no, :total, :uuid, :status, :request_json, :response_json, :receptor_nit, :entry_at, :exit_at, :duration_min, :hours_billed, :billing_mode, :hourly_rate, {$nowExpr})";
+                $ins = $pdo->prepare($insertSql);
                 $ins->execute([
                     ':ticket_no' => $t['ticket_no'],
-                    ':total' => $total,
+                    ':total' => $billing['total'],
                     ':uuid' => $uuid,
                     ':status' => $status,
                     ':request_json' => json_encode($payload, JSON_UNESCAPED_UNICODE),
                     ':response_json' => json_encode($resp, JSON_UNESCAPED_UNICODE),
+                    ':receptor_nit' => $t['receptor_nit'] ?? null,
+                    ':entry_at' => $t['entry_at'] ?? null,
+                    ':exit_at' => $t['exit_at'] ?? null,
+                    ':duration_min' => $billing['duration_minutes'],
+                    ':hours_billed' => $billing['hours'],
+                    ':billing_mode' => $billing['mode'],
+                    ':hourly_rate' => $billing['hourly_rate'],
                 ]);
 
                 $results[] = [
                     'ticket_no' => $t['ticket_no'],
-                    'total' => $total,
+                    'total' => $billing['total'],
                     'status' => $status,
                     'uuid' => $uuid,
+                    'billing_mode' => $billing['mode'],
                 ];
             }
 
@@ -453,7 +491,7 @@ class ApiController {
             $st = $pdo->prepare("
                 SELECT
                     t.ticket_no,
-                    COALESCE(SUM(p.amount), t.amount, 0) AS total,
+                    COALESCE(SUM(p.amount), t.amount, 0) AS payments_total,
                     t.entry_at,
                     t.exit_at,
                     t.duration_min,
@@ -469,24 +507,20 @@ class ApiController {
             $mode = strtolower((string)($b['mode'] ?? ''));
             $description = trim((string)($b['description'] ?? ''));
 
-            $durationMin = null;
-            $entryTs = !empty($row['entry_at']) ? strtotime((string) $row['entry_at']) : false;
-            $exitTs  = !empty($row['exit_at'])  ? strtotime((string) $row['exit_at'])  : false;
-            if ($entryTs && $exitTs && $exitTs > $entryTs) {
-                $durationMin = (int) round(($exitTs - $entryTs) / 60);
-            }
-            if ($durationMin === null || $durationMin <= 0) {
-                $durationMin = isset($row['duration_min']) ? (int) $row['duration_min'] : null;
-            }
-            $hours = $durationMin !== null && $durationMin > 0 ? max(1.0, round($durationMin / 60, 2)) : null;
+            Schema::ensureInvoiceMetadataColumns($pdo);
 
-            $total = (float)($row['total'] ?? 0);
-            $itemQuantity = 1.0;
-            $itemPrice = $total;
+            $hourlyRate = $this->getHourlyRate($pdo);
+            $billing = $this->calculateTicketBilling($row, $hourlyRate);
+            $durationMin = $billing['duration_minutes'];
+            $hours = $billing['hours'];
+            $total = $billing['total'];
+            $billingMode = $billing['mode'];
+            $appliedHourlyRate = $billing['hourly_rate'];
             $concept = $description !== '' ? $description : 'Ticket de parqueo';
+            $itemQuantity = $billingMode === 'hourly' && $hours !== null ? $hours : 1.0;
+            $itemPrice = $billingMode === 'hourly' && $appliedHourlyRate !== null ? $appliedHourlyRate : $total;
 
             if ($mode === 'hourly') {
-                $hourlyRate = $this->getHourlyRate($pdo);
                 if ($hourlyRate === null) {
                     throw new \RuntimeException('Configura la tarifa por hora en Ajustes antes de facturar por tiempo.');
                 }
@@ -499,6 +533,8 @@ class ApiController {
                 }
                 $itemQuantity = round($hours, 2);
                 $itemPrice = $hourlyRate;
+                $billingMode = 'hourly';
+                $appliedHourlyRate = $hourlyRate;
                 if ($description === '') {
                     $concept = sprintf('Servicio de parqueo %.2f h x Q%.2f', $itemQuantity, $hourlyRate);
                 }
@@ -516,8 +552,14 @@ class ApiController {
                 }
                 $itemQuantity = 1.0;
                 $itemPrice = $total;
+                $billingMode = 'custom';
+                $appliedHourlyRate = null;
                 if ($description === '') {
                     $concept = 'Servicio personalizado de parqueo';
+                }
+            } else {
+                if ($total <= 0) {
+                    throw new \RuntimeException('No se pudo determinar un total válido para el ticket.');
                 }
             }
 
@@ -525,6 +567,10 @@ class ApiController {
 
             $ticketUpdate = $pdo->prepare('UPDATE tickets SET amount = :amount WHERE ticket_no = :ticket');
             $ticketUpdate->execute([':amount' => $total, ':ticket' => $ticketNo]);
+            if ($durationMin !== null && $durationMin > 0) {
+                $durationUpdate = $pdo->prepare('UPDATE tickets SET duration_min = :duration WHERE ticket_no = :ticket');
+                $durationUpdate->execute([':duration' => $durationMin, ':ticket' => $ticketNo]);
+            }
 
             // ya facturado/en proceso
             $chk = $pdo->prepare("SELECT status, uuid FROM invoices WHERE ticket_no=:t LIMIT 1");
@@ -538,11 +584,15 @@ class ApiController {
             // payload FEL (simple)
             $doc = [
                 'metadata' => [
-                    'ticketNo'    => $ticketNo,
-                    'external_id' => $ticketNo,
-                    'issueDate'   => $row['exit_at'] ?? $row['entry_at'] ?? date('c'),
-                    'billing_mode'=> $mode ?: 'default',
-                    'hours'       => $hours,
+                    'ticketNo'        => $ticketNo,
+                    'external_id'     => $ticketNo,
+                    'issueDate'       => $row['exit_at'] ?? $row['entry_at'] ?? date('c'),
+                    'billing_mode'    => $billingMode,
+                    'hours'           => $hours,
+                    'duration_minutes'=> $durationMin,
+                    'hourly_rate'     => $billingMode === 'hourly' ? $appliedHourlyRate : null,
+                    'payments_total'  => isset($row['payments_total']) ? (float) $row['payments_total'] : null,
+                    'ticket_amount'   => isset($row['ticket_amount']) ? (float) $row['ticket_amount'] : null,
                 ],
                 'emisor' => [
                     'nit' => $this->config->get('FEL_G4S_ENTITY', ''),
@@ -564,11 +614,25 @@ class ApiController {
 
             // marca PENDING
             $insPending = $pdo->prepare("
-            INSERT INTO invoices (ticket_no, total, uuid, status, request_json, response_json, created_at)
-            VALUES (:t, :total, NULL, 'PENDING', :req, NULL, NOW())
-            ON DUPLICATE KEY UPDATE uuid=NULL, status='PENDING', request_json=VALUES(request_json), response_json=NULL
+            INSERT INTO invoices (ticket_no, total, uuid, status, request_json, response_json, receptor_nit, entry_at, exit_at, duration_min, hours_billed, billing_mode, hourly_rate, created_at)
+            VALUES (:t, :total, NULL, 'PENDING', :req, NULL, :receptor, :entry_at, :exit_at, :duration_min, :hours_billed, :billing_mode, :hourly_rate, NOW())
+            ON DUPLICATE KEY UPDATE uuid=NULL, status='PENDING', request_json=VALUES(request_json), response_json=NULL,
+                receptor_nit=VALUES(receptor_nit), entry_at=VALUES(entry_at), exit_at=VALUES(exit_at),
+                duration_min=VALUES(duration_min), hours_billed=VALUES(hours_billed),
+                billing_mode=VALUES(billing_mode), hourly_rate=VALUES(hourly_rate), total=VALUES(total)
             ");
-            $insPending->execute([':t'=>$ticketNo, ':total'=>$total, ':req'=>json_encode($doc, JSON_UNESCAPED_UNICODE)]);
+            $insPending->execute([
+                ':t'=>$ticketNo,
+                ':total'=>$total,
+                ':req'=>json_encode($doc, JSON_UNESCAPED_UNICODE),
+                ':receptor'=>$receptorNit,
+                ':entry_at'=>$row['entry_at'] ?? null,
+                ':exit_at'=>$row['exit_at'] ?? null,
+                ':duration_min'=>$durationMin,
+                ':hours_billed'=>$hours,
+                ':billing_mode'=>$billingMode,
+                ':hourly_rate'=>$billingMode === 'hourly' ? $appliedHourlyRate : null,
+            ]);
 
             // === llamada a G4S ===
             $g4s = new \App\Services\G4SClient($this->config);
@@ -857,7 +921,7 @@ class ApiController {
             SELECT
                 t.ticket_no,
                 COALESCE(t.exit_at, t.entry_at) AS fecha,
-                COALESCE(SUM(p.amount), t.amount, 0) AS total,
+                COALESCE(SUM(p.amount), t.amount, 0) AS payments_total,
                 t.receptor_nit AS receptor,
                 t.duration_min,
                 t.entry_at,
@@ -886,7 +950,9 @@ class ApiController {
             ";
 
             $rows = $pdo->query($sql)->fetchAll(\PDO::FETCH_ASSOC);
+            $hourlyRate = $this->getHourlyRate($pdo);
             foreach ($rows as &$row) {
+                $row['payments_total'] = isset($row['payments_total']) ? (float) $row['payments_total'] : null;
                 $durationMin = isset($row['duration_min']) ? (int) $row['duration_min'] : null;
                 if (($durationMin === null || $durationMin <= 0) && !empty($row['entry_at']) && !empty($row['exit_at'])) {
                     $entryTs = strtotime((string) $row['entry_at']);
@@ -895,8 +961,13 @@ class ApiController {
                         $durationMin = (int) round(($exitTs - $entryTs) / 60);
                     }
                 }
-                $row['duration_minutes'] = $durationMin;
-                $row['hours'] = $durationMin !== null && $durationMin > 0 ? round($durationMin / 60, 2) : null;
+                $billing = $this->calculateTicketBilling($row, $hourlyRate, true);
+                $row['duration_min'] = $billing['duration_minutes'];
+                $row['duration_minutes'] = $billing['duration_minutes'];
+                $row['hours'] = $billing['hours'];
+                $row['total'] = $billing['total'];
+                $row['billing_mode'] = $billing['mode'];
+                $row['hourly_rate'] = $billing['hourly_rate'];
             }
             unset($row);
             \App\Utils\Http::json(['ok'=>true,'rows'=>$rows]);
@@ -926,7 +997,7 @@ class ApiController {
                     t.entry_at,
                     t.exit_at,
                     t.duration_min,
-                    COALESCE(SUM(p.amount), t.amount, 0)        AS total,
+                    COALESCE(SUM(p.amount), t.amount, 0)        AS payments_total,
                     COUNT(p.id)                                  AS payments_count,
                     MIN(p.paid_at)                               AS first_payment_at,
                     MAX(p.paid_at)                               AS last_payment_at
@@ -966,6 +1037,19 @@ class ApiController {
             $st = $pdo->prepare($sql);
             $st->execute($args);
             $rows = $st->fetchAll(\PDO::FETCH_ASSOC);
+            $hourlyRate = $this->getHourlyRate($pdo);
+            foreach ($rows as &$row) {
+                $row['payments_total'] = isset($row['payments_total']) ? (float) $row['payments_total'] : null;
+                $billing = $this->calculateTicketBilling($row, $hourlyRate);
+                $row['duration_min'] = $billing['duration_minutes'];
+                $row['duration_minutes'] = $billing['duration_minutes'];
+                $row['hours'] = $billing['hours'];
+                $row['billing_mode'] = $billing['mode'];
+                $row['hourly_rate'] = $billing['hourly_rate'];
+                $row['billing_total'] = $billing['total'];
+                $row['total'] = $billing['total'];
+            }
+            unset($row);
 
             $plate = trim((string)($_GET['plate'] ?? ''));
             $nitRaw = trim((string)($_GET['nit'] ?? ''));
@@ -987,7 +1071,7 @@ class ApiController {
                         return false;
                     }
                 }
-                $amount = (float)($row['total'] ?? 0);
+                $amount = (float)($row['billing_total'] ?? $row['total'] ?? 0);
                 if ($minTotal !== null && $amount < $minTotal) {
                     return false;
                 }
@@ -1026,7 +1110,7 @@ class ApiController {
             $countDuration = 0;
 
             foreach ($rows as &$row) {
-                $amount = (float)($row['total'] ?? 0);
+                $amount = (float)($row['billing_total'] ?? $row['total'] ?? 0);
                 $totalAmount += $amount;
 
                 $row['payments'] = $paymentMap[$row['ticket_no']] ?? [];
@@ -1188,6 +1272,79 @@ class ApiController {
         } catch (\Throwable $e) {
             \App\Utils\Http::json(['ok'=>false,'error'=>$e->getMessage()], 400);
         }
+    }
+
+
+    private function calculateTicketBilling(array $ticket, ?float $hourlyRate, bool $enforceMinimumHour = false): array {
+        $entryAt = $ticket['entry_at'] ?? null;
+        $exitAt = $ticket['exit_at'] ?? null;
+
+        $entryTs = $entryAt ? strtotime((string) $entryAt) : false;
+        $exitTs  = $exitAt ? strtotime((string) $exitAt) : false;
+
+        $durationMin = null;
+        if ($entryTs && $exitTs && $exitTs > $entryTs) {
+            $durationMin = (int) round(($exitTs - $entryTs) / 60);
+        } elseif (isset($ticket['duration_min']) && is_numeric($ticket['duration_min'])) {
+            $durationMin = (int) $ticket['duration_min'];
+        }
+        if ($durationMin !== null && $durationMin <= 0) {
+            $durationMin = null;
+        }
+
+        $hours = null;
+        if ($durationMin !== null && $durationMin > 0) {
+            $hours = round($durationMin / 60, 2);
+            if ($hours <= 0) {
+                $hours = null;
+            } elseif ($enforceMinimumHour) {
+                $hours = max(1.0, $hours);
+            }
+        }
+
+        $paymentsTotal = isset($ticket['payments_total']) ? (float) $ticket['payments_total'] : null;
+        $ticketAmount = isset($ticket['ticket_amount']) ? (float) $ticket['ticket_amount'] : null;
+
+        $mode = 'ticket_amount';
+        $total = null;
+        $appliedRate = null;
+
+        if ($hourlyRate !== null && $hours !== null) {
+            $candidate = round($hours * $hourlyRate, 2);
+            if ($candidate > 0) {
+                $total = $candidate;
+                $mode = 'hourly';
+                $appliedRate = $hourlyRate;
+            }
+        }
+
+        if (($total === null || $total <= 0) && $ticketAmount !== null && $ticketAmount > 0) {
+            $total = round($ticketAmount, 2);
+            if ($mode !== 'hourly') {
+                $mode = 'ticket_amount';
+            }
+        }
+
+        if (($total === null || $total <= 0) && $paymentsTotal !== null && $paymentsTotal > 0) {
+            $total = round($paymentsTotal, 2);
+            if ($mode !== 'hourly') {
+                $mode = 'payments';
+            }
+        }
+
+        if ($total === null) {
+            $total = 0.0;
+        }
+
+        return [
+            'total' => $total,
+            'duration_minutes' => $durationMin,
+            'hours' => $hours,
+            'mode' => $mode,
+            'hourly_rate' => $appliedRate,
+            'payments_total' => $paymentsTotal,
+            'ticket_amount' => $ticketAmount,
+        ];
     }
 
 

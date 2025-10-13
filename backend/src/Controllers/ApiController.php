@@ -1388,57 +1388,6 @@ class ApiController {
         ];
     }
 
-    private function normalizeDateTime($value): ?string {
-        if ($value === null) {
-            return null;
-        }
-        if ($durationMin === null && array_key_exists('duration_min', $row) && $row['duration_min'] !== null && $row['duration_min'] !== '') {
-            $candidate = (int) $row['duration_min'];
-            if ($candidate > 0) {
-                $durationMin = $candidate;
-            }
-        }
-
-        $hoursRecorded = null;
-        if ($durationMin !== null && $durationMin > 0) {
-            $hoursRecorded = round($durationMin / 60, 2);
-        }
-
-        return [
-            'entry_at' => $entryAt,
-            'exit_at' => $exitAt,
-            'duration_min' => $durationMin,
-            'hours_recorded' => $hoursRecorded,
-        ];
-    }
-
-        $entryAt = $entryAt !== '' ? $entryAt : null;
-        $exitAt = $exitAt !== '' ? $exitAt : null;
-
-        $durationMin = $this->calculateDuration($entryAt, $exitAt);
-        if ($durationMin !== null && $durationMin <= 0) {
-            $durationMin = null;
-        }
-        if ($durationMin === null && array_key_exists('duration_min', $row) && $row['duration_min'] !== null && $row['duration_min'] !== '') {
-            $candidate = (int) $row['duration_min'];
-            if ($candidate > 0) {
-                $durationMin = $candidate;
-            }
-        }
-
-        $hoursRecorded = null;
-        if ($durationMin !== null && $durationMin > 0) {
-            $hoursRecorded = round($durationMin / 60, 2);
-        }
-
-        return [
-            'entry_at' => $entryAt,
-            'exit_at' => $exitAt,
-            'duration_min' => $durationMin,
-            'hours_recorded' => $hoursRecorded,
-        ];
-    }
-
     private function isConfigured(array $keys): bool {
         foreach ($keys as $key) {
             $value = $this->config->get($key);

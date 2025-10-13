@@ -29,6 +29,8 @@ heroku-php-apache2 public/
 
 El script `ops_init_db.php` detecta si `DB_CONNECTION` es `sqlite` o `mysql` y aplica las migraciones y semillas específicas de cada driver. Para App Platform debe mantenerse en `mysql`.
 
+Si despliegas sobre una base ya existente donde la tabla `invoices` fue creada antes de estas columnas adicionales, ejecuta una vez `php ops_patch_invoices.php` para que se añadan o validen los campos nuevos antes de reanudar la facturación.
+
 ## 5. Publicar
 - Revisa el resumen final del asistente y haz clic en **Launch App**.
 - Espera a que finalice el build y despliegue. Podrás ver los logs en la sección **Deployments**.

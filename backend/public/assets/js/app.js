@@ -226,6 +226,67 @@
     return request;
   }
 
+  const hamachiSyncState = { timer: null, promise: null };
+
+  async function triggerHamachiSync({ silent = false, force = false } = {}) {
+    if (hamachiSyncState.promise) {
+      if (!force) {
+        return hamachiSyncState.promise;
+      }
+      try {
+        await hamachiSyncState.promise;
+      } catch (error) {
+        if (!silent) {
+          throw error;
+        }
+        console.warn('No se pudo sincronizar los registros remotos', error);
+      }
+    }
+
+    let taskPromise;
+    const task = async () => {
+      try {
+        return await fetchJSON(api('sync/park-records/hamachi'), { method: 'POST' });
+      } catch (error) {
+        if (!silent) {
+          throw error;
+        }
+        console.warn('No se pudo sincronizar los registros remotos', error);
+        return null;
+      } finally {
+        if (hamachiSyncState.promise === taskPromise) {
+          hamachiSyncState.promise = null;
+        }
+      }
+    };
+
+    taskPromise = task();
+    hamachiSyncState.promise = taskPromise;
+    return taskPromise;
+  }
+
+  function startHamachiSyncPolling() {
+    if (hamachiSyncState.timer) {
+      return;
+    }
+
+    const POLL_INTERVAL = 30000;
+
+    const poll = async () => {
+      try {
+        const response = await triggerHamachiSync({ silent: true });
+        if (response) {
+          await loadSettings(true);
+        }
+      } catch (error) {
+        console.warn('Error durante la sincronización automática de tickets remotos', error);
+      }
+    };
+
+    hamachiSyncState.timer = window.setInterval(poll, POLL_INTERVAL);
+    void poll();
+  }
+
   function buildTimeline(items) {
     if (!Array.isArray(items) || !items.length) {
       return '<div class="empty small mb-0">Sin eventos recientes.</div>';
@@ -248,6 +309,7 @@
     }).join('');
   }
 
+  startHamachiSyncPolling();
   loadSettings().catch(() => {});
 
   const refreshBtn = document.getElementById('refreshBtn');
@@ -2023,12 +2085,15 @@
         <div class="col-12">
           <div class="card shadow-sm">
             <div class="card-body d-flex flex-column gap-3">
-              <div class="d-flex align-items-start justify-content-between gap-2">
+              <div class="d-flex align-items-start justify-content-between gap-2 flex-wrap">
                 <div>
                   <h5 class="card-title mb-1">Actividad de sincronización</h5>
                   <p class="text-muted small mb-0">Resumen generado ${escapeHtml(formatRelativeTime(settings.generated_at) || 'hace instantes')}.</p>
                 </div>
-                <button class="btn btn-outline-primary btn-sm" id="settingsReload">Actualizar</button>
+                <div class="d-flex flex-wrap gap-2 justify-content-end">
+                  <button class="btn btn-primary btn-sm" id="settingsManualSync">actualizacion de data manual</button>
+                  <button class="btn btn-outline-primary btn-sm" id="settingsReload">Actualizar</button>
+                </div>
               </div>
               <div class="timeline" id="settingsTimeline">${buildTimeline(settings.activity)}</div>
             </div>
@@ -2043,6 +2108,29 @@
         reload.classList.add('is-loading');
         reload.disabled = true;
         renderSettings();
+      });
+    }
+
+    const manualSyncBtn = document.getElementById('settingsManualSync');
+    if (manualSyncBtn) {
+      manualSyncBtn.addEventListener('click', async () => {
+        manualSyncBtn.classList.add('is-loading');
+        manualSyncBtn.disabled = true;
+        let shouldRefresh = false;
+        try {
+          const result = await triggerHamachiSync({ silent: false, force: true });
+          await loadSettings(true);
+          shouldRefresh = true;
+        } catch (error) {
+          console.error('No se pudo sincronizar los registros remotos', error);
+          window.alert('No se pudo sincronizar los registros remotos. Inténtalo nuevamente en unos instantes.');
+        } finally {
+          manualSyncBtn.classList.remove('is-loading');
+          manualSyncBtn.disabled = false;
+          if (shouldRefresh && currentPage === 'settings') {
+            void renderSettings();
+          }
+        }
       });
     }
 

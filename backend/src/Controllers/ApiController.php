@@ -613,77 +613,137 @@ class ApiController {
 
     public function ingestTickets() {
         try {
-            // seguridad simple por header
             $key = $this->config->get('INGEST_KEY', '');
             if ($key !== '' && ($_SERVER['HTTP_X_INGEST_KEY'] ?? '') !== $key) {
-                \App\Utils\Http::json(['ok'=>false,'error'=>'Unauthorized'], 401);
+                Http::json(['ok' => false, 'error' => 'Unauthorized'], 401);
                 return;
             }
 
-            $pdo = \App\Utils\DB::pdo($this->config);
-            $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
+            $pdo = DB::pdo($this->config);
+            $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 
-            $body = \App\Utils\Http::body();
+            $body = Http::body();
+            $rawBody = Http::rawBody();
 
             $rows = [];
+            $receivedCount = 0;
+            $skipped = [];
+            $sourceType = 'unknown';
 
-            // A) Formato “raw ZKBio CVSecurity”: { code, message, data: { data: [ ... ] } }
             if (isset($body['data']['data']) && is_array($body['data']['data'])) {
+                $sourceType = 'zkbio_raw';
+                $receivedCount = count($body['data']['data']);
                 foreach ($body['data']['data'] as $r) {
-                    // Mapeo de campos de tu ejemplo:
-                    $id        = (string)($r['id'] ?? '');
-                    if ($id === '') continue;
+                    $id = (string)($r['id'] ?? '');
+                    if (trim($id) === '') {
+                        $skipped[] = 'Registro OUT sin id';
+                        continue;
+                    }
 
-                    $car       = (string)($r['carNumber'] ?? null);
-                    $exit      = (string)($r['checkOutTime'] ?? null); // "yyyy-MM-dd HH:mm:ss.SSS"
-                    $parking   = (string)($r['parkingTime'] ?? null);  // "HH:mm:ss"
+                    $car     = isset($r['carNumber']) ? trim((string)$r['carNumber']) : null;
+                    $exit    = (string)($r['checkOutTime'] ?? null);
+                    $parking = (string)($r['parkingTime'] ?? null);
 
-                    // Calcula entry_at si tenemos parkingTime y checkOutTime
                     $entryAt = null;
                     if ($exit && $parking && preg_match('/^\d{2}:\d{2}:\d{2}/', $parking)) {
                         $secs = 0;
-                        [$h,$m,$s] = array_map('intval', explode(':', substr($parking,0,8)));
-                        $secs = $h*3600 + $m*60 + $s;
-                        $exitTs = strtotime(str_replace('.', '', $exit)); // tolerante a .mmm
-                        if ($exitTs) $entryAt = date('Y-m-d H:i:s', $exitTs - $secs);
+                        [$h,$m,$s] = array_map('intval', explode(':', substr($parking, 0, 8)));
+                        $secs = $h * 3600 + $m * 60 + $s;
+                        $exitTs = strtotime(str_replace('.', '', $exit));
+                        if ($exitTs) {
+                            $entryAt = date('Y-m-d H:i:s', $exitTs - $secs);
+                        }
+                    }
+
+                    $exitAt = $exit ? substr($exit, 0, 19) : null;
+                    $durationMinutes = null;
+                    if (isset($parking) && strlen($parking) >= 5) {
+                        $durationMinutes = (int)floor((($h ?? 0) * 60) + ($m ?? 0) + (($s ?? 0) > 0 ? 1 : 0));
+                    } elseif ($entryAt && $exitAt) {
+                        $durationMinutes = $this->calculateDuration($entryAt, $exitAt);
                     }
 
                     $rows[] = [
-                        'ticket_no'   => $id,
-                        'plate'       => $car ?: null,
-                        'status'      => 'CLOSED',             // por ser record OUT
-                        'entry_at'    => $entryAt,
-                        'exit_at'     => $exit ? substr($exit,0,19) : null,
-                        'duration_min'=> isset($parking) && strlen($parking)>=5 ? 
-                                        (int)floor((($h??0)*60)+($m??0)+(($s??0)>0?1:0)) : null,
-                        'amount'      => null,                 // si no viene, queda null
-                        'source'      => 'zkbio',
-                        'raw_json'    => json_encode($r, JSON_UNESCAPED_UNICODE),
+                        'ticket_no'    => $id,
+                        'plate'        => $car ?: null,
+                        'status'       => 'CLOSED',
+                        'entry_at'     => $entryAt,
+                        'exit_at'      => $exitAt,
+                        'duration_min' => $durationMinutes,
+                        'amount'       => null,
+                        'source'       => 'zkbio',
+                        'raw_json'     => json_encode($r, JSON_UNESCAPED_UNICODE),
                     ];
                 }
-
-            // B) Formato normalizado: { tickets: [ {ticket_no, plate, entry_at, exit_at, duration_min, amount, status} ] }
             } elseif (isset($body['tickets']) && is_array($body['tickets'])) {
-                foreach ($body['tickets'] as $t) {
-                    if (empty($t['ticket_no'])) continue;
+                $sourceType = 'normalized';
+                $receivedCount = count($body['tickets']);
+                foreach ($body['tickets'] as $idx => $t) {
+                    $ticketNo = isset($t['ticket_no']) ? trim((string)$t['ticket_no']) : '';
+                    if ($ticketNo === '') {
+                        $skipped[] = "tickets[$idx] sin ticket_no";
+                        continue;
+                    }
+
+                    $entryAt = $this->normalizeDateTime($t['entry_at'] ?? null);
+                    $exitAt  = $this->normalizeDateTime($t['exit_at'] ?? null);
+
+                    if ($entryAt === null && isset($t['entry_at']) && $t['entry_at'] !== '') {
+                        $skipped[] = "tickets[$idx] entry_at inválido";
+                    }
+                    if ($exitAt === null && isset($t['exit_at']) && $t['exit_at'] !== '') {
+                        $skipped[] = "tickets[$idx] exit_at inválido";
+                    }
+
+                    $durationMinutes = null;
+                    if (array_key_exists('duration_min', $t) && $t['duration_min'] !== null && $t['duration_min'] !== '') {
+                        $durationMinutes = (int)$t['duration_min'];
+                    } else {
+                        $durationMinutes = $this->calculateDuration($entryAt, $exitAt);
+                    }
+
+                    $status = strtoupper(trim((string)($t['status'] ?? 'CLOSED')));
+                    if ($status !== 'OPEN' && $status !== 'CLOSED') {
+                        $status = 'CLOSED';
+                    }
+
+                    $source = isset($t['source']) ? trim((string)$t['source']) : 'external';
+
                     $rows[] = [
-                        'ticket_no'   => (string)$t['ticket_no'],
-                        'plate'       => $t['plate'] ?? null,
-                        'status'      => strtoupper((string)($t['status'] ?? 'CLOSED')),
-                        'entry_at'    => $t['entry_at'] ?? null,
-                        'exit_at'     => $t['exit_at'] ?? null,
-                        'duration_min'=> isset($t['duration_min']) ? (int)$t['duration_min'] : null,
-                        'amount'      => isset($t['amount']) ? (float)$t['amount'] : null,
-                        'source'      => $t['source'] ?? 'external',
-                        'raw_json'    => json_encode($t, JSON_UNESCAPED_UNICODE),
+                        'ticket_no'    => $ticketNo,
+                        'plate'        => isset($t['plate']) ? (trim((string)$t['plate']) ?: null) : null,
+                        'status'       => $status,
+                        'entry_at'     => $entryAt,
+                        'exit_at'      => $exitAt,
+                        'duration_min' => $durationMinutes,
+                        'amount'       => isset($t['amount']) && $t['amount'] !== '' && $t['amount'] !== null ? (float)$t['amount'] : null,
+                        'source'       => $source !== '' ? $source : 'external',
+                        'raw_json'     => json_encode($t, JSON_UNESCAPED_UNICODE),
                     ];
                 }
             } else {
-                \App\Utils\Http::json(['ok'=>false,'error'=>'Payload inválido'], 400);
+                Http::json(['ok' => false, 'error' => 'Payload inválido'], 400);
                 return;
             }
 
-            if (!$rows) { \App\Utils\Http::json(['ok'=>true,'ingested'=>0]); return; }
+            if (!$rows) {
+                $this->writeIngestDebug('tickets', [
+                    'received_at' => date('c'),
+                    'source' => $sourceType,
+                    'received_count' => $receivedCount,
+                    'skipped' => $skipped,
+                    'payload_preview' => mb_substr($rawBody, 0, 2048),
+                ]);
+                Http::json([
+                    'ok' => true,
+                    'ingested' => 0,
+                    'received' => $receivedCount,
+                    'skipped' => count($skipped),
+                    'skip_reasons' => array_slice($skipped, 0, 5),
+                    'debug' => 'storage/ingest/tickets_debug.json',
+                ]);
+                return;
+            }
 
             $up = $pdo->prepare("
                 INSERT INTO tickets (ticket_no, plate, status, entry_at, exit_at, duration_min, amount, source, raw_json, created_at, updated_at)
@@ -700,12 +760,32 @@ class ApiController {
                 updated_at=NOW()
             ");
 
-            $n=0;
-            foreach ($rows as $r) { $up->execute($r); $n++; }
+            $n = 0;
+            foreach ($rows as $r) {
+                $up->execute($r);
+                $n++;
+            }
 
-            \App\Utils\Http::json(['ok'=>true,'ingested'=>$n]);
+            $this->writeIngestDebug('tickets', [
+                'received_at' => date('c'),
+                'source' => $sourceType,
+                'received_count' => $receivedCount,
+                'inserted' => $n,
+                'skipped' => $skipped,
+                'sample' => array_slice($rows, 0, 3),
+                'payload_preview' => mb_substr($rawBody, 0, 2048),
+            ]);
+
+            Http::json([
+                'ok' => true,
+                'ingested' => $n,
+                'received' => $receivedCount,
+                'skipped' => count($skipped),
+                'skip_reasons' => array_slice($skipped, 0, 5),
+                'debug' => 'storage/ingest/tickets_debug.json',
+            ]);
         } catch (\Throwable $e) {
-            \App\Utils\Http::json(['ok'=>false,'error'=>$e->getMessage()], 500);
+            Http::json(['ok' => false, 'error' => $e->getMessage()], 500);
         }
     }
 
@@ -1189,6 +1269,78 @@ class ApiController {
         }
     }
 
+
+    private function mask($value, int $visible = 4): ?string {
+        if ($value === null) {
+            return null;
+        }
+        $value = (string) $value;
+        if ($value === '') {
+            return null;
+        }
+        $length = strlen($value);
+        if ($length <= $visible * 2) {
+            return str_repeat('•', max($length, 4));
+        }
+        return substr($value, 0, $visible)
+            . str_repeat('•', max(3, $length - ($visible * 2)))
+            . substr($value, -$visible);
+    }
+
+    private function normalizeDateTime(mixed $value): ?string {
+        if ($value === null) {
+            return null;
+        }
+        if (is_string($value)) {
+            $trim = trim($value);
+        } elseif (is_numeric($value)) {
+            $trim = (string)$value;
+        } else {
+            return null;
+        }
+
+        if ($trim === '') {
+            return null;
+        }
+
+        $trim = str_replace('T', ' ', $trim);
+        $trim = preg_replace('/\s+Z$/i', '', $trim);
+        $trim = preg_replace('/\.[0-9]+/', '', $trim);
+
+        try {
+            $dt = new \DateTimeImmutable($trim);
+            return $dt->format('Y-m-d H:i:s');
+        } catch (\Exception $e) {
+            return null;
+        }
+    }
+
+    private function calculateDuration(?string $entryAt, ?string $exitAt): ?int {
+        if (!$entryAt || !$exitAt) {
+            return null;
+        }
+        $start = strtotime($entryAt);
+        $end = strtotime($exitAt);
+        if (!$start || !$end || $end < $start) {
+            return null;
+        }
+        return (int) round(($end - $start) / 60);
+    }
+
+    private function writeIngestDebug(string $name, array $data): void {
+        $dir = __DIR__ . '/../../storage/ingest';
+        if (!is_dir($dir)) {
+            @mkdir($dir, 0775, true);
+        }
+        $path = $dir . '/' . $name . '_debug.json';
+        $payload = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+        @file_put_contents($path, $payload);
+        Logger::info('ingest.' . $name, [
+            'received' => $data['received_count'] ?? null,
+            'inserted' => $data['inserted'] ?? null,
+            'skipped' => isset($data['skipped']) ? (is_array($data['skipped']) ? count($data['skipped']) : $data['skipped']) : null,
+        ]);
+    }
 
     private function mask($value, int $visible = 4): ?string {
         if ($value === null) {

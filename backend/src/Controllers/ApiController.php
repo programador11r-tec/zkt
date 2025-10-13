@@ -9,13 +9,11 @@ use App\Services\ZKTecoClient;
 use App\Services\G4SClient;
 use Config\Config;
 use App\Utils\DB;
+use App\Utils\Schema;
 use PDO;
 
 class ApiController {
     private Config $config;
-    /** @var array<int, bool> */
-    private array $invoiceSchemaEnsured = [];
-
     public function __construct() {
         $this->config = new Config(__DIR__ . '/../../.env');
     }
@@ -367,7 +365,7 @@ class ApiController {
     public function invoiceClosedTickets() {
         try {
             $pdo = DB::pdo($this->config);
-            $this->ensureInvoiceMetadataColumns($pdo);
+            Schema::ensureInvoiceMetadataColumns($pdo);
             $g4s = new G4SClient($this->config);
 
             // Seleccionar tickets CERRADOS con pagos y sin factura
@@ -548,7 +546,7 @@ class ApiController {
             $pdo = \App\Utils\DB::pdo($this->config);
             $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
             $this->ensureSettingsTable($pdo);
-            $this->ensureInvoiceMetadataColumns($pdo);
+            Schema::ensureInvoiceMetadataColumns($pdo);
             $driver = strtolower((string) $pdo->getAttribute(\PDO::ATTR_DRIVER_NAME));
 
             // total
@@ -1358,6 +1356,33 @@ class ApiController {
     private function resolveTicketTiming(array $row): array {
         $entryAt = isset($row['entry_at']) ? trim((string) $row['entry_at']) : '';
         $exitAt  = isset($row['exit_at']) ? trim((string) $row['exit_at']) : '';
+
+        $entryAt = $entryAt !== '' ? $entryAt : null;
+        $exitAt = $exitAt !== '' ? $exitAt : null;
+
+        $durationMin = $this->calculateDuration($entryAt, $exitAt);
+        if ($durationMin !== null && $durationMin <= 0) {
+            $durationMin = null;
+        }
+        if ($durationMin === null && array_key_exists('duration_min', $row) && $row['duration_min'] !== null && $row['duration_min'] !== '') {
+            $candidate = (int) $row['duration_min'];
+            if ($candidate > 0) {
+                $durationMin = $candidate;
+            }
+        }
+
+        $hoursRecorded = null;
+        if ($durationMin !== null && $durationMin > 0) {
+            $hoursRecorded = round($durationMin / 60, 2);
+        }
+
+        return [
+            'entry_at' => $entryAt,
+            'exit_at' => $exitAt,
+            'duration_min' => $durationMin,
+            'hours_recorded' => $hoursRecorded,
+        ];
+    }
 
         $entryAt = $entryAt !== '' ? $entryAt : null;
         $exitAt = $exitAt !== '' ? $exitAt : null;

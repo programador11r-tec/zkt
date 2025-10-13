@@ -1270,6 +1270,22 @@ class ApiController {
     }
 
 
+    private function mask($value, int $visible = 4): ?string {
+        if ($value === null) {
+            return null;
+        }
+        $value = (string) $value;
+        if ($value === '') {
+            return null;
+        }
+        $length = strlen($value);
+        if ($length <= $visible * 2) {
+            return str_repeat('•', max($length, 4));
+        }
+        return substr($value, 0, $visible)
+            . str_repeat('•', max(3, $length - ($visible * 2)))
+            . substr($value, -$visible);
+    }
 
     private function normalizeDateTime(mixed $value): ?string {
         if ($value === null) {

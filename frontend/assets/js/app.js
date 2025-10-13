@@ -34,6 +34,45 @@
     const pageSize = 20;
 
     app.innerHTML = `
+    <!-- Hero header -->
+      <section class="hero card shadow-sm">
+        <div class="card-body hero-body">
+          <div class="hero-text">
+            <span class="hero-eyebrow">Integración web centralizada</span>
+            <h1 class="h4 mb-2">Panel de Integración</h1>
+            <p class="text-muted mb-3" id="heroSubtitle" data-default="Monitorea sincronizaciones, genera facturas FEL y gestiona la operación desde una sola consola web.">Monitorea sincronizaciones, genera facturas FEL y gestiona la operación desde una sola consola web.</p>
+            <div class="hero-highlights">
+              <div class="hero-highlight">
+                <span class="hero-highlight-label">Último ticket</span>
+                <span class="hero-highlight-value" id="heroLastSync">—</span>
+                <span class="hero-highlight-foot" id="heroLastSyncRelative"></span>
+              </div>
+              <div class="hero-highlight">
+                <span class="hero-highlight-label">Facturas FEL</span>
+                <span class="hero-highlight-value" id="heroInvoicesTotal">—</span>
+                <span class="hero-highlight-foot" id="heroInvoicesLastSync"></span>
+              </div>
+              <div class="hero-highlight">
+                <span class="hero-highlight-label">Pendientes</span>
+                <span class="hero-highlight-chip" id="heroPendingInvoices" data-tone="neutral">Sin datos</span>
+                <span class="hero-highlight-detail" id="heroPendingDetail">Sincroniza para ver pendientes de certificación</span>
+              </div>
+            </div>
+            <small class="hero-generated text-muted" id="heroGeneratedAt">Configuración actualizada: —</small>
+          </div>
+          <div class="hero-actions">
+            <div class="d-flex flex-wrap gap-2 hero-actions-row">
+              <button id="refreshBtn" class="btn btn-primary btn-sm">
+                Actualizar datos
+              </button>
+              <button class="btn btn-outline-primary btn-sm" type="button" data-go-page="reports">
+                Ver reportes
+              </button>
+            </div>
+            <small class="hero-hint text-muted">Sincroniza cuando quieras para revisar datos actualizados en segundos.</small>
+          </div>
+        </div>
+      </section>
       <div class="row g-4">
         <div class="col-md-4">
           <div class="card shadow-sm">

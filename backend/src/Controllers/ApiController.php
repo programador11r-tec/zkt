@@ -14,6 +14,8 @@ use PDO;
 
 class ApiController {
     private Config $config;
+    /** @var array<string, array<string, bool>> */
+    private array $tableColumnCache = [];
 
     public function __construct() {
         $this->config = new Config(__DIR__ . '/../../.env');
@@ -56,6 +58,55 @@ class ApiController {
 
         $stmt = $pdo->prepare($sql);
         $stmt->execute([':key' => $key, ':value' => $value]);
+    }
+
+    /**
+     * @return array<string, bool>
+     */
+    private function getTableColumns(PDO $pdo, string $table): array {
+        $cacheKey = strtolower($table);
+        if (isset($this->tableColumnCache[$cacheKey])) {
+            return $this->tableColumnCache[$cacheKey];
+        }
+
+        try {
+            $driver = strtolower((string) $pdo->getAttribute(PDO::ATTR_DRIVER_NAME));
+        } catch (\Throwable $e) {
+            $driver = 'mysql';
+        }
+
+        $columns = [];
+        try {
+            if ($driver === 'sqlite') {
+                $stmt = $pdo->query("PRAGMA table_info('" . str_replace("'", "''", $table) . "')");
+                if ($stmt) {
+                    while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                        $name = $row['name'] ?? null;
+                        if ($name !== null) {
+                            $columns[strtolower((string) $name)] = true;
+                        }
+                    }
+                }
+            } else {
+                $safeTable = str_replace('`', '``', $table);
+                $stmt = $pdo->query('SHOW COLUMNS FROM `' . $safeTable . '`');
+                if ($stmt) {
+                    while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                        $field = $row['Field'] ?? null;
+                        if ($field !== null) {
+                            $columns[strtolower((string) $field)] = true;
+                        }
+                    }
+                }
+            }
+        } catch (\Throwable $e) {
+            Logger::error('schema.describe_failed', [
+                'table' => $table,
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        return $this->tableColumnCache[$cacheKey] = $columns;
     }
 
     private function getHourlyRate(PDO $pdo): ?float {
@@ -443,52 +494,98 @@ class ApiController {
             $driver = 'mysql';
         }
 
+        $columns = $this->getTableColumns($pdo, 'tickets');
+        $hasSource = isset($columns['source']);
+        $hasRawJson = isset($columns['raw_json']);
+        $hasUpdatedAt = isset($columns['updated_at']);
+
+        $insertColumns = ['ticket_no', 'plate', 'status', 'entry_at', 'exit_at', 'duration_min', 'amount'];
+        $valuePlaceholders = [':ticket_no', ':plate', ':status', ':entry_at', ':exit_at', ':duration_min', ':amount'];
+
+        if ($hasSource) {
+            $insertColumns[] = 'source';
+            $valuePlaceholders[] = ':source';
+        }
+
+        if ($hasRawJson) {
+            $insertColumns[] = 'raw_json';
+            $valuePlaceholders[] = ':raw_json';
+        }
+
         if ($driver === 'sqlite') {
-            $sql = "
-                INSERT INTO tickets (ticket_no, plate, status, entry_at, exit_at, duration_min, amount, source, raw_json, created_at, updated_at)
-                VALUES (:ticket_no,:plate,:status,:entry_at,:exit_at,:duration_min,:amount,:source,:raw_json, datetime('now'), datetime('now'))
-                ON CONFLICT(ticket_no) DO UPDATE SET
-                    plate=excluded.plate,
-                    status=excluded.status,
-                    entry_at=excluded.entry_at,
-                    exit_at=excluded.exit_at,
-                    duration_min=excluded.duration_min,
-                    amount=excluded.amount,
-                    source=excluded.source,
-                    raw_json=excluded.raw_json,
-                    updated_at=datetime('now')
-            ";
+            $updates = [
+                'plate=excluded.plate',
+                'status=excluded.status',
+                'entry_at=excluded.entry_at',
+                'exit_at=excluded.exit_at',
+                'duration_min=excluded.duration_min',
+                'amount=excluded.amount',
+            ];
+            if ($hasSource) {
+                $updates[] = 'source=excluded.source';
+            }
+            if ($hasRawJson) {
+                $updates[] = 'raw_json=excluded.raw_json';
+            }
+            if ($hasUpdatedAt) {
+                $updates[] = "updated_at=datetime('now')";
+            }
+
+            $sql = sprintf(
+                'INSERT INTO tickets (%s) VALUES (%s) ON CONFLICT(ticket_no) DO UPDATE SET %s',
+                implode(',', $insertColumns),
+                implode(',', $valuePlaceholders),
+                implode(',', $updates)
+            );
         } else {
-            $sql = "
-                INSERT INTO tickets (ticket_no, plate, status, entry_at, exit_at, duration_min, amount, source, raw_json, created_at, updated_at)
-                VALUES (:ticket_no,:plate,:status,:entry_at,:exit_at,:duration_min,:amount,:source,:raw_json, NOW(), NOW())
-                ON DUPLICATE KEY UPDATE
-                    plate=VALUES(plate),
-                    status=VALUES(status),
-                    entry_at=VALUES(entry_at),
-                    exit_at=VALUES(exit_at),
-                    duration_min=VALUES(duration_min),
-                    amount=VALUES(amount),
-                    source=VALUES(source),
-                    raw_json=VALUES(raw_json),
-                    updated_at=NOW()
-            ";
+            $updates = [
+                'plate=VALUES(plate)',
+                'status=VALUES(status)',
+                'entry_at=VALUES(entry_at)',
+                'exit_at=VALUES(exit_at)',
+                'duration_min=VALUES(duration_min)',
+                'amount=VALUES(amount)',
+            ];
+            if ($hasSource) {
+                $updates[] = 'source=VALUES(source)';
+            }
+            if ($hasRawJson) {
+                $updates[] = 'raw_json=VALUES(raw_json)';
+            }
+            if ($hasUpdatedAt) {
+                $updates[] = 'updated_at=NOW()';
+            }
+
+            $sql = sprintf(
+                'INSERT INTO tickets (%s) VALUES (%s) ON DUPLICATE KEY UPDATE %s',
+                implode(',', $insertColumns),
+                implode(',', $valuePlaceholders),
+                implode(',', $updates)
+            );
         }
 
         $stmt = $pdo->prepare($sql);
         $touched = 0;
         foreach ($rows as $row) {
-            $stmt->execute([
+            $params = [
                 ':ticket_no' => $row['ticket_no'],
-                ':plate' => $row['plate'],
-                ':status' => $row['status'],
-                ':entry_at' => $row['entry_at'],
-                ':exit_at' => $row['exit_at'],
-                ':duration_min' => $row['duration_min'],
-                ':amount' => $row['amount'],
-                ':source' => $row['source'] ?? null,
-                ':raw_json' => $row['raw_json'] ?? null,
-            ]);
+                ':plate' => $row['plate'] ?? null,
+                ':status' => $row['status'] ?? 'CLOSED',
+                ':entry_at' => $row['entry_at'] ?? null,
+                ':exit_at' => $row['exit_at'] ?? null,
+                ':duration_min' => $row['duration_min'] ?? null,
+                ':amount' => $row['amount'] ?? null,
+            ];
+
+            if ($hasSource) {
+                $params[':source'] = $row['source'] ?? null;
+            }
+
+            if ($hasRawJson) {
+                $params[':raw_json'] = $row['raw_json'] ?? null;
+            }
+
+            $stmt->execute($params);
             $touched++;
         }
 
@@ -1174,23 +1271,7 @@ class ApiController {
 
             if (!$rows) { \App\Utils\Http::json(['ok'=>true,'ingested'=>0]); return; }
 
-            $up = $pdo->prepare("
-                INSERT INTO tickets (ticket_no, plate, status, entry_at, exit_at, duration_min, amount, source, raw_json, created_at, updated_at)
-                VALUES (:ticket_no,:plate,:status,:entry_at,:exit_at,:duration_min,:amount,:source,:raw_json, NOW(), NOW())
-                ON DUPLICATE KEY UPDATE
-                plate=VALUES(plate),
-                status=VALUES(status),
-                entry_at=VALUES(entry_at),
-                exit_at=VALUES(exit_at),
-                duration_min=VALUES(duration_min),
-                amount=VALUES(amount),
-                source=VALUES(source),
-                raw_json=VALUES(raw_json),
-                updated_at=NOW()
-            ");
-
-            $n=0;
-            foreach ($rows as $r) { $up->execute($r); $n++; }
+            $n = $this->persistTickets($pdo, $rows);
 
             \App\Utils\Http::json(['ok'=>true,'ingested'=>$n]);
         } catch (\Throwable $e) {
@@ -1913,24 +1994,7 @@ class ApiController {
 
             if (!$rows) { \App\Utils\Http::json(['ok'=>true,'ingested'=>0]); return; }
 
-            // UPSERT (tu misma consulta)
-            $up = $pdo->prepare("
-                INSERT INTO tickets (ticket_no, plate, status, entry_at, exit_at, duration_min, amount, source, raw_json, created_at, updated_at)
-                VALUES (:ticket_no,:plate,:status,:entry_at,:exit_at,:duration_min,:amount,:source,:raw_json, NOW(), NOW())
-                ON DUPLICATE KEY UPDATE
-                    plate=VALUES(plate),
-                    status=VALUES(status),
-                    entry_at=VALUES(entry_at),
-                    exit_at=VALUES(exit_at),
-                    duration_min=VALUES(duration_min),
-                    amount=VALUES(amount),
-                    source=VALUES(source),
-                    raw_json=VALUES(raw_json),
-                    updated_at=NOW()
-            ");
-
-            $n=0;
-            foreach ($rows as $r) { $up->execute($r); $n++; }
+            $n = $this->persistTickets($pdo, $rows);
 
             \App\Utils\Http::json(['ok'=>true,'ingested'=>$n]);
         } catch (\Throwable $e) {

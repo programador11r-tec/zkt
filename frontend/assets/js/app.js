@@ -2,8 +2,34 @@
   const app = document.getElementById('app');
   const sidebar = document.getElementById('appSidebar');
   const sidebarLinks = sidebar ? Array.from(sidebar.querySelectorAll('.nav-link')) : [];
+  const PAGE_STORAGE_KEY = 'zkt:lastPage';
+  const pageStorage = (() => {
+    try {
+      return window.localStorage;
+    } catch (error) {
+      return null;
+    }
+  })();
   let currentPage = null;
   let renderGeneration = 0;
+
+  function rememberPage(page) {
+    if (!pageStorage || !page) return;
+    try {
+      pageStorage.setItem(PAGE_STORAGE_KEY, page);
+    } catch (error) {
+      /* ignore storage errors */
+    }
+  }
+
+  function restorePage() {
+    if (!pageStorage) return null;
+    try {
+      return pageStorage.getItem(PAGE_STORAGE_KEY);
+    } catch (error) {
+      return null;
+    }
+  }
 
   if (sidebar) {
     sidebar.setAttribute('aria-hidden', 'false');
@@ -401,6 +427,7 @@
       if (activeLink) {
         setActive(activeLink);
       }
+      rememberPage(target);
       return;
     }
 
@@ -424,6 +451,7 @@
     } finally {
       if (renderGeneration === requestId) {
         currentPage = target;
+        rememberPage(target);
       }
     }
   }
@@ -448,8 +476,17 @@
       void goToPage(page);
     });
 
-    const initialLink = document.querySelector('.nav-link.active[data-page]') || sidebarLinks[0];
-    const initialPage = initialLink?.getAttribute('data-page') || 'dashboard';
+    const availablePages = new Set(
+      sidebarLinks
+        .map((link) => link.getAttribute('data-page'))
+        .filter(Boolean)
+    );
+    const storedPage = restorePage();
+    const fallbackLink = document.querySelector('.nav-link.active[data-page]') || sidebarLinks[0];
+    let initialPage = fallbackLink?.getAttribute('data-page') || 'dashboard';
+    if (storedPage && availablePages.has(storedPage)) {
+      initialPage = storedPage;
+    }
     void goToPage(initialPage, { force: true });
   }
 

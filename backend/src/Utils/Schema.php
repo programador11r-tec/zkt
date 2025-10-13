@@ -57,6 +57,7 @@ class Schema {
             'hours_billed' => $driver === 'sqlite' ? 'REAL NULL' : 'DECIMAL(8,2) NULL',
             'billing_mode' => $driver === 'sqlite' ? 'TEXT NULL' : 'VARCHAR(32) NULL',
             'hourly_rate' => $driver === 'sqlite' ? 'REAL NULL' : 'DECIMAL(12,2) NULL',
+            'monthly_rate' => $driver === 'sqlite' ? 'REAL NULL' : 'DECIMAL(12,2) NULL',
         ];
 
         foreach ($definitions as $column => $definition) {

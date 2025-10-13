@@ -469,15 +469,16 @@ class ApiController {
             $mode = strtolower((string)($b['mode'] ?? ''));
             $description = trim((string)($b['description'] ?? ''));
 
-            $durationMin = isset($row['duration_min']) ? (int) $row['duration_min'] : null;
-            if (($durationMin === null || $durationMin <= 0) && !empty($row['entry_at']) && !empty($row['exit_at'])) {
-                $entryTs = strtotime((string) $row['entry_at']);
-                $exitTs = strtotime((string) $row['exit_at']);
-                if ($entryTs && $exitTs && $exitTs > $entryTs) {
-                    $durationMin = (int) round(($exitTs - $entryTs) / 60);
-                }
+            $durationMin = null;
+            $entryTs = !empty($row['entry_at']) ? strtotime((string) $row['entry_at']) : false;
+            $exitTs  = !empty($row['exit_at'])  ? strtotime((string) $row['exit_at'])  : false;
+            if ($entryTs && $exitTs && $exitTs > $entryTs) {
+                $durationMin = (int) round(($exitTs - $entryTs) / 60);
             }
-            $hours = $durationMin !== null && $durationMin > 0 ? round($durationMin / 60, 2) : null;
+            if ($durationMin === null || $durationMin <= 0) {
+                $durationMin = isset($row['duration_min']) ? (int) $row['duration_min'] : null;
+            }
+            $hours = $durationMin !== null && $durationMin > 0 ? max(1.0, round($durationMin / 60, 2)) : null;
 
             $total = (float)($row['total'] ?? 0);
             $itemQuantity = 1.0;

@@ -1216,6 +1216,135 @@ class ApiController {
         }
         return true;
     }
+
+    public function ingestZKBioMerge() {
+        try {
+            // Seguridad por header
+            $key = $this->config->get('INGEST_KEY', '');
+            if ($key !== '' && ($_SERVER['HTTP_X_INGEST_KEY'] ?? '') !== $key) {
+                \App\Utils\Http::json(['ok'=>false,'error'=>'Unauthorized'], 401);
+                return;
+            }
+
+            $pdo = \App\Utils\DB::pdo($this->config);
+            $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
+
+            $body = \App\Utils\Http::body();  // <- wrapper
+            if (!is_array($body)) { \App\Utils\Http::json(['ok'=>false,'error'=>'Payload inválido (no JSON)'],400); return; }
+            $outRoot = $body['out'] ?? null;
+            $inRoot  = $body['in']  ?? null;
+
+            // Helpers para sacar el array de data
+            $toArray = function($root) {
+                if (!$root) return [];
+                if (isset($root['data']['data']) && is_array($root['data']['data'])) return $root['data']['data'];
+                if (isset($root['data']) && is_array($root['data'])) return $root['data'];
+                return [];
+            };
+
+            $outs = $toArray($outRoot);
+            $ins  = $toArray($inRoot);
+
+            // Indexar entradas por placa y ordenar por checkInTime asc
+            $insByPlate = [];
+            foreach ($ins as $r) {
+                $plate = (string)($r['carNumber'] ?? '');
+                if ($plate === '') continue;
+                $insByPlate[$plate][] = $r;
+            }
+            foreach ($insByPlate as &$arr) {
+                usort($arr, function($a,$b){
+                    $da = strtotime((string)($a['checkInTime'] ?? '')) ?: 0;
+                    $db = strtotime((string)($b['checkInTime'] ?? '')) ?: 0;
+                    return $da <=> $db;
+                });
+            }
+            unset($arr);
+
+            // Armar filas normalizadas
+            $rows = [];
+            foreach ($outs as $o) {
+                $id    = (string)($o['id'] ?? '');
+                if ($id === '') continue;
+
+                $plate = (string)($o['carNumber'] ?? '');
+                $exitS = (string)($o['checkOutTime'] ?? '');
+                $exitS = $exitS !== '' ? substr($exitS,0,19) : null; // quitar .mmm
+                $exitT = $exitS ? strtotime($exitS) : null;
+
+                // Buscar la última entrada <= salida
+                $entryS = null;
+                if ($plate !== '' && $exitT && !empty($insByPlate[$plate])) {
+                    $cands = $insByPlate[$plate];
+                    for ($i = count($cands)-1; $i >= 0; $i--) {
+                        $ci = (string)($cands[$i]['checkInTime'] ?? '');
+                        $ci = $ci !== '' ? substr($ci,0,19) : null;
+                        if (!$ci) continue;
+                        $ciT = strtotime($ci);
+                        if ($ciT && $ciT <= $exitT) { $entryS = $ci; break; }
+                    }
+                }
+
+                // Calcular duración
+                $dur = null;
+                if ($entryS && $exitT) {
+                    $enT = strtotime($entryS);
+                    if ($enT && $exitT >= $enT) {
+                        $mins = (int)round(($exitT - $enT)/60);
+                        if ($mins >= 0) $dur = $mins;
+                    }
+                } else {
+                    // fallback a parkingTime si existe
+                    $pt = (string)($o['parkingTime'] ?? '');
+                    if (preg_match('/^\d{2}:\d{2}:\d{2}/', $pt)) {
+                        [$hh,$mm,$ss] = array_map('intval', explode(':', substr($pt,0,8)));
+                        $dur = $hh*60 + $mm + ($ss > 0 ? 1 : 0);
+                        if ($exitT && $dur !== null) {
+                            $entryS = date('Y-m-d H:i:s', $exitT - ($dur*60));
+                        }
+                    }
+                }
+
+                $rows[] = [
+                    'ticket_no'    => $id,
+                    'plate'        => $plate ?: null,
+                    'status'       => 'CLOSED',
+                    'entry_at'     => $entryS,
+                    'exit_at'      => $exitS,
+                    'duration_min' => $dur,
+                    'amount'       => null,
+                    'source'       => 'zkbio',
+                    'raw_json'     => json_encode($o, JSON_UNESCAPED_UNICODE),
+                ];
+            }
+
+            if (!$rows) { \App\Utils\Http::json(['ok'=>true,'ingested'=>0]); return; }
+
+            // UPSERT (tu misma consulta)
+            $up = $pdo->prepare("
+                INSERT INTO tickets (ticket_no, plate, status, entry_at, exit_at, duration_min, amount, source, raw_json, created_at, updated_at)
+                VALUES (:ticket_no,:plate,:status,:entry_at,:exit_at,:duration_min,:amount,:source,:raw_json, NOW(), NOW())
+                ON DUPLICATE KEY UPDATE
+                    plate=VALUES(plate),
+                    status=VALUES(status),
+                    entry_at=VALUES(entry_at),
+                    exit_at=VALUES(exit_at),
+                    duration_min=VALUES(duration_min),
+                    amount=VALUES(amount),
+                    source=VALUES(source),
+                    raw_json=VALUES(raw_json),
+                    updated_at=NOW()
+            ");
+
+            $n=0;
+            foreach ($rows as $r) { $up->execute($r); $n++; }
+
+            \App\Utils\Http::json(['ok'=>true,'ingested'=>$n]);
+        } catch (\Throwable $e) {
+            \App\Utils\Http::json(['ok'=>false,'error'=>$e->getMessage()], 500);
+        }
+    }
+
 }
 
     

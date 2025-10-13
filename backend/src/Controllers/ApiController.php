@@ -1289,7 +1289,16 @@ class ApiController {
             $durationMin = (int) $ticket['duration_min'];
         }
         if ($durationMin !== null && $durationMin <= 0) {
-            $durationMin = null;
+            if (
+                $enforceMinimumHour
+                && $entryTs !== false
+                && $exitTs !== false
+                && $entryTs === $exitTs
+            ) {
+                $durationMin = 60;
+            } else {
+                $durationMin = null;
+            }
         }
 
         $hours = null;

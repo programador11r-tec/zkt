@@ -7,7 +7,10 @@ CREATE TABLE IF NOT EXISTS tickets (
   exit_at      DATETIME NULL,
   duration_min INT NULL,
   amount       DECIMAL(12,2) DEFAULT 0,
-  created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  source       VARCHAR(32) DEFAULT 'external',
+  raw_json     MEDIUMTEXT,
+  created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
 
 CREATE INDEX idx_tickets_status ON tickets(status);
@@ -38,4 +41,10 @@ CREATE TABLE IF NOT EXISTS invoices (
   UNIQUE KEY uq_invoice_ticket (ticket_no),
   INDEX idx_invoices_uuid (uuid),
   CONSTRAINT fk_invoices_ticket FOREIGN KEY (ticket_no) REFERENCES tickets(ticket_no)
+);
+
+CREATE TABLE IF NOT EXISTS app_settings (
+  `key`       VARCHAR(64) PRIMARY KEY,
+  `value`     TEXT NULL,
+  updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );

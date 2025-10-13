@@ -1353,7 +1353,11 @@ class ApiController {
     }
 
 
-    private function resolveTicketTiming(array $row): array {
+    /**
+     * @param array<string,mixed> $row
+     * @return array{entry_at:?string,exit_at:?string,duration_min:?int,hours_recorded:?float}
+     */
+    private function resolveTicketTiming(array $row) {
         $entryAt = isset($row['entry_at']) ? trim((string) $row['entry_at']) : '';
         $exitAt  = isset($row['exit_at']) ? trim((string) $row['exit_at']) : '';
 
@@ -1363,6 +1367,30 @@ class ApiController {
         $durationMin = $this->calculateDuration($entryAt, $exitAt);
         if ($durationMin !== null && $durationMin <= 0) {
             $durationMin = null;
+        }
+        if ($durationMin === null && array_key_exists('duration_min', $row) && $row['duration_min'] !== null && $row['duration_min'] !== '') {
+            $candidate = (int) $row['duration_min'];
+            if ($candidate > 0) {
+                $durationMin = $candidate;
+            }
+        }
+
+        $hoursRecorded = null;
+        if ($durationMin !== null && $durationMin > 0) {
+            $hoursRecorded = round($durationMin / 60, 2);
+        }
+
+        return [
+            'entry_at' => $entryAt,
+            'exit_at' => $exitAt,
+            'duration_min' => $durationMin,
+            'hours_recorded' => $hoursRecorded,
+        ];
+    }
+
+    private function normalizeDateTime($value): ?string {
+        if ($value === null) {
+            return null;
         }
         if ($durationMin === null && array_key_exists('duration_min', $row) && $row['duration_min'] !== null && $row['duration_min'] !== '') {
             $candidate = (int) $row['duration_min'];

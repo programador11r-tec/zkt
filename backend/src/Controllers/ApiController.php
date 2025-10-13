@@ -332,7 +332,7 @@ class ApiController {
 
                 $ticketContext = $t;
                 $ticketContext['payments_total'] = $paymentsTotal;
-                $billing = $this->calculateTicketBilling($ticketContext, $hourlyRate);
+                $billing = $this->calculateTicketBilling($ticketContext, $hourlyRate, true);
                 if ($billing['total'] <= 0) {
                     continue;
                 }
@@ -961,7 +961,7 @@ class ApiController {
                         $durationMin = (int) round(($exitTs - $entryTs) / 60);
                     }
                 }
-                $billing = $this->calculateTicketBilling($row, $hourlyRate);
+                $billing = $this->calculateTicketBilling($row, $hourlyRate, true);
                 $row['duration_min'] = $billing['duration_minutes'];
                 $row['duration_minutes'] = $billing['duration_minutes'];
                 $row['hours'] = $billing['hours'];
@@ -1275,7 +1275,7 @@ class ApiController {
     }
 
 
-    private function calculateTicketBilling(array $ticket, ?float $hourlyRate): array {
+    private function calculateTicketBilling(array $ticket, ?float $hourlyRate, bool $enforceMinimumHour = false): array {
         $entryAt = $ticket['entry_at'] ?? null;
         $exitAt = $ticket['exit_at'] ?? null;
 
@@ -1297,7 +1297,7 @@ class ApiController {
             $hours = round($durationMin / 60, 2);
             if ($hours <= 0) {
                 $hours = null;
-            } else {
+            } elseif ($enforceMinimumHour) {
                 $hours = max(1.0, $hours);
             }
         }

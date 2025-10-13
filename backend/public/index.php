@@ -25,6 +25,8 @@ $router->post('/api/settings/hourly-rate', fn() => $api->updateHourlyRate());
 $router->post('/api/ingest/tickets',  fn() => $api->ingestTickets());
 $router->post('/api/ingest/payments', fn() => $api->ingestPayments());
 $router->post('/api/ingest/bulk',     fn() => $api->ingestBulk());
+// NUEVO: merge server-side
+$router->post('/api/ingest/zkbio-merge', fn() => $api->ingestZKBioMerge());
 
 // Dashboard (desde BD)
 $router->get('/api/tickets', fn() => $api->getTicketsFromDB());

@@ -1294,11 +1294,13 @@ class ApiController {
 
         $hours = null;
         if ($durationMin !== null && $durationMin > 0) {
-            $hours = round($durationMin / 60, 2);
-            if ($hours <= 0) {
-                $hours = null;
-            } elseif ($enforceMinimumHour) {
-                $hours = max(1.0, $hours);
+            if ($enforceMinimumHour) {
+                $hours = (float) max(1, (int) ceil($durationMin / 60));
+            } else {
+                $hours = round($durationMin / 60, 2);
+                if ($hours <= 0) {
+                    $hours = null;
+                }
             }
         }
 

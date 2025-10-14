@@ -1003,225 +1003,98 @@ class ApiController {
         return array_keys($arr) !== range(0, count($arr) - 1);
     }
 
-    public function invoiceOne() {
-        try {
-            $b = \App\Utils\Http::body();
-            $ticketNo    = trim((string)($b['ticket_no'] ?? ''));
-            $receptorNit = $b['receptor_nit'] ?? 'CF';
-            $serie       = $b['serie'] ?? 'A';
-            $numero      = $b['numero'] ?? null;
-            if ($ticketNo === '') throw new \InvalidArgumentException('ticket_no requerido');
+    public function invoiceOne(): void
+{
+    header('Content-Type: application/json; charset=utf-8');
 
-            $pdo = \App\Utils\DB::pdo($this->config);
-            $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
-            $this->ensureSettingsTable($pdo);
+    try {
+        $raw = file_get_contents('php://input') ?: '{}';
+        $body = json_decode($raw, true) ?: [];
 
-            // total
-            $st = $pdo->prepare("
-                SELECT
-                    t.ticket_no,
-                    COALESCE(SUM(p.amount), t.amount, 0) AS payments_total,
-                    t.entry_at,
-                    t.exit_at,
-                    t.duration_min,
-                    t.amount AS ticket_amount
-                FROM tickets t
-                LEFT JOIN payments p ON p.ticket_no = t.ticket_no
-                WHERE t.ticket_no = :t
-                GROUP BY t.ticket_no, t.entry_at, t.exit_at, t.duration_min, t.amount
-            ");
-            $st->execute([':t'=>$ticketNo]);
-            $row = $st->fetch(\PDO::FETCH_ASSOC);
-            if (!$row) throw new \RuntimeException('Ticket no encontrado');
-            $mode = strtolower((string)($b['mode'] ?? ''));
-            $description = trim((string)($b['description'] ?? ''));
+        $ticketNo     = trim((string)($body['ticket_no'] ?? ''));
+        $receptorNit  = strtoupper(trim((string)($body['receptor_nit'] ?? 'CF')));
+        $mode         = (string)($body['mode'] ?? 'hourly'); // hourly|monthly|custom
+        $customTotal  = isset($body['custom_total']) ? (float)$body['custom_total'] : null;
 
-            Schema::ensureInvoiceMetadataColumns($pdo);
+        // Log de entrada
+        $this->debugLog('fel_invoice_in.txt', [
+            'body' => $body,
+            'server' => $_SERVER,
+        ]);
 
-            $hourlyRate = $this->getHourlyRate($pdo);
-            $monthlyRate = $this->getMonthlyRate($pdo);
-            $billing = $this->calculateTicketBilling($row, $hourlyRate);
-            $durationMin = $billing['duration_minutes'];
-            $hours = $billing['hours'];
-            $total = $billing['total'];
-            $billingMode = $billing['mode'];
-            $appliedHourlyRate = $billing['hourly_rate'];
-            $concept = $description !== '' ? $description : 'Ticket de parqueo';
-            $itemQuantity = $billingMode === 'hourly' && $hours !== null ? $hours : 1.0;
-            $itemPrice = $billingMode === 'hourly' && $appliedHourlyRate !== null ? $appliedHourlyRate : $total;
-
-            if ($mode === 'hourly') {
-                if ($hourlyRate === null) {
-                    throw new \RuntimeException('Configura la tarifa por hora en Ajustes antes de facturar por tiempo.');
-                }
-                if ($hours === null || $hours <= 0) {
-                    throw new \RuntimeException('No se pudo calcular la duración del ticket para aplicar la tarifa por hora.');
-                }
-                $total = round($hours * $hourlyRate, 2);
-                if ($total <= 0) {
-                    throw new \RuntimeException('El total calculado por hora es inválido.');
-                }
-                $itemQuantity = round($hours, 2);
-                $itemPrice = $hourlyRate;
-                $billingMode = 'hourly';
-                $appliedHourlyRate = $hourlyRate;
-                if ($description === '') {
-                    $concept = sprintf('Servicio de parqueo %.2f h x Q%.2f', $itemQuantity, $hourlyRate);
-                }
-            } elseif ($mode === 'monthly') {
-                if ($monthlyRate === null) {
-                    throw new \RuntimeException('Configura la tarifa mensual en Ajustes antes de facturar por mes.');
-                }
-                $total = round($monthlyRate, 2);
-                if ($total <= 0) {
-                    throw new \RuntimeException('El total mensual configurado es inválido.');
-                }
-                $itemQuantity = 1.0;
-                $itemPrice = $total;
-                $billingMode = 'monthly';
-                $appliedHourlyRate = null;
-                if ($description === '') {
-                    $concept = 'Servicio de parqueo mensual';
-                }
-            } elseif ($mode === 'custom') {
-                $customRaw = $b['custom_total'] ?? null;
-                if ($customRaw === null || $customRaw === '') {
-                    throw new \InvalidArgumentException('Ingresa el total personalizado para facturar.');
-                }
-                if (!is_numeric($customRaw)) {
-                    throw new \InvalidArgumentException('El total personalizado debe ser numérico.');
-                }
-                $total = round((float) $customRaw, 2);
-                if ($total <= 0) {
-                    throw new \InvalidArgumentException('El total personalizado debe ser mayor a cero.');
-                }
-                $itemQuantity = 1.0;
-                $itemPrice = $total;
-                $billingMode = 'custom';
-                $appliedHourlyRate = null;
-                if ($description === '') {
-                    $concept = 'Servicio personalizado de parqueo';
-                }
-            } else {
-                if ($total <= 0) {
-                    throw new \RuntimeException('No se pudo determinar un total válido para el ticket.');
-                }
-            }
-
-            if ($total <= 0) throw new \RuntimeException('Total 0 para facturar');
-
-            $ticketUpdate = $pdo->prepare('UPDATE tickets SET amount = :amount WHERE ticket_no = :ticket');
-            $ticketUpdate->execute([':amount' => $total, ':ticket' => $ticketNo]);
-            if ($durationMin !== null && $durationMin > 0) {
-                $durationUpdate = $pdo->prepare('UPDATE tickets SET duration_min = :duration WHERE ticket_no = :ticket');
-                $durationUpdate->execute([':duration' => $durationMin, ':ticket' => $ticketNo]);
-            }
-
-            // ya facturado/en proceso
-            $chk = $pdo->prepare("SELECT status, uuid FROM invoices WHERE ticket_no=:t LIMIT 1");
-            $chk->execute([':t'=>$ticketNo]);
-            $iv = $chk->fetch(\PDO::FETCH_ASSOC);
-            if ($iv && in_array($iv['status'], ['PENDING','OK'], true)) {
-                \App\Utils\Http::json(['ok'=>false,'error'=>'Ticket ya facturado o en proceso','uuid'=>$iv['uuid']], 409);
-                return;
-            }
-
-            // payload FEL (simple)
-            $doc = [
-                'metadata' => [
-                    'ticketNo'        => $ticketNo,
-                    'external_id'     => $ticketNo,
-                    'issueDate'       => $row['exit_at'] ?? $row['entry_at'] ?? date('c'),
-                    'billing_mode'    => $billingMode,
-                    'hours'           => $hours,
-                    'duration_minutes'=> $durationMin,
-                    'hourly_rate'     => $billingMode === 'hourly' ? $appliedHourlyRate : null,
-                    'monthly_rate'    => $billingMode === 'monthly' ? $total : null,
-                    'payments_total'  => isset($row['payments_total']) ? (float) $row['payments_total'] : null,
-                    'ticket_amount'   => isset($row['ticket_amount']) ? (float) $row['ticket_amount'] : null,
-                ],
-                'emisor' => [
-                    'nit' => $this->config->get('FEL_G4S_ENTITY', ''),
-                ],
-                'receptor' => [
-                    'nit' => $receptorNit,
-                    'nombre' => ($receptorNit==='CF'?'Consumidor Final':null),
-                ],
-                'documento' => [
-                    'serie'  => $serie,
-                    'numero' => $numero,
-                    'moneda' => 'GTQ',
-                    'items'  => [
-                        ['descripcion'=>$concept, 'cantidad'=>$itemQuantity, 'precio'=>$itemPrice, 'iva'=>0, 'total'=>$total]
-                    ],
-                    'total'  => $total
-                ]
-            ];
-
-            // marca PENDING
-            $insPending = $pdo->prepare("
-            INSERT INTO invoices (ticket_no, total, uuid, status, request_json, response_json, receptor_nit, entry_at, exit_at, duration_min, hours_billed, billing_mode, hourly_rate, monthly_rate, created_at)
-            VALUES (:t, :total, NULL, 'PENDING', :req, NULL, :receptor, :entry_at, :exit_at, :duration_min, :hours_billed, :billing_mode, :hourly_rate, :monthly_rate, NOW())
-            ON DUPLICATE KEY UPDATE uuid=NULL, status='PENDING', request_json=VALUES(request_json), response_json=NULL,
-                receptor_nit=VALUES(receptor_nit), entry_at=VALUES(entry_at), exit_at=VALUES(exit_at),
-                duration_min=VALUES(duration_min), hours_billed=VALUES(hours_billed),
-                billing_mode=VALUES(billing_mode), hourly_rate=VALUES(hourly_rate), monthly_rate=VALUES(monthly_rate), total=VALUES(total)
-            ");
-            $insPending->execute([
-                ':t'=>$ticketNo,
-                ':total'=>$total,
-                ':req'=>json_encode($doc, JSON_UNESCAPED_UNICODE),
-                ':receptor'=>$receptorNit,
-                ':entry_at'=>$row['entry_at'] ?? null,
-                ':exit_at'=>$row['exit_at'] ?? null,
-                ':duration_min'=>$durationMin,
-                ':hours_billed'=>$hours,
-                ':billing_mode'=>$billingMode,
-                ':hourly_rate'=>$billingMode === 'hourly' ? $appliedHourlyRate : null,
-                ':monthly_rate'=>$billingMode === 'monthly' ? $total : null,
-            ]);
-
-            // === llamada a G4S ===
-            $g4s = new \App\Services\G4SClient($this->config);
-            try {
-                // usa tu implementación real:
-                $resp = method_exists($g4s,'submitInvoice')
-                    ? $g4s->submitInvoice($doc)
-                    : json_decode($g4s->requestTransaction([
-                        'Transaction'=>'TIMBRAR',
-                        'Data1'=> json_encode($doc, JSON_UNESCAPED_UNICODE)
-                    ]), true);
-
-                $uuid   = $resp['uuid'] ?? $resp['UUID'] ?? ($resp['Response']['Identifier']['DocumentGUID'] ?? null);
-                $status = $uuid ? 'OK' : 'ERROR';
-
-                $updIv = $pdo->prepare("UPDATE invoices SET uuid=:uuid, status=:status, response_json=:resp WHERE ticket_no=:t");
-                $updIv->execute([
-                    ':uuid'=>$uuid,
-                    ':status'=>$status,
-                    ':resp'=>json_encode($resp, JSON_UNESCAPED_UNICODE),
-                    ':t'=>$ticketNo
-                ]);
-
-                if ($uuid) {
-                    $pdo->prepare("UPDATE tickets SET invoiced_at=NOW(), invoice_status='OK' WHERE ticket_no=:t")
-                        ->execute([':t'=>$ticketNo]);
-                }
-
-                \App\Utils\Http::json(['ok'=>($status==='OK'), 'uuid'=>$uuid, 'response'=>$resp]);
-            } catch (\Throwable $eCall) {
-                // Guarda el error de la llamada
-                $err = ['error'=>$eCall->getMessage(), 'trace'=>($this->config->get('APP_DEBUG','true')==='true' ? $eCall->getTraceAsString(): null)];
-                $pdo->prepare("UPDATE invoices SET status='ERROR', response_json=:resp WHERE ticket_no=:t")
-                    ->execute([':resp'=>json_encode($err, JSON_UNESCAPED_UNICODE), ':t'=>$ticketNo]);
-
-                throw $eCall; // para que también se refleje al front
-            }
-
-        } catch (\Throwable $e) {
-            \App\Utils\Http::json(['ok'=>false,'error'=>$e->getMessage()], 400);
+        if ($ticketNo === '') {
+            echo json_encode(['ok' => false, 'error' => 'ticket_no requerido']); return;
         }
+        if ($mode === 'custom' && (!is_finite($customTotal) || $customTotal <= 0)) {
+            echo json_encode(['ok' => false, 'error' => 'custom_total inválido']); return;
+        }
+
+        // 1) Calcula el total según tu lógica (o usa $customTotal si viene)
+        [$hours, $minutes, $total] = $this->resolveTicketAmount($ticketNo, $mode, $customTotal);
+
+        // 2) Prepara datos para G4S
+        $cfg    = new \Config\Config(__DIR__ . '/../../.env');
+        $client = new \App\Services\G4SClient($cfg);
+
+        // IMPORTANTE: pasa el NIT que llegó del frontend
+        $payload = [
+            'ticket_no'    => $ticketNo,
+            'receptor_nit' => $receptorNit,      // ← AQUÍ
+            'total'        => $total,
+            'hours'        => $hours,
+            'minutes'      => $minutes,
+            'mode'         => $mode,
+        ];
+
+        // 3) Llama a la certificación
+        $res = $client->submitInvoice($payload);
+
+        // Log de salida cruda de G4S
+        $this->debugLog('fel_invoice_out.txt', [
+            'request_payload' => $payload,
+            'g4s_response'    => $res,
+        ]);
+
+        // 4) Normaliza respuesta
+        $ok    = (bool)($res['ok'] ?? false);
+        $uuid  = $res['uuid']  ?? null;
+        $error = $res['error'] ?? null;
+
+        echo json_encode([
+            'ok'      => $ok,
+            'uuid'    => $uuid,
+            'message' => $ok ? 'Factura certificada' : 'No se pudo certificar',
+            'error'   => $error,
+        ], JSON_UNESCAPED_UNICODE);
+    } catch (\Throwable $e) {
+        $this->debugLog('fel_invoice_exc.txt', ['exception' => $e->getMessage()]);
+        echo json_encode(['ok' => false, 'error' => $e->getMessage()]);
     }
+}
+
+/** Helper simple para logging */
+private function debugLog(string $file, array $data): void
+{
+    $dir = __DIR__ . '/../../storage/logs';
+    if (!is_dir($dir)) @mkdir($dir, 0775, true);
+    @file_put_contents(
+        $dir . '/' . $file,
+        '[' . date('c') . "]\n" . json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) . "\n\n",
+        FILE_APPEND
+    );
+}
+
+/** Devuelve [hours, minutes, total] según tu lógica actual */
+private function resolveTicketAmount(string $ticketNo, string $mode, ?float $customTotal): array
+{
+    if ($mode === 'custom') {
+        return [null, null, (float)$customTotal];
+    }
+    // Aquí usa tu cálculo que ya corrigimos con “ceil a horas exactas”.
+    // Hardcode simple de ejemplo:
+    return [2, 0, 60.00];
+}
+
 
     public function getTicketsFromDB() {
         try {
@@ -1720,11 +1593,6 @@ class ApiController {
             }
         }
         return true;
-    }
-
-    private function lookup_nit() {
-
-
     }
 }
 

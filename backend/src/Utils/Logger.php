@@ -1,18 +1,37 @@
 <?php
-declare(strict_types=1);
-
 namespace App\Utils;
 
-class Logger {
-    public static function info(string $msg, array $ctx = []) {
-        self::write('INFO', $msg, $ctx);
-    }
-    public static function error(string $msg, array $ctx = []) {
-        self::write('ERROR', $msg, $ctx);
-    }
-    private static function write(string $level, string $msg, array $ctx) {
-        $line = sprintf("%s [%s] %s %s\n", date('c'), $level, $msg, $ctx ? json_encode($ctx) : '');
-        $logFile = __DIR__ . '/../../storage/logs/app.log';
-        @file_put_contents($logFile, $line, FILE_APPEND);
+class Logger
+{
+    /**
+     * Escribe una línea en el archivo de log.
+     * Crea la carpeta automáticamente si no existe.
+     */
+    public static function log(string $message, string $file = null): void
+    {
+        try {
+            if (!$file) {
+                $file = __DIR__ . '/../../storage/app_debug.log';
+            }
+
+            // Crear directorio si no existe
+            $dir = dirname($file);
+            if (!is_dir($dir)) {
+                mkdir($dir, 0777, true);
+            }
+
+            // Fecha y hora local
+            $date = (new \DateTime('now', new \DateTimeZone('America/Guatemala')))
+                ->format('Y-m-d H:i:s');
+
+            // Formato de log
+            $line = sprintf("[%s] %s\n", $date, $message);
+
+            // Escribir
+            file_put_contents($file, $line, FILE_APPEND);
+        } catch (\Throwable $e) {
+            // Fallback silencioso en caso de error
+            error_log("Logger fallback: " . $e->getMessage());
+        }
     }
 }

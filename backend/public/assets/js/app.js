@@ -29,16 +29,17 @@
     }
   }
 
-  async function fetchJSON(url, opts) {
-    const res = await fetch(url, opts);
-    const text = await res.text();
-    try {
-      if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}\n${text}`);
-      return JSON.parse(text);
-    } catch (e) {
-      throw new Error(`Respuesta no JSON desde ${url}\n---\n${text}\n---`);
-    }
+ async function fetchJSON(url, opts) {
+  const res = await fetch(url, opts);
+  const text = await res.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    // Muestra qué devolvió el backend
+    throw new Error(`Respuesta no JSON (${res.status}): ${text.slice(0, 800)}`);
   }
+}
+
 
   const settingsState = { cache: null, promise: null };
 
@@ -844,6 +845,70 @@
 
 
         let resolved = false;
+        form.addEventListener('submit', (event) => {
+          event.preventDefault();
+          const selected = form.querySelector('input[name="billingMode"]:checked')?.value;
+          if (!selected) {
+            errorBox.textContent = 'Selecciona el tipo de cobro.';
+            errorBox.hidden = false;
+            return;
+          }
+
+          // NIT desde el textbox
+          const rawNit = nitInput.value.trim();
+          const receptorNit = (rawNit.toUpperCase() === 'CF' || rawNit === '')
+            ? 'CF'
+            : onlyDigits(rawNit);
+
+          if (selected === 'hourly') {
+            if (!canHourly || hourlyTotal === null) {
+              errorBox.textContent = 'Configura una tarifa por hora válida en Ajustes para usar esta opción.';
+              errorBox.hidden = false;
+              return;
+            }
+            cleanup({
+              mode: 'hourly',
+              total: hourlyTotal, // ← devolvemos total también
+              label: `Cobro por hora ${hourlyLabel ?? ''}`.trim(),
+              description: '',
+              receptor_nit: receptorNit,
+            });
+            return;
+          }
+
+          if (selected === 'monthly') {
+            if (monthlyRate === null) {
+              errorBox.textContent = 'Configura una tarifa mensual válida en Ajustes para usar esta opción.';
+              errorBox.hidden = false;
+              return;
+            }
+            cleanup({
+              mode: 'monthly',
+              total: monthlyRate, // ← devolvemos total también
+              label: `Cobro mensual ${monthlyLabel ?? ''}`.trim(),
+              description: '',
+              receptor_nit: receptorNit,
+            });
+            return;
+          }
+
+          // custom
+          const customVal = parseFloat(customInput.value);
+          if (!Number.isFinite(customVal) || customVal <= 0) {
+            errorBox.textContent = 'Ingresa un total personalizado mayor a cero.';
+            errorBox.hidden = false;
+            return;
+          }
+          const normalized = Math.round(customVal * 100) / 100;
+          cleanup({
+            mode: 'custom',
+            total: normalized, // ← importantísimo
+            label: `Cobro personalizado ${formatCurrency(normalized)}`,
+            description: '',
+            receptor_nit: receptorNit,
+          });
+        });
+
         const cleanup = (result) => {
           if (resolved) return;
           resolved = true;
@@ -877,115 +942,63 @@
         });
         document.addEventListener('keydown', onKeyDown);
         updateState();
-
-        form.addEventListener('submit', (event) => {
-          event.preventDefault();
-          const receptorNit = (() => {
-            const raw = (nitInput.value || '').trim();
-            if (raw.toUpperCase() === 'CF' || raw === '') return 'CF';
-            return onlyDigits(raw);
-          })();
-          const selected = form.querySelector('input[name="billingMode"]:checked')?.value;
-          if (!selected) {
-            errorBox.textContent = 'Selecciona el tipo de cobro.';
-            errorBox.hidden = false;
-            return;
-          }
-          if (selected === 'hourly') {
-            if (!canHourly || hourlyTotal === null) {
-              errorBox.textContent = 'Configura una tarifa por hora válida en Ajustes para usar esta opción.';
-              errorBox.hidden = false;
-              return;
-            }
-            cleanup({
-              mode: 'hourly',
-              total: hourlyTotal,
-              label: `Cobro por hora ${hourlyLabel ?? ''}`.trim(),
-              description: '',              
-              receptor_nit: receptorNit,
-            });
-            return;
-          }
-          if (selected === 'monthly') {
-            if (monthlyRate === null) {
-              errorBox.textContent = 'Configura una tarifa mensual válida en Ajustes para usar esta opción.';
-              errorBox.hidden = false;
-              return;
-            }
-            cleanup({
-              mode: 'monthly',
-              total: monthlyRate,
-              label: `Cobro mensual ${monthlyLabel ?? ''}`.trim(),
-              description: '',              
-              receptor_nit: receptorNit,
-            });
-            return;
-          }
-
-          const customVal = parseFloat(customInput.value);
-          if (!Number.isFinite(customVal) || customVal <= 0) {
-            errorBox.textContent = 'Ingresa un total personalizado mayor a cero.';
-            errorBox.hidden = false;
-            return;
-          }
-          const normalized = Math.round(customVal * 100) / 100;
-          cleanup({
-            mode: 'custom',
-            total: normalized,
-            label: `Cobro personalizado ${formatCurrency(normalized)}`,
-            description: '',
-            receptor_nit: receptorNit,
-          });
-        });
       });
     }
 
-    function attachInvoiceHandlers() {
-      tbody.querySelectorAll('[data-action="invoice"]').forEach((btn) => {
-        btn.addEventListener('click', async () => {
-          const payload = JSON.parse(decodeURIComponent(btn.getAttribute('data-payload')));
-          btn.disabled = true;
-          const originalText = btn.textContent;
-          btn.textContent = 'Confirmando…';
-          try {
-            const settingsSnapshot = await loadSettings();
-            const confirmation = await openInvoiceConfirmation(payload, settingsSnapshot?.billing ?? {});
-            if (!confirmation) {
-              btn.disabled = false;
-              btn.textContent = originalText;
-              return;
-            }
+   function attachInvoiceHandlers() {
+  tbody.querySelectorAll('[data-action="invoice"]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const payload = JSON.parse(decodeURIComponent(btn.getAttribute('data-payload')));
+      btn.disabled = true;
+      const originalText = btn.textContent;
+      btn.textContent = 'Confirmando…';
+      try {
+        const settingsSnapshot = await loadSettings();
+        const confirmation = await openInvoiceConfirmation(payload, settingsSnapshot?.billing ?? {});
+        if (!confirmation) {
+          btn.disabled = false;
+          btn.textContent = originalText;
+          return;
+        }
 
-            btn.textContent = 'Enviando…';
-            const requestPayload = {
-              ticket_no: payload.ticket_no,
-              receptor_nit: (confirmation.receptor_nit ?? payload.receptor_nit ?? 'CF'), // ✅ usa el del modal
-              serie: payload.serie || 'A',
-              numero: payload.numero || null,
-              mode: confirmation.mode,
-            };
-            if (confirmation.mode === 'custom') {
-              requestPayload.custom_total = confirmation.total;
-            }
-            if (confirmation.description) {
-              requestPayload.description = confirmation.description;
-            }
+        btn.textContent = 'Enviando…';
 
-            const js = await fetchJSON(api('fel/invoice'), {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(requestPayload)
-            });
-            alert(`Factura enviada (${confirmation.label}). UUID ${js.uuid || '(verifique respuesta)'}`);
-            await loadList();
-          } catch (e) {
-            alert('Error al facturar: ' + e.message);
-          } finally {
-            btn.disabled = false;
-            btn.textContent = originalText;
-          }
+        const receptorNit = confirmation.receptor_nit || payload.receptor_nit || 'CF';
+
+        const requestPayload = {
+          ticket_no: payload.ticket_no,
+          receptor_nit: receptorNit,
+          serie: payload.serie || 'A',
+          numero: payload.numero || null,
+          mode: confirmation.mode,
+          // SIEMPRE incluye total para el backend
+          total: Number(confirmation.total) || 0,
+        };
+
+        if (confirmation.mode === 'custom') {
+          requestPayload.custom_total = Number(confirmation.total);
+        }
+
+        // Opcional: inspecciona qué se envía
+        // console.log('POST /api/fel/invoice =>', requestPayload);
+console.log('POST /api/fel/invoice =>', requestPayload);
+
+        const js = await fetchJSON(api('fel/invoice'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(requestPayload),
         });
-      });
+
+        alert(`Factura enviada (${confirmation.label}). UUID ${js.uuid || '(verifique respuesta)'}`);
+        await loadList();
+      } catch (e) {
+        alert('Error al facturar: ' + e.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
+      }
+    });
+  });
     }
 
     function renderPage() {
@@ -2312,6 +2325,14 @@
         }
         if (hourlyFeedback) hourlyFeedback.classList.add('d-none');
         try {
+          // justo antes del fetch en Facturar
+console.debug('[FACTURAR → payload]', requestPayload);
+const js = await fetchJSON(api('fel/invoice'), {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(requestPayload),
+});
+console.debug('[FACTURAR ← respuesta]', js);
           await fetchJSON(api('settings/hourly-rate'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },

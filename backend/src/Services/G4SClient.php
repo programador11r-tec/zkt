@@ -6,10 +6,11 @@ namespace App\Services;
 use Config\Config;
 
 class G4SClient
-{
+{   
+    
+    private int $lastHttpStatus = 0;
     private Config $config;
     private string $storageDir;
-    private ?int $lastHttpStatus = null;
     private array $lastHttpHeaders = [];
 
     public function __construct(Config $config){
@@ -24,82 +25,191 @@ class G4SClient
      * Enviar factura a G4S (TIMBRAR) usando SecureTransaction + DataExchange (XML dentro de CDATA).
      * Devuelve array con: ok(bool), uuid(?string), raw(string XML SOAP), httpStatus(?int)
      */
-    public function submitInvoice(array $payload) {
-        $xmlDte = $this->buildGuatemalaDTE($payload);
-        @file_put_contents(__DIR__.'/../../storage/last_dte.xml', $xmlDte);
+ public function submitInvoice(array $payload)
+{
+    $logFile = __DIR__ . '/../../storage/fel_submit_invoice.log';
+    \App\Utils\Logger::log("=== [SUBMIT INVOICE START] ===", $logFile);
+    \App\Utils\Logger::log("Payload recibido: " . json_encode($payload, JSON_UNESCAPED_UNICODE), $logFile);
 
-        $encode = strtolower((string)$this->config->get('FEL_G4S_DATAX_ENCODE','base64'));
-        $data1  = ($encode==='base64') ? base64_encode($xmlDte) : $xmlDte;
+    // 🔹 Asegura total numérico > 0
+    $total = isset($payload['total']) ? (float)$payload['total'] : 0.0;
+    if ($total <= 0) {
+        $msg = "❌ Total debe ser > 0 para construir DTE (valor={$total})";
+        \App\Utils\Logger::log($msg, $logFile);
+        throw new \RuntimeException($msg);
+    }
 
+    // 🔹 Normaliza NIT (si no hay, usa CF)
+    $nit = strtoupper(trim($payload['receptor_nit'] ?? 'CF'));
+    $payload['receptor_nit'] = $nit;
+
+    // 🔹 Construye el XML del DTE
+    try {
+        $xmlDte = $this->buildGuatemalaDTE([
+            'emisor' => [
+                'nit'    => $this->config->get('FEL_G4S_ENTITY', '81491514'),
+                'nombre' => 'PARQUEO OBELISCO REFORMA',
+                'correo' => '',
+            ],
+            'receptor' => [
+                'nit'    => $nit,
+                'nombre' => $nit === 'CF' ? 'Consumidor Final' : 'Receptor',
+                'correo' => '',
+            ],
+            'documento' => [
+                'moneda' => 'GTQ',
+                'total'  => $total,
+                'items'  => [
+                    [
+                        'descripcion' => 'Servicio de parqueo',
+                    ]
+                ],
+            ],
+        ]);
+    } catch (\Throwable $e) {
+        \App\Utils\Logger::log("❌ Error generando XML DTE: " . $e->getMessage(), $logFile);
+        throw $e;
+    }
+
+    // 🔹 Guarda el XML localmente (para inspección manual)
+    $xmlPath = __DIR__ . '/../../storage/last_dte.xml';
+    @file_put_contents($xmlPath, $xmlDte);
+    \App\Utils\Logger::log("XML generado guardado en: {$xmlPath}", $logFile);
+    \App\Utils\Logger::log("XML FEL → \n" . $xmlDte, $logFile);
+
+    // 🔹 Prepara Data1 (Base64 si aplica)
+    $encode = strtolower((string)$this->config->get('FEL_G4S_DATAX_ENCODE', 'base64'));
+    $data1  = ($encode === 'base64') ? base64_encode($xmlDte) : $xmlDte;
+
+    // 🔹 Llama al servicio SOAP de G4S
+    try {
+        \App\Utils\Logger::log("→ Enviando SOAP TIMBRAR a G4S...", $logFile);
         $respXml = $this->requestTransaction([
             'Transaction' => 'TIMBRAR',
             'Data1'       => $data1,
-            'Data2'       => $this->config->get('FEL_G4S_PASS',''),
+            'Data2'       => $this->config->get('FEL_G4S_PASS', ''),
         ]);
-
-        $uuid = null;
-        if (preg_match('/<DocumentGUID>([^<]+)<\/DocumentGUID>/', $respXml, $m)) $uuid = $m[1];
-        return [
-            'ok'         => (bool)$uuid,
-            'uuid'       => $uuid,
-            'raw'        => $respXml,
-            'httpStatus' => $this->getLastHttpStatus(),
-        ];
+    } catch (\Throwable $e) {
+        \App\Utils\Logger::log("❌ Error en requestTransaction(): " . $e->getMessage(), $logFile);
+        throw $e;
     }
+
+    // 🔹 Guarda la respuesta SOAP completa
+    \App\Utils\Logger::log("SOAP Response:\n" . $respXml, $logFile);
+
+    // 🔹 Extrae UUID si existe
+    $uuid = null;
+    if (preg_match('/<DocumentGUID>([^<]+)<\/DocumentGUID>/', $respXml, $m)) {
+        $uuid = $m[1];
+    }
+
+    // 🔹 Arma resultado final
+    $result = [
+        'ok'         => (bool)$uuid,
+        'uuid'       => $uuid,
+        'raw'        => $respXml,
+        'httpStatus' => $this->getLastHttpStatus(),
+    ];
+
+    \App\Utils\Logger::log("Resultado final: " . json_encode($result, JSON_UNESCAPED_UNICODE), $logFile);
+    \App\Utils\Logger::log("=== [SUBMIT INVOICE END] ===", $logFile);
+
+    return $result;
+}
+
+
+
+/** 🧩 Helper para loggear request/response SOAP */
+private function logSoap(string $file, string $content): void
+{
+    $dir = __DIR__ . '/../../storage/logs';
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0775, true);
+    }
+    @file_put_contents(
+        $dir . '/' . $file,
+        '[' . date('c') . "]\n" . $content . "\n\n",
+        FILE_APPEND
+    );
+}
+
 
     /* ====================== SecureTransaction helpers ====================== */
+// En App\Services\G4SClient.php
 
-    public function requestTransaction(array $params): string{
-        $url    = $this->validateSoapUrl((string)$this->config->get('FEL_G4S_SOAP_URL'));
-        $action = 'http://www.fact.com.mx/schema/ws/RequestTransaction';
 
-        // Campos base (revisa .env)
-        $requestor = $this->validateGuid((string)$this->config->get('FEL_G4S_REQUESTOR', ''), 'FEL_G4S_REQUESTOR');
-        $country   = $this->validateCountry((string)$this->config->get('FEL_G4S_COUNTRY', 'GT'));
-        $entity    = $this->validateEntity((string)$this->config->get('FEL_G4S_ENTITY', ''));
-        $user      = $this->validateGuid((string)$this->config->get('FEL_G4S_USER', $requestor), 'FEL_G4S_USER');
-        $username  = $this->requireNonEmpty((string)$this->config->get('FEL_G4S_USERNAME', ''), 'FEL_G4S_USERNAME');
+public function getLastHttpStatus(): int {
+    return $this->lastHttpStatus;
+}
 
-        $transaction = $this->normalizeTransaction($params['Transaction'] ?? 'BASE');
-        $data1       = (string)($params['Data1'] ?? '');
-        $data2       = trim((string)($params['Data2'] ?? ''));
-        $data3       = strtoupper(trim((string)($params['Data3'] ?? (string)$this->config->get('FEL_G4S_MODE', ''))));
+private function requestTransaction(array $params): string
+{
+    $soapUrl   = (string)$this->config->get('FEL_G4S_SOAP_URL', 'https://fel.g4sdocumenta.com/webservicefront/factwsfront.asmx');
+    $soapAction= 'http://www.fact.com.mx/schema/ws/RequestTransaction';
 
-        $this->validateTransactionPayload($transaction, $data1, $data2, $data3);
+    // Campos obligatorios según docs G4S
+    $requestor = (string)$this->config->get('FEL_G4S_REQUESTOR', '');
+    $country   = (string)$this->config->get('FEL_G4S_COUNTRY', 'GT');
+    $entity    = (string)$this->config->get('FEL_G4S_ENTITY', '');
+    $user      = (string)$this->config->get('FEL_G4S_USER', $requestor);
+    $username  = (string)$this->config->get('FEL_G4S_USERNAME', 'TEMP');
 
-        // Sobre SOAP 1.1 literal, tal cual WSDL (sin prefijos propios)
-        $soapBody = <<<XML
-        <?xml version="1.0" encoding="utf-8"?>
-        <soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-                    xmlns:xsd="http://www.w3.org/2001/XMLSchema"
-                    xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
-        <soap:Body>
-            <RequestTransaction xmlns="http://www.fact.com.mx/schema/ws">
-            <Requestor>{$this->xmlEscape($requestor)}</Requestor>
-            <Transaction>{$this->xmlEscape($transaction)}</Transaction>
-            <Country>{$this->xmlEscape($country)}</Country>
-            <Entity>{$this->xmlEscape($entity)}</Entity>
-            <User>{$this->xmlEscape($user)}</User>
-            <UserName>{$this->xmlEscape($username)}</UserName>
-            <Data1>{$this->xmlEscape($data1)}</Data1>
-            <Data2>{$this->xmlEscape($data2)}</Data2>
-            <Data3>{$this->xmlEscape($data3)}</Data3>
-            </RequestTransaction>
-        </soap:Body>
-        </soap:Envelope>
-        XML;
+    $transaction = (string)($params['Transaction'] ?? 'TIMBRAR');
+    $data1       = (string)($params['Data1'] ?? ''); // XML DTE (normal o Base64)
+    $data2       = (string)($params['Data2'] ?? ''); // password
+    $data3       = (string)($params['Data3'] ?? ''); // opcional
 
-        // Guardar request para depuración
-        @file_put_contents($this->storageDir.'/last_request_tx.xml', $soapBody);
+    // Sobre SOAP completo
+    $envelope = <<<XML
+    <?xml version="1.0" encoding="utf-8"?>
+    <soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+                   xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+      <soap:Body>
+        <RequestTransaction xmlns="http://www.fact.com.mx/schema/ws">
+          <Requestor>{$requestor}</Requestor>
+          <Transaction>{$transaction}</Transaction>
+          <Country>{$country}</Country>
+          <Entity>{$entity}</Entity>
+          <User>{$user}</User>
+          <UserName>{$username}</UserName>
+          <Data1>{$data1}</Data1>
+          <Data2>{$data2}</Data2>
+          <Data3>{$data3}</Data3>
+        </RequestTransaction>
+      </soap:Body>
+    </soap:Envelope>
+    XML;
 
-        $headers = "Content-Type: text/xml; charset=utf-8\r\n"
-                . "SOAPAction: \"{$action}\"\r\n";
+    // Logging (útil para depurar)
+    $logFile = __DIR__ . '/../../storage/fel_submit_invoice.log';
+    \App\Utils\Logger::log("SOAP Request →\n".$envelope, $logFile);
 
-        $resp = $this->postSoapRequest($url, $soapBody, $headers, 60, 'No se pudo conectar con G4S (RequestTransaction)');
+    $ch = curl_init($soapUrl);
+    curl_setopt_array($ch, [
+        CURLOPT_POST           => true,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HTTPHEADER     => [
+            'Content-Type: text/xml; charset=utf-8',
+            'SOAPAction: "'.$soapAction.'"',
+        ],
+        CURLOPT_POSTFIELDS     => $envelope,
+        CURLOPT_TIMEOUT        => 30,
+    ]);
 
-        @file_put_contents($this->storageDir.'/last_request_tx_resp.xml', (string)$resp);
-        return $resp;
+    $resp = curl_exec($ch);
+    $this->lastHttpStatus = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+
+    if ($resp === false) {
+        $err = curl_error($ch) ?: 'Error desconocido';
+        curl_close($ch);
+        throw new \RuntimeException('Error SOAP G4S: '.$err);
     }
+    curl_close($ch);
+
+    return $resp;
+}
+
 
     private function buildSecureSoapEnvelope11(string $entity, string $dataExchange): string{
         return <<<XML
@@ -337,10 +447,6 @@ class G4SClient
         return null;
     }
 
-    public function getLastHttpStatus(): ?int
-    {
-        return $this->lastHttpStatus;
-    }
 
     public function getLastHttpHeaders(): array
     {
@@ -354,125 +460,128 @@ class G4SClient
      * Ajusta campos de dirección/correos/razón social según tu emisor.
      */
     private function buildGuatemalaDTE(array $doc): string{
-        // Fecha Guatemala
-        $tzGT  = new \DateTimeZone('America/Guatemala');
-        $fecha = (new \DateTime('now', $tzGT))->format('Y-m-d\TH:i:sP'); // ej. 2025-10-10T13:45:12-06:00
+    // 1) Fecha sin zona horaria (SAT 0.2.0 suele validar mejor así)
+    $tzGT   = new \DateTimeZone('America/Guatemala');
+    $fechaG = new \DateTime('now', $tzGT);
+    $fecha  = $fechaG->format('Y-m-d\TH:i:s'); // <-- sin -06:00
 
-        // Emisor
-        $nitEmisor      = trim($doc['emisor']['nit'] ?? '81491514');
-        $nombreEmisor   = $doc['emisor']['nombre'] ?? 'PARQUEO OBELISCO REFORMA';
-        $correoEmisor   = trim($doc['emisor']['correo'] ?? '');
-        $codEst         = $this->config->get('FEL_G4S_ESTABLECIMIENTO', '4');
+    // Emisor
+    $nitEmisor      = trim($doc['emisor']['nit'] ?? '81491514');
+    $nombreEmisor   = $doc['emisor']['nombre'] ?? 'PARQUEO OBELISCO REFORMA';
+    $correoEmisor   = trim($doc['emisor']['correo'] ?? '');
+    $codEst         = $this->config->get('FEL_G4S_ESTABLECIMIENTO', '4');
 
-        // Receptor
-        $nitReceptor    = trim($doc['receptor']['nit'] ?? 'CF');
-        $nombreReceptor = $doc['receptor']['nombre'] ?? ($nitReceptor === 'CF' ? 'Consumidor Final' : 'Receptor');
-        $correoReceptor = trim($doc['receptor']['correo'] ?? '');
+    // Receptor
+    $nitReceptor    = trim($doc['receptor']['nit'] ?? 'CF');
+    $nombreReceptor = $doc['receptor']['nombre'] ?? ($nitReceptor === 'CF' ? 'Consumidor Final' : 'Receptor');
+    $correoReceptor = trim($doc['receptor']['correo'] ?? '');
 
-        // Doc
-        $moneda     = $doc['documento']['moneda'] ?? 'GTQ';
-        $totalBruto = (float)($doc['documento']['total'] ?? 0);
-        if ($totalBruto <= 0) {
-            throw new \InvalidArgumentException('Total debe ser > 0 para construir DTE');
-        }
+    // Documento
+    $moneda     = $doc['documento']['moneda'] ?? ($doc['moneda'] ?? 'GTQ');
+    $totalBruto = isset($doc['documento']['total']) ? (float)$doc['documento']['total'] : (float)($doc['total'] ?? 0);
 
-        // Un ítem (total IVA incluido)
-        $desc = $doc['documento']['items'][0]['descripcion'] ?? 'Servicio';
+    // Descripción (al menos un ítem)
+    $desc = $doc['documento']['items'][0]['descripcion'] ?? ($doc['descripcion'] ?? 'Servicio');
 
-        // Base + IVA
-        $base = round($totalBruto / 1.12, 6);
-        $iva  = round($totalBruto - $base, 6);
+    // Cálculos base/IVA
+    $base = round($totalBruto / 1.12, 6);
+    $iva  = round($totalBruto - $base, 6);
 
-        $f6 = fn($n) => number_format((float)$n, 6, '.', '');
-        $f2 = fn($n) => number_format((float)$n, 2, '.', '');
+    $f6 = fn($n) => number_format((float)$n, 6, '.', '');
+    $f2 = fn($n) => number_format((float)$n, 2, '.', '');
 
-        $precioUnitario   = $f6($base);
-        $precioLinea      = $f6($base);
-        $descuento        = $f6(0);
-        $montoGravable    = $f6($base);
-        $montoImpuestoIVA = $f6($iva);
-        $totalLinea       = $f6($base);         // SIN IVA
-        $granTotal        = $f2($base + $iva);  // CON IVA
+    $precioUnitario   = $f6($base);
+    $precioLinea      = $f6($base);
+    $descuento        = $f6(0);
+    $montoGravable    = $f6($base);
+    $montoImpuestoIVA = $f6($iva);
+    $totalLinea       = $f6($base + $iva);  // Total del ítem CON IVA
+    $granTotal        = $f2($base + $iva);  // Total documento
 
-        // Direcciones mínimas
-        $dirEmisor = <<<XML
-        <dte:DireccionEmisor>
-        <dte:Direccion>Ciudad</dte:Direccion>
-        <dte:CodigoPostal>01001</dte:CodigoPostal>
-        <dte:Municipio>Guatemala</dte:Municipio>
-        <dte:Departamento>Guatemala</dte:Departamento>
-        <dte:Pais>GT</dte:Pais>
-        </dte:DireccionEmisor>
-        XML;
+    // Direcciones mínimas válidas
+    $dirEmisor = <<<XML
+    <dte:DireccionEmisor>
+      <dte:Direccion>Ciudad</dte:Direccion>
+      <dte:CodigoPostal>01001</dte:CodigoPostal>
+      <dte:Municipio>Guatemala</dte:Municipio>
+      <dte:Departamento>Guatemala</dte:Departamento>
+      <dte:Pais>GT</dte:Pais>
+    </dte:DireccionEmisor>
+    XML;
 
-            $dirReceptor = <<<XML
-        <dte:DireccionReceptor>
-        <dte:Direccion>Ciudad</dte:Direccion>
-        <dte:CodigoPostal>01001</dte:CodigoPostal>
-        <dte:Municipio>Guatemala</dte:Municipio>
-        <dte:Departamento>Guatemala</dte:Departamento>
-        <dte:Pais>GT</dte:Pais>
-        </dte:DireccionReceptor>
-        XML;
+    $dirReceptor = <<<XML
+    <dte:DireccionReceptor>
+      <dte:Direccion>Ciudad</dte:Direccion>
+      <dte:CodigoPostal>01001</dte:CodigoPostal>
+      <dte:Municipio>Guatemala</dte:Municipio>
+      <dte:Departamento>Guatemala</dte:Departamento>
+      <dte:Pais>GT</dte:Pais>
+    </dte:DireccionReceptor>
+    XML;
 
-        // Atributos opcionales: si no hay correo, no se envían
-        $attrCorreoEmisor   = $correoEmisor   !== '' ? ' CorreoEmisor="'.$this->xmlEscape($correoEmisor).'"'     : '';
-        $attrCorreoReceptor = $correoReceptor !== '' ? ' CorreoReceptor="'.$this->xmlEscape($correoReceptor).'"' : '';
+    // Atributos opcionales de correo
+    $attrCorreoEmisor   = $correoEmisor   !== '' ? ' CorreoEmisor="'.$this->xmlEscape($correoEmisor).'"'     : '';
+    $attrCorreoReceptor = $correoReceptor !== '' ? ' CorreoReceptor="'.$this->xmlEscape($correoReceptor).'"' : '';
 
-        return <<<XML
-        <?xml version="1.0" encoding="UTF-8"?>
-        <dte:GTDocumento
-            xmlns:dte="http://www.sat.gob.gt/dte/fel/0.2.0"
-            xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-            Version="0.4">
-        <dte:SAT ClaseDocumento="dte">
-            <dte:DTE ID="DatosCertificados">
-            <dte:DatosEmision ID="DatosEmision">
-                <dte:DatosGenerales FechaHoraEmision="{$fecha}" Tipo="FACT" CodigoMoneda="{$this->xmlEscape($moneda)}"/>
-                <dte:Emisor NITEmisor="{$this->xmlEscape($nitEmisor)}"
-                            NombreEmisor="{$this->xmlEscape($nombreEmisor)}"
-                            AfiliacionIVA="GEN"
-                            CodigoEstablecimiento="{$this->xmlEscape($codEst)}"{$attrCorreoEmisor}>
-                {$dirEmisor}
-                </dte:Emisor>
-                <dte:Receptor IDReceptor="{$this->xmlEscape($nitReceptor)}"
-                            NombreReceptor="{$this->xmlEscape($nombreReceptor)}"{$attrCorreoReceptor}>
-                {$dirReceptor}
-                </dte:Receptor>
-                <dte:Frases>
-                <dte:Frase TipoFrase="1" CodigoEscenario="1"/>
-                </dte:Frases>
-                <dte:Items>
-                <dte:Item NumeroLinea="1" BienOServicio="S">
-                    <dte:Cantidad>1</dte:Cantidad>
-                    <dte:UnidadMedida>UNI</dte:UnidadMedida>
-                    <dte:Descripcion>{$this->xmlEscape($desc)}</dte:Descripcion>
-                    <dte:PrecioUnitario>{$precioUnitario}</dte:PrecioUnitario>
-                    <dte:Precio>{$precioLinea}</dte:Precio>
-                    <dte:Descuento>{$descuento}</dte:Descuento>
-                    <dte:Impuestos>
-                    <dte:Impuesto>
-                        <dte:NombreCorto>IVA</dte:NombreCorto>
-                        <dte:CodigoUnidadGravable>1</dte:CodigoUnidadGravable>
-                        <dte:MontoGravable>{$montoGravable}</dte:MontoGravable>
-                        <dte:MontoImpuesto>{$montoImpuestoIVA}</dte:MontoImpuesto>
-                    </dte:Impuesto>
-                    </dte:Impuestos>
-                    <dte:Total>{$totalLinea}</dte:Total>
-                </dte:Item>
-                </dte:Items>
-                <dte:Totales>
-                <dte:TotalImpuestos>
-                    <dte:TotalImpuesto NombreCorto="IVA" TotalMontoImpuesto="{$montoImpuestoIVA}"/>
-                </dte:TotalImpuestos>
-                <dte:GranTotal>{$granTotal}</dte:GranTotal>
-                </dte:Totales>
-            </dte:DatosEmision>
-            </dte:DTE>
-        </dte:SAT>
-        </dte:GTDocumento>
-        XML;
-    }
+    // 2) Añadimos xsi:schemaLocation correcto
+    return <<<XML
+    <?xml version="1.0" encoding="UTF-8"?>
+    <dte:GTDocumento
+        xmlns:dte="http://www.sat.gob.gt/dte/fel/0.2.0"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.sat.gob.gt/dte/fel/0.2.0 GT_Documento-0.2.0.xsd"
+        Version="0.1">
+      <dte:SAT ClaseDocumento="dte">
+        <dte:DTE ID="DatosCertificados">
+          <dte:DatosEmision ID="DatosEmision">
+            <dte:DatosGenerales Tipo="FACT" FechaHoraEmision="{$fecha}" CodigoMoneda="{$this->xmlEscape($moneda)}"/>
+            <dte:Emisor NITEmisor="{$this->xmlEscape($nitEmisor)}"
+                        NombreEmisor="{$this->xmlEscape($nombreEmisor)}"
+                        NombreComercial="PARQUEO OBELISCO REFORMA"
+                        AfiliacionIVA="GEN"
+                        CodigoEstablecimiento="{$this->xmlEscape($codEst)}"{$attrCorreoEmisor}>
+              {$dirEmisor}
+            </dte:Emisor>
+            <dte:Receptor IDReceptor="{$this->xmlEscape($nitReceptor)}"
+                          NombreReceptor="{$this->xmlEscape($nombreReceptor)}"{$attrCorreoReceptor}>
+              {$dirReceptor}
+            </dte:Receptor>
+            <dte:Frases>
+              <dte:Frase TipoFrase="1" CodigoEscenario="1"/>
+            </dte:Frases>
+            <dte:Items>
+              <dte:Item NumeroLinea="1" BienOServicio="S">
+                <dte:Cantidad>1</dte:Cantidad>
+                <dte:UnidadMedida>UND</dte:UnidadMedida> <!-- 3) Unidad “segura” -->
+                <dte:Descripcion>{$this->xmlEscape($desc)}</dte:Descripcion>
+                <dte:PrecioUnitario>{$precioUnitario}</dte:PrecioUnitario>
+                <dte:Precio>{$precioLinea}</dte:Precio>
+                <dte:Descuento>{$descuento}</dte:Descuento>
+                <dte:Impuestos>
+                  <dte:Impuesto>
+                    <dte:NombreCorto>IVA</dte:NombreCorto>
+                    <dte:CodigoUnidadGravable>1</dte:CodigoUnidadGravable>
+                    <dte:MontoGravable>{$montoGravable}</dte:MontoGravable>
+                    <dte:MontoImpuesto>{$montoImpuestoIVA}</dte:MontoImpuesto>
+                  </dte:Impuesto>
+                </dte:Impuestos>
+                <dte:Total>{$totalLinea}</dte:Total>
+              </dte:Item>
+            </dte:Items>
+            <dte:Totales>
+              <dte:TotalImpuestos>
+                <dte:TotalImpuesto NombreCorto="IVA" TotalMontoImpuesto="{$montoImpuestoIVA}"/>
+              </dte:TotalImpuestos>
+              <dte:GranTotal>{$granTotal}</dte:GranTotal>
+            </dte:Totales>
+          </dte:DatosEmision>
+        </dte:DTE>
+      </dte:SAT>
+    </dte:GTDocumento>
+    XML;
+}
+
+
 
     public function g4sLookupNit(string $nit): array{
             $nit = preg_replace('/\D+/', '', $nit ?? '');
@@ -635,6 +744,15 @@ class G4SClient
 
         return ['ok' => false, 'nit' => $nit, 'nombre' => null, 'error' => 'No se pudo consultar el NIT'];
     }
+
+
+/** Log helper dentro del cliente */
+private function log(string $file, string $content): void
+{
+    $dir = __DIR__ . '/../../storage/logs';
+    if (!is_dir($dir)) @mkdir($dir, 0775, true);
+    @file_put_contents($dir . '/' . $file, '['.date('c')."]\n".$content."\n\n", FILE_APPEND);
+}
 
 
 

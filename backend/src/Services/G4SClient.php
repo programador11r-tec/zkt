@@ -28,14 +28,14 @@ class G4SClient
  public function submitInvoice(array $payload)
 {
     $logFile = __DIR__ . '/../../storage/fel_submit_invoice.log';
-    //\App\Utils\Logger::log("=== [SUBMIT INVOICE START] ===", $logFile);
-    //\App\Utils\Logger::log("Payload recibido: " . json_encode($payload, JSON_UNESCAPED_UNICODE), $logFile);
+    \App\Utils\Logger::log("=== [SUBMIT INVOICE START] ===", $logFile);
+    \App\Utils\Logger::log("Payload recibido: " . json_encode($payload, JSON_UNESCAPED_UNICODE), $logFile);
 
     // 1) Validaciones
     $total = isset($payload['total']) ? (float)$payload['total'] : 0.0;
     if ($total <= 0) {
         $msg = "❌ Total debe ser > 0 para construir DTE (valor={$total})";
-        //\App\Utils\Logger::log($msg, $logFile);
+        \App\Utils\Logger::log($msg, $logFile);
         throw new \RuntimeException($msg);
     }
 
@@ -44,12 +44,12 @@ class G4SClient
     if ($nit !== 'CF') {
         try {
             $q = $this->g4sLookupNit($nit);
-            //\App\Utils\Logger::log("[NIT LOOKUP] " . json_encode($q, JSON_UNESCAPED_UNICODE), $logFile);
+            \App\Utils\Logger::log("[NIT LOOKUP] " . json_encode($q, JSON_UNESCAPED_UNICODE), $logFile);
             if (!empty($q['ok']) && !empty($q['nombre'])) {
                 $payload['receptor_nombre'] = $q['nombre'];
             }
         } catch (\Throwable $e) {
-            //\App\Utils\Logger::log("[NIT LOOKUP] Error: " . $e->getMessage(), $logFile);
+            \App\Utils\Logger::log("[NIT LOOKUP] Error: " . $e->getMessage(), $logFile);
         }
     }
     $payload['receptor_nit'] = $nit;
@@ -90,14 +90,14 @@ class G4SClient
             ],
         ]);
     } catch (\Throwable $e) {
-        //\App\Utils\Logger::log("❌ Error generando XML DTE: " . $e->getMessage(), $logFile);
+        \App\Utils\Logger::log("❌ Error generando XML DTE: " . $e->getMessage(), $logFile);
         throw $e;
     }
 
     // 4) Guarda el XML para inspección
     $xmlPath = __DIR__ . '/../../storage/last_dte.xml';
     @file_put_contents($xmlPath, $xmlDte);
-    //\App\Utils\Logger::log("XML generado guardado en: {$xmlPath}", $logFile);
+    \App\Utils\Logger::log("XML generado guardado en: {$xmlPath}", $logFile);
 
     // 5) Envía SYSTEM_REQUEST + POST_DOCUMENT_SAT (Data2 = XML Base64)
 $clave     = (string)($this->config->get('FEL_G4S_PASS', '') ?: $this->config->get('FEL_G4S_CLAVE', ''));
@@ -112,21 +112,21 @@ $params = [
     'Transaction' => 'SYSTEM_REQUEST',
     'Data1'       => 'POST_DOCUMENT_SAT',
     'Data2'       => $dataB64,      // <-- XML FEL EN BASE64 AQUÍ
-    'Data3'       => 'x',    // referencia propia (si tu endpoint la usa aquí)
+    'Data3'       => '',    // referencia propia (si tu endpoint la usa aquí)
     // 'Data4'    => $clave,        // solo si tu variant la necesita; si NO, elimínalo
 ];
 
-//\App\Utils\Logger::log("→ SYSTEM_REQUEST params: Data1=POST_DOCUMENT_SAT, Data2(Base64)=".strlen($dataB64)." bytes, Data3={$reference}", $logFile);
+\App\Utils\Logger::log("→ SYSTEM_REQUEST params: Data1=POST_DOCUMENT_SAT, Data2(Base64)=".strlen($dataB64)." bytes, Data3={$reference}", $logFile);
 
 try {
     $respXml = $this->requestTransaction($params);
 } catch (\Throwable $e) {
-    //\App\Utils\Logger::log("❌ Error en requestTransaction(): " . $e->getMessage(), $logFile);
+    \App\Utils\Logger::log("❌ Error en requestTransaction(): " . $e->getMessage(), $logFile);
     throw $e;
 }
 
 
-    //\App\Utils\Logger::log("SOAP Response:\n" . $respXml, $logFile);
+    \App\Utils\Logger::log("SOAP Response:\n" . $respXml, $logFile);
 
     // 6) Extrae UUID si viene
     $uuid = null;
@@ -150,7 +150,7 @@ try {
         if (!$uuid && preg_match('/<UUID>([^<]+)<\/UUID>/', $respXml, $m)) $uuid = $m[1];
         if (!$uuid && preg_match('/<DocumentGUID>([^<]+)<\/DocumentGUID>/', $respXml, $m)) $uuid = $m[1];
     } catch (\Throwable $e) {
-        //\App\Utils\Logger::log("Warn parse UUID: ".$e->getMessage(), $logFile);
+        \App\Utils\Logger::log("Warn parse UUID: ".$e->getMessage(), $logFile);
     }
 
     // 7) Respuesta final
@@ -161,8 +161,8 @@ try {
         'httpStatus' => $this->getLastHttpStatus(),
         'reference'  => $reference,
     ];
-    //\App\Utils\Logger::log("Resultado final: " . json_encode($result, JSON_UNESCAPED_UNICODE), $logFile);
-    //\App\Utils\Logger::log("=== [SUBMIT INVOICE END] ===", $logFile);
+    \App\Utils\Logger::log("Resultado final: " . json_encode($result, JSON_UNESCAPED_UNICODE), $logFile);
+    \App\Utils\Logger::log("=== [SUBMIT INVOICE END] ===", $logFile);
 
     return $result;
 }
@@ -235,7 +235,7 @@ private function requestTransaction(array $params): string
 
     // Logging (útil para depurar)
     $logFile = __DIR__ . '/../../storage/fel_submit_invoice.log';
-    //\App\Utils\Logger::log("SOAP Request →\n".$envelope, $logFile);
+    \App\Utils\Logger::log("SOAP Request →\n".$envelope, $logFile);
 
     $ch = curl_init($soapUrl);
     curl_setopt_array($ch, [

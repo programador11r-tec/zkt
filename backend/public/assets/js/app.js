@@ -743,6 +743,16 @@
                     <small class="form-text">Indica el total que deseas facturar manualmente.</small>
                   </span>
                 </label>
+                <div class="form-group mt-3">
+                  <label for="receptor_nit" class="form-label">NIT del cliente</label>
+                  <input
+                    type="text"
+                    id="receptor_nit"
+                    class="form-control"
+                    placeholder="Ejemplo: 12345678 o CF"
+                    value="CF"
+                  />
+                </div>
                 <div class="input-group input-group-sm mt-2" data-role="customWrapper">
                   <span class="input-group-text">Q</span>
                   <input type="number" step="0.01" min="0" class="form-control" data-role="customInput" value="${customValue}" ${selectedMode === 'custom' ? '' : 'disabled'} placeholder="0.00" />

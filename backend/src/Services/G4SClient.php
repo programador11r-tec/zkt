@@ -183,7 +183,7 @@ class G4SClient
             throw new \InvalidArgumentException('Config FEL_G4S_SOAP_URL requerida para comunicarse con G4S.');
         }
         if (!filter_var($trimmed, FILTER_VALIDATE_URL)) {
-            throw new \InvalidArgumentException('FEL_G4S_SOAP_URL debe ser una URL válida (por ejemplo https://pruebasfel.g4sdocumenta.com/webservicefront/factwsfront.asmx).');
+            throw new \InvalidArgumentException('FEL_G4S_SOAP_URL debe ser una URL válida (por ejemplo https://fel.g4sdocumenta.com/webservicefront/factwsfront.asmx).');
         }
         return $trimmed;
     }

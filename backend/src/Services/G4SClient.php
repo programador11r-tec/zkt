@@ -474,5 +474,168 @@ class G4SClient
         XML;
     }
 
+    public function g4sLookupNit(string $nit): array{
+            $nit = preg_replace('/\D+/', '', $nit ?? '');
+            if ($nit === '') {
+                return ['ok' => false, 'nit' => null, 'nombre' => null, 'error' => 'NIT requerido'];
+            }
+
+            // Lee config
+            $cfgPath   = __DIR__ . '/../../.env';
+            $config    = new \Config\Config($cfgPath);
+            $entity    = (string) $config->get('FEL_G4S_ENTITY', '');
+            $requestor = (string) $config->get('FEL_G4S_REQUESTOR', '');
+            $baseUrl   = rtrim((string) $config->get('FEL_G4S_NIT_WSDL', 'https://fel.g4sdocumenta.com/ConsultaNIT/ConsultaNIT.asmx'), '/');
+
+            if ($entity === '' || $requestor === '') {
+                return ['ok' => false, 'nit' => null, 'nombre' => null, 'error' => 'Faltan FEL_G4S_ENTITY o FEL_G4S_REQUESTOR'];
+            }
+
+            // -------- helper de parseo (sirve para SOAP y POST/GET) --------
+            $parseXml = function (string $xml) {
+                $sx = @simplexml_load_string($xml);
+                if ($sx === false) return [false, null, null, 'XML inválido'];
+
+                // Intento 1: respuesta POST/GET (raíz <respuesta xmlns="http://tempuri.org/">)
+                $sx->registerXPathNamespace('t', 'http://tempuri.org/');
+                $resNode = $sx->xpath('//t:Response');
+                if (isset($resNode[0])) {
+                    $ok     = ((string)($resNode[0]->Result ?? '')) === 'true' || ((string)($resNode[0]->Result ?? '')) === '1';
+                    $nitOut = (string)($resNode[0]->NIT ?? '');
+                    $nombre = (string)($resNode[0]->nombre ?? '');
+                    $errStr = (string)($resNode[0]->error ?? '');
+                    return [$ok, $nitOut ?: null, $nombre ?: null, $errStr ?: null];
+                }
+
+                // Intento 2: SOAP 1.1/1.2
+                $sx->registerXPathNamespace('s', 'http://schemas.xmlsoap.org/soap/envelope/');
+                $sx->registerXPathNamespace('s12', 'http://www.w3.org/2003/05/soap-envelope');
+                $sx->registerXPathNamespace('t', 'http://tempuri.org/');
+
+                $resp = $sx->xpath('//t:getNITResult/t:Response');
+                if (isset($resp[0])) {
+                    $ok     = ((string)($resp[0]->Result ?? '')) === 'true' || ((string)($resp[0]->Result ?? '')) === '1';
+                    $nitOut = (string)($resp[0]->NIT ?? '');
+                    $nombre = (string)($resp[0]->nombre ?? '');
+                    $errStr = (string)($resp[0]->error ?? '');
+                    return [$ok, $nitOut ?: null, $nombre ?: null, $errStr ?: null];
+                }
+
+                return [false, null, null, 'No se encontraron nodos Response'];
+            };
+
+            // -------- 1) Intento POST application/x-www-form-urlencoded (más simple) --------
+            try {
+                $url = $baseUrl . '/getNIT';
+                $postFields = http_build_query(['vNIT' => $nit, 'Entity' => $entity, 'Requestor' => $requestor], '', '&');
+                $ch = curl_init($url);
+                curl_setopt_array($ch, [
+                    CURLOPT_POST           => true,
+                    CURLOPT_RETURNTRANSFER => true,
+                    CURLOPT_HTTPHEADER     => ['Content-Type: application/x-www-form-urlencoded'],
+                    CURLOPT_POSTFIELDS     => $postFields,
+                    CURLOPT_CONNECTTIMEOUT => 10,
+                    CURLOPT_TIMEOUT        => 20,
+                ]);
+                $resp = curl_exec($ch);
+                $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+                $err  = curl_error($ch);
+                curl_close($ch);
+
+                if ($resp !== false && $code >= 200 && $code < 300) {
+                    [$ok, $nitOut, $nombre, $errStr] = $parseXml($resp);
+                    if ($ok || $errStr) {
+                        return ['ok' => $ok, 'nit' => $nitOut ?: $nit, 'nombre' => $nombre, 'error' => $errStr];
+                    }
+                }
+            } catch (\Throwable $e) {
+                // sigue con SOAP
+                error_log('[G4S][POST] ' . $e->getMessage());
+            }
+
+            // -------- 2) Intento SOAP 1.1 --------
+            try {
+                $soapAction = 'http://tempuri.org/getNIT';
+                $xml = <<<XML
+        <?xml version="1.0" encoding="utf-8"?>
+        <soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+        <soap:Body>
+            <getNIT xmlns="http://tempuri.org/">
+            <vNIT>{$nit}</vNIT>
+            <Entity>{$entity}</Entity>
+            <Requestor>{$requestor}</Requestor>
+            </getNIT>
+        </soap:Body>
+        </soap:Envelope>
+        XML;
+
+        $ch = curl_init($baseUrl);
+        curl_setopt_array($ch, [
+            CURLOPT_POST           => true,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_HTTPHEADER     => [
+                'Content-Type: text/xml; charset=utf-8',
+                'SOAPAction: "'.$soapAction.'"',
+            ],
+            CURLOPT_POSTFIELDS     => $xml,
+            CURLOPT_CONNECTTIMEOUT => 10,
+            CURLOPT_TIMEOUT        => 20,
+        ]);
+        $resp = curl_exec($ch);
+        $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $err  = curl_error($ch);
+        curl_close($ch);
+
+        if ($resp === false) throw new \RuntimeException($err ?: 'Fallo SOAP 1.1');
+        if ($code < 200 || $code >= 300) throw new \RuntimeException('HTTP '.$code.' SOAP 1.1');
+
+        [$ok, $nitOut, $nombre, $errStr] = $parseXml($resp);
+        return ['ok' => $ok, 'nit' => $nitOut ?: $nit, 'nombre' => $nombre, 'error' => $errStr];
+        } catch (\Throwable $e) {
+            error_log('[G4S][SOAP11] ' . $e->getMessage());
+        }
+
+        // -------- 3) Intento SOAP 1.2 (último recurso) --------
+        try {
+            $xml = <<<XML
+            <?xml version="1.0" encoding="utf-8"?>
+            <soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
+            <soap12:Body>
+                <getNIT xmlns="http://tempuri.org/">
+                <vNIT>{$nit}</vNIT>
+                <Entity>{$entity}</Entity>
+                <Requestor>{$requestor}</Requestor>
+                </getNIT>
+            </soap12:Body>
+            </soap12:Envelope>
+            XML;
+
+            $ch = curl_init($baseUrl);
+            curl_setopt_array($ch, [
+                CURLOPT_POST           => true,
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_HTTPHEADER     => ['Content-Type: application/soap+xml; charset=utf-8'],
+                CURLOPT_POSTFIELDS     => $xml,
+                CURLOPT_CONNECTTIMEOUT => 10,
+                CURLOPT_TIMEOUT        => 20,
+            ]);
+            $resp = curl_exec($ch);
+            $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $err  = curl_error($ch);
+            curl_close($ch);
+
+            if ($resp === false) throw new \RuntimeException($err ?: 'Fallo SOAP 1.2');
+            if ($code < 200 || $code >= 300) throw new \RuntimeException('HTTP '.$code.' SOAP 1.2');
+
+            [$ok, $nitOut, $nombre, $errStr] = $parseXml($resp);
+            return ['ok' => $ok, 'nit' => $nitOut ?: $nit, 'nombre' => $nombre, 'error' => $errStr];
+        } catch (\Throwable $e) {
+            error_log('[G4S][SOAP12] ' . $e->getMessage());
+        }
+
+        return ['ok' => false, 'nit' => $nit, 'nombre' => null, 'error' => 'No se pudo consultar el NIT'];
+    }
+
+
 
 }

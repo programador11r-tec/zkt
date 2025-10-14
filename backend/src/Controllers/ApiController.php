@@ -1606,67 +1606,92 @@ class ApiController {
     private function calculateTicketBilling(array $ticket, ?float $hourlyRate, bool $enforceMinimumHour = true): array {
         $tz = $this->appTimezone();
 
+        // Normaliza entrada/salida a DateTimeImmutable en TZ de la app
         $entry = $this->parseAppDateTime($ticket['entry_at'] ?? null);
         $exit  = $this->parseAppDateTime($ticket['exit_at']  ?? null);
+
         if ($entry === null) {
             return [
-                'total' => 0.0,
-                'duration_minutes' => null,
-                'hours' => null,
-                'mode' => 'ticket_amount',
-                'hourly_rate' => $hourlyRate,
-                'payments_total' => isset($ticket['payments_total']) ? (float)$ticket['payments_total'] : null,
-                'ticket_amount'  => isset($ticket['ticket_amount'])  ? (float)$ticket['ticket_amount']  : null,
+                'total'           => 0.0,
+                'duration_minutes'=> null,
+                'hours'           => null,
+                'mode'            => 'ticket_amount',
+                'hourly_rate'     => $hourlyRate,
+                'payments_total'  => isset($ticket['payments_total']) ? (float)$ticket['payments_total'] : null,
+                'ticket_amount'   => isset($ticket['ticket_amount'])  ? (float)$ticket['ticket_amount']  : null,
             ];
         }
+
         if ($exit === null) {
-            $exit = new \DateTimeImmutable('now', $tz); // “ahora” en la misma TZ
+            $exit = new \DateTimeImmutable('now', $tz); // “ahora” en misma TZ
         }
 
+        // Diferencia en segundos (no negativa)
         $diffSec = max(0, $exit->getTimestamp() - $entry->getTimestamp());
-        $durationMin = (int) ceil($diffSec / 60);
 
-        // Reglas: mínimo 1h; si se pasa 1 minuto, se cobra la siguiente hora.
-        if ($enforceMinimumHour) {
-            if ($durationMin <= 60) {
-                $durationMin = 60;
+        // === Regla pedida ===
+        // - Cobro por hora redondeando hacia arriba (ceil), respecto al tiempo real.
+        // - Mínimo 1 hora si hubo estancia (>0 segundos).
+        // Ejemplos que se cumplen:
+        //  5:14 → 6:16  = 1h 02m => ceil(3720/3600)=2h
+        //  5:14 → 7:13  = 1h 59m => ceil(7140/3600)=2h
+        //  5:14 → 7:14  = 2h 00m => ceil(7200/3600)=2h
+        //  5:14 → 7:15  = 2h 01m => ceil(7260/3600)=3h
+        $billedHours = 0.0;
+        $durationMin = null;
+
+        if ($diffSec > 0) {
+            if ($enforceMinimumHour) {
+                $billedHours = (float) ceil($diffSec / 3600);
+                if ($billedHours < 1.0) $billedHours = 1.0;
+                $durationMin = (int) ($billedHours * 60); // múltiplo exacto de 60
             } else {
-                $durationMin = (int) (ceil($durationMin / 60) * 60);
+                // sin forzar hora mínima: solo ceil a minutos
+                $mins = (int) ceil($diffSec / 60.0);
+                $durationMin = $mins > 0 ? $mins : null;
+                $billedHours = $durationMin !== null ? ($durationMin / 60.0) : 0.0;
             }
-        } elseif ($durationMin === 0) {
-            $durationMin = null;
+        } else {
+            // sin estancia
+            if ($enforceMinimumHour) {
+                // si quieres que 0s NO cobren, deja duración en null y horas 0
+                $billedHours = 0.0;
+                $durationMin = null;
+            } else {
+                $billedHours = 0.0;
+                $durationMin = null;
+            }
         }
 
-        $hours = $durationMin !== null ? ($durationMin / 60.0) : null;
-
-        // Total
+        // Totales alternativos disponibles
         $paymentsTotal = isset($ticket['payments_total']) ? (float) $ticket['payments_total'] : null;
         $ticketAmount  = isset($ticket['ticket_amount'])  ? (float) $ticket['ticket_amount']  : null;
 
-        $mode = 'ticket_amount';
-        $total = 0.0;
+        // Determinar total
+        $mode        = 'ticket_amount';
+        $total       = 0.0;
         $appliedRate = null;
 
-        if ($hourlyRate !== null && $hours !== null && $hours > 0) {
-            $total = round($hours * $hourlyRate, 2);
-            $mode = 'hourly';
+        if ($hourlyRate !== null && $billedHours > 0) {
+            $total       = round($billedHours * $hourlyRate, 2);
+            $mode        = 'hourly';
             $appliedRate = $hourlyRate;
         } elseif ($ticketAmount !== null && $ticketAmount > 0) {
             $total = round($ticketAmount, 2);
-            $mode = 'ticket_amount';
+            $mode  = 'ticket_amount';
         } elseif ($paymentsTotal !== null && $paymentsTotal > 0) {
             $total = round($paymentsTotal, 2);
-            $mode = 'payments';
+            $mode  = 'payments';
         }
 
         return [
-            'total' => $total,
+            'total'            => $total,
             'duration_minutes' => $durationMin,
-            'hours' => $hours,
-            'mode' => $mode,
-            'hourly_rate' => $appliedRate,
-            'payments_total' => $paymentsTotal,
-            'ticket_amount' => $ticketAmount,
+            'hours'            => $durationMin !== null ? ($durationMin / 60.0) : null,
+            'mode'             => $mode,
+            'hourly_rate'      => $appliedRate,
+            'payments_total'   => $paymentsTotal,
+            'ticket_amount'    => $ticketAmount,
         ];
     }
 
@@ -1697,8 +1722,10 @@ class ApiController {
         return true;
     }
 
+    private function lookup_nit() {
 
 
+    }
 }
 
     

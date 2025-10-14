@@ -749,9 +749,13 @@
                     type="text"
                     id="receptor_nit"
                     class="form-control"
-                    placeholder="Ejemplo: 12345678 o CF"
+                    placeholder="Solo números (ej. 1234567)"
                     value="CF"
+                    inputmode="numeric"
+                    pattern="[0-9]*"
+                    autocomplete="off"
                   />
+                  <small class="form-text text-muted" id="nitStatus">Escribe el NIT para consultar en SAT (G4S).</small>
                 </div>
                 <div class="input-group input-group-sm mt-2" data-role="customWrapper">
                   <span class="input-group-text">Q</span>
@@ -776,6 +780,68 @@
         const customWrapper = form.querySelector('[data-role="customWrapper"]');
         const errorBox = form.querySelector('[data-role="error"]');
         const radios = Array.from(form.querySelectorAll('input[name="billingMode"]'));
+        // 🔽 Coloca este bloque aquí, después de que ya se haya insertado el HTML del modal:
+          const nitInput = form.querySelector('#receptor_nit');
+          const nitStatus = form.querySelector('#nitStatus');
+
+          // Sanitiza a dígitos solamente
+          const onlyDigits = (s) => (s || '').replace(/\D+/g, '');
+
+          // Pequeño debounce
+          let nitTimer = null;
+          const debounce = (fn, ms = 400) => (...args) => {
+            clearTimeout(nitTimer);
+            nitTimer = setTimeout(() => fn(...args), ms);
+          };
+
+          // Llamada al backend
+          async function lookupNit(nit) {
+            try {
+              nitStatus.textContent = 'Consultando NIT…';
+              nitStatus.classList.remove('text-danger');
+              nitStatus.classList.remove('text-success');
+              const res = await fetchJSON(api(`g4s/lookup-nit?nit=${encodeURIComponent(nit)}`));
+              if (!res.ok) {
+                nitStatus.textContent = res.error || 'No fue posible consultar el NIT';
+                nitStatus.classList.add('text-danger');
+                return;
+              }
+              if (res.ok && res.nombre) {
+                nitStatus.textContent = `✓ ${res.nombre} (NIT ${res.nit})`;
+                nitStatus.classList.add('text-success');
+              } else if (res.ok && !res.nombre) {
+                nitStatus.textContent = `NIT válido, sin nombre devuelto`;
+                nitStatus.classList.add('text-success');
+              } else {
+                nitStatus.textContent = res.error || 'NIT no encontrado';
+                nitStatus.classList.add('text-danger');
+              }
+            } catch (err) {
+              nitStatus.textContent = `Error consultando NIT: ${err.message}`;
+              nitStatus.classList.add('text-danger');
+            }
+          }
+
+          // Evento de entrada: solo dígitos, consulta cuando tenga algo
+          nitInput.addEventListener('input', debounce(() => {
+            const raw = nitInput.value.trim();
+            if (raw.toUpperCase() === 'CF' || raw === '') {
+              nitStatus.textContent = 'Escribe el NIT para consultar en SAT (G4S).';
+              nitStatus.classList.remove('text-danger', 'text-success');
+              return;
+            }
+            const digits = onlyDigits(raw);
+            if (digits !== raw) {
+              nitInput.value = digits; // fuerza solo números
+            }
+            if (digits.length >= 4) {
+              lookupNit(digits);
+            } else {
+              nitStatus.textContent = 'Ingresa al menos 4 dígitos para consultar.';
+              nitStatus.classList.remove('text-danger', 'text-success');
+            }
+          }, 500));
+
 
         let resolved = false;
         const cleanup = (result) => {
@@ -814,6 +880,11 @@
 
         form.addEventListener('submit', (event) => {
           event.preventDefault();
+          const receptorNit = (() => {
+            const raw = (nitInput.value || '').trim();
+            if (raw.toUpperCase() === 'CF' || raw === '') return 'CF';
+            return onlyDigits(raw);
+          })();
           const selected = form.querySelector('input[name="billingMode"]:checked')?.value;
           if (!selected) {
             errorBox.textContent = 'Selecciona el tipo de cobro.';
@@ -830,7 +901,8 @@
               mode: 'hourly',
               total: hourlyTotal,
               label: `Cobro por hora ${hourlyLabel ?? ''}`.trim(),
-              description: '',
+              description: '',              
+              receptor_nit: receptorNit,
             });
             return;
           }
@@ -844,7 +916,8 @@
               mode: 'monthly',
               total: monthlyRate,
               label: `Cobro mensual ${monthlyLabel ?? ''}`.trim(),
-              description: '',
+              description: '',              
+              receptor_nit: receptorNit,
             });
             return;
           }
@@ -861,6 +934,7 @@
             total: normalized,
             label: `Cobro personalizado ${formatCurrency(normalized)}`,
             description: '',
+            receptor_nit: receptorNit,
           });
         });
       });
@@ -885,7 +959,7 @@
             btn.textContent = 'Enviando…';
             const requestPayload = {
               ticket_no: payload.ticket_no,
-              receptor_nit: payload.receptor_nit || 'CF',
+              receptor_nit: (confirmation.receptor_nit ?? payload.receptor_nit ?? 'CF'), // ✅ usa el del modal
               serie: payload.serie || 'A',
               numero: payload.numero || null,
               mode: confirmation.mode,
@@ -1415,7 +1489,7 @@
               </div>
               <div class="col-md-3">
                 <label class="form-label small" for="ticketNit">NIT receptor</label>
-                <input type="text" id="ticketNit" class="form-control form-control-sm" placeholder="CF o NIT">
+                <input type="text" id="receptor_nit" class="form-control" placeholder="Solo números" value="${escapeHtml(ticket.receptor ?? '')}" inputmode="numeric" pattern="\\d*" maxlength="15"/>
               </div>
               <div class="col-md-3">
                 <label class="form-label small" for="ticketMin">Monto mínimo</label>
@@ -1532,6 +1606,12 @@
         </section>
       </div>
     `;
+    const nitInput = form.querySelector('#receptor_nit');
+
+    // Solo números: elimina cualquier carácter no numérico
+    nitInput.addEventListener('input', () => {
+      nitInput.value = nitInput.value.replace(/\D+/g, '');
+    });
 
     const ticketInputs = {
       from: document.getElementById('ticketFrom'),

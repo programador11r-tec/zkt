@@ -10,9 +10,12 @@ ini_set('display_errors', '0');
 
 use App\Utils\Router;
 use App\Controllers\ApiController;
+use App\Services\G4SClient;
+use Config\Config; // <— este es el tipo que pide el constructor
 
 $router = new Router();
 $api    = new ApiController();
+
 
 /* ================= API ================= */
 
@@ -44,6 +47,37 @@ $router->get('/api/sync/tickets',  fn() => $api->syncTicketsAndPayments());
 $router->post('/api/sync/park-records/hamachi', fn() => $api->syncRemoteParkRecords());
 $router->post('/api/invoice/tickets', fn() => $api->invoiceClosedTickets());
 $router->get('/api/fel/issued-rt', fn() => $api->felIssuedRT());
+
+// Consulta NIT (G4S)
+$router->get('/api/g4s/lookup-nit', function () {
+  header('Content-Type: application/json; charset=utf-8');
+
+  $raw = $_GET['nit'] ?? '';
+  $nit = preg_replace('/\D+/', '', $raw); // solo dígitos
+
+  if ($nit === '' || strtoupper($raw) === 'CF') {
+    echo json_encode(['ok' => true, 'nit' => 'CF', 'nombre' => null]);
+    return;
+  }
+
+  try {
+    // Carga el .env (Config espera la ruta)
+    $cfg = new \Config\Config(__DIR__ . '/../.env');
+
+    // Instancia el cliente y pásale la config
+    $client = new \App\Services\G4SClient($cfg);
+
+    // ✅ Pásale el NIT al método
+    $res = $client->g4sLookupNit($nit);
+
+    // Imprime la respuesta
+    echo json_encode($res, JSON_UNESCAPED_UNICODE);
+  } catch (Throwable $e) {
+    echo json_encode(['ok' => false, 'error' => $e->getMessage()]);
+  }
+});
+
+
 
 /* =============== Frontend =============== */
 $router->get('/', function () {

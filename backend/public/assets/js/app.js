@@ -1502,7 +1502,9 @@ console.log('POST /api/fel/invoice =>', requestPayload);
               </div>
               <div class="col-md-3">
                 <label class="form-label small" for="ticketNit">NIT receptor</label>
-                <input type="text" id="receptor_nit" class="form-control" placeholder="Solo números" value="${escapeHtml(ticket.receptor ?? '')}" inputmode="numeric" pattern="\\d*" maxlength="15"/>
+                <input type="text" id="ticketNit" class="form-control form-control-sm" placeholder="Solo números"
+       value="${escapeHtml(ticketState.filters.nit || '')}"
+       inputmode="numeric" pattern="\\d*" maxlength="15"/>
               </div>
               <div class="col-md-3">
                 <label class="form-label small" for="ticketMin">Monto mínimo</label>
@@ -1619,7 +1621,12 @@ console.log('POST /api/fel/invoice =>', requestPayload);
         </section>
       </div>
     `;
-    const nitInput = form.querySelector('#receptor_nit');
+    const nitInput = document.getElementById('ticketNit');
+if (nitInput) {
+  nitInput.addEventListener('input', () => {
+    nitInput.value = nitInput.value.replace(/\D+/g, '');
+  });
+}
 
     // Solo números: elimina cualquier carácter no numérico
     nitInput.addEventListener('input', () => {

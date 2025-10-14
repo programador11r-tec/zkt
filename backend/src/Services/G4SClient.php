@@ -112,7 +112,6 @@ $params = [
     'Transaction' => 'SYSTEM_REQUEST',
     'Data1'       => 'POST_DOCUMENT_SAT',
     'Data2'       => $dataB64,      // <-- XML FEL EN BASE64 AQUÍ
-    'Data3'       => '',    // referencia propia (si tu endpoint la usa aquí)
     // 'Data4'    => $clave,        // solo si tu variant la necesita; si NO, elimínalo
 ];
 

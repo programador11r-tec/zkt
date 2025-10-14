@@ -14,6 +14,8 @@ use PDO;
 
 class ApiController {
     private Config $config;
+    /** @var array<string, array<string, bool>> */
+    private array $tableColumnCache = [];
 
     public function __construct() {
         $this->config = new Config(__DIR__ . '/../../.env');
@@ -58,8 +60,89 @@ class ApiController {
         $stmt->execute([':key' => $key, ':value' => $value]);
     }
 
+    private function appTimezone(): \DateTimeZone {
+        $tz = (string) ($this->config->get('APP_TIMEZONE') ?? $this->config->get('APP_TZ') ?? '');
+        if ($tz === '') { $tz = 'America/Guatemala'; }
+        return new \DateTimeZone($tz);
+    }
+
+    private function parseAppDateTime(?string $s): ?\DateTimeImmutable {
+        if ($s === null || trim($s) === '') return null;
+        $raw = trim($s);
+
+        $tzApp = $this->appTimezone();
+        $asUtc = strtolower((string) $this->config->get('APP_DATETIME_IS_UTC', 'false')) === 'true';
+
+        $baseTz = $asUtc ? new \DateTimeZone('UTC') : $tzApp;
+
+        $dt = \DateTimeImmutable::createFromFormat('Y-m-d H:i:s', $raw, $baseTz);
+        if ($dt === false) {
+            try { $dt = new \DateTimeImmutable($raw, $baseTz); }
+            catch (\Throwable) { return null; }
+        }
+        return $asUtc ? $dt->setTimezone($tzApp) : $dt;
+    }
+
+    /**
+     * @return array<string, bool>
+     */
+    private function getTableColumns(PDO $pdo, string $table): array {
+        $cacheKey = strtolower($table);
+        if (isset($this->tableColumnCache[$cacheKey])) {
+            return $this->tableColumnCache[$cacheKey];
+        }
+
+        try {
+            $driver = strtolower((string) $pdo->getAttribute(PDO::ATTR_DRIVER_NAME));
+        } catch (\Throwable $e) {
+            $driver = 'mysql';
+        }
+
+        $columns = [];
+        try {
+            if ($driver === 'sqlite') {
+                $stmt = $pdo->query("PRAGMA table_info('" . str_replace("'", "''", $table) . "')");
+                if ($stmt) {
+                    while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                        $name = $row['name'] ?? null;
+                        if ($name !== null) {
+                            $columns[strtolower((string) $name)] = true;
+                        }
+                    }
+                }
+            } else {
+                $safeTable = str_replace('`', '``', $table);
+                $stmt = $pdo->query('SHOW COLUMNS FROM `' . $safeTable . '`');
+                if ($stmt) {
+                    while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                        $field = $row['Field'] ?? null;
+                        if ($field !== null) {
+                            $columns[strtolower((string) $field)] = true;
+                        }
+                    }
+                }
+            }
+        } catch (\Throwable $e) {
+            Logger::error('schema.describe_failed', [
+                'table' => $table,
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        return $this->tableColumnCache[$cacheKey] = $columns;
+    }
+
     private function getHourlyRate(PDO $pdo): ?float {
         $raw = $this->getAppSetting($pdo, 'billing.hourly_rate');
+        if ($raw === null || $raw === '') {
+            return null;
+        }
+        $rate = (float) $raw;
+        return $rate > 0 ? $rate : null;
+    }
+
+    private function getMonthlyRate(PDO $pdo): ?float {
+        $raw = $this->getAppSetting($pdo, 'billing.monthly_rate');
         if ($raw === null || $raw === '') {
             return null;
         }
@@ -113,6 +196,7 @@ class ApiController {
             ],
             'billing' => [
                 'hourly_rate' => null,
+                'monthly_rate' => null,
             ],
         ];
 
@@ -134,8 +218,8 @@ class ApiController {
             }
 
             $this->ensureSettingsTable($pdo);
-            $rate = $this->getHourlyRate($pdo);
-            $settings['billing']['hourly_rate'] = $rate;
+            $settings['billing']['hourly_rate'] = $this->getHourlyRate($pdo);
+            $settings['billing']['monthly_rate'] = $this->getMonthlyRate($pdo);
 
             $fetchColumn = static function (PDO $pdo, string $sql) {
                 try {
@@ -227,75 +311,35 @@ class ApiController {
                 }
             }
 
+            $monthlyProvided = array_key_exists('monthly_rate', $body);
+            $rawMonthly = $body['monthly_rate'] ?? null;
+            $monthlyValue = null;
+            if ($monthlyProvided && $rawMonthly !== null && $rawMonthly !== '') {
+                if (!is_numeric($rawMonthly)) {
+                    throw new \InvalidArgumentException('La tarifa mensual debe ser un número.');
+                }
+                $monthlyValue = (float) $rawMonthly;
+                if ($monthlyValue <= 0) {
+                    throw new \InvalidArgumentException('La tarifa mensual debe ser mayor a cero.');
+                }
+            }
+
             $pdo = DB::pdo($this->config);
             $formatted = $value === null ? null : number_format($value, 2, '.', '');
             $this->setAppSetting($pdo, 'billing.hourly_rate', $formatted);
 
+            if ($monthlyProvided) {
+                $formattedMonthly = $monthlyValue === null ? null : number_format($monthlyValue, 2, '.', '');
+                $this->setAppSetting($pdo, 'billing.monthly_rate', $formattedMonthly);
+            }
+
             Http::json([
                 'ok' => true,
-                'hourly_rate' => $value === null ? null : (float) $formatted,
+                'hourly_rate' => $this->getHourlyRate($pdo),
+                'monthly_rate' => $this->getMonthlyRate($pdo),
             ]);
         } catch (\Throwable $e) {
             Http::json(['ok' => false, 'error' => $e->getMessage()], 400);
-        }
-    }
-
-    public function simulateFelInvoice() {
-        $body = Http::body();
-        $invoice = $body['invoice'] ?? [
-            'serie' => 'PRUEBA',
-            'numero' => 1,
-            'nitReceptor' => 'CF',
-            'items' => [
-                ['descripcion' => 'Servicio de Control de Acceso', 'cantidad' => 1, 'precio' => 100.00, 'iva' => 12.00, 'total' => 112.00]
-            ],
-            'total' => 112.00
-        ];
-
-        $g4s = new G4SClient($this->config);
-        $resp = $g4s->submitInvoice($invoice);
-        Http::json(['request' => $invoice, 'response' => $resp]);
-    }
-
-    public function syncTicketsAndPayments() {
-        try {
-            $pdo = DB::pdo($this->config);
-            $zk = new ZKTecoClient($this->config);
-
-            // Puedes parametrizar "since" por query ?since=ISO
-            $since = $_GET['since'] ?? date('c', strtotime('-3 days'));
-
-            $entries  = $zk->listEntries($since);
-            $payments = $zk->listPayments($since);
-
-            $pdo->beginTransaction();
-
-            $countT = 0;
-            foreach ($entries as $t) { DB::upsertTicket($pdo, $t); $countT++; }
-
-            $countP = 0;
-            foreach ($payments as $p) { 
-                // evitar duplicados burdos: si ya existe pago exacto, sáltalo
-                $dupe = $pdo->prepare("SELECT 1 FROM payments WHERE ticket_no=? AND amount=? AND paid_at=?");
-                $dupe->execute([$p['ticket_no'], $p['amount'], $p['paid_at']]);
-                if (!$dupe->fetchColumn()) {
-                    DB::insertPayment($pdo, $p); 
-                    $countP++;
-                }
-            }
-
-            $pdo->commit();
-
-            Http::json([
-                'ok' => true,
-                'since' => $since,
-                'tickets_upserted' => $countT,
-                'payments_inserted' => $countP
-            ]);
-        } catch (\Throwable $e) {
-            if (isset($pdo) && $pdo instanceof PDO && $pdo->inTransaction()) $pdo->rollBack();
-            Logger::error('syncTicketsAndPayments error', ['e'=>$e->getMessage()]);
-            Http::json(['ok'=>false,'error'=>$e->getMessage()], 500);
         }
     }
 
@@ -433,9 +477,7 @@ class ApiController {
     }
 
     private function persistTickets(PDO $pdo, array $rows): int {
-        if (!$rows) {
-            return 0;
-        }
+        if (!$rows) return 0;
 
         try {
             $driver = strtolower((string) $pdo->getAttribute(PDO::ATTR_DRIVER_NAME));
@@ -443,56 +485,118 @@ class ApiController {
             $driver = 'mysql';
         }
 
+        $columns      = $this->getTableColumns($pdo, 'tickets');
+        $hasSource    = isset($columns['source']);
+        $hasRawJson   = isset($columns['raw_json']);
+        $hasUpdatedAt = isset($columns['updated_at']);
+
+        $insertColumns = ['ticket_no','plate','status','entry_at','exit_at','duration_min','amount'];
+        $valuePlaceholders = [':ticket_no',':plate',':status',':entry_at',':exit_at',':duration_min',':amount'];
+
+        if ($hasSource)  { $insertColumns[] = 'source';   $valuePlaceholders[] = ':source'; }
+        if ($hasRawJson) { $insertColumns[] = 'raw_json'; $valuePlaceholders[] = ':raw_json'; }
+
         if ($driver === 'sqlite') {
-            $sql = "
-                INSERT INTO tickets (ticket_no, plate, status, entry_at, exit_at, duration_min, amount, source, raw_json, created_at, updated_at)
-                VALUES (:ticket_no,:plate,:status,:entry_at,:exit_at,:duration_min,:amount,:source,:raw_json, datetime('now'), datetime('now'))
-                ON CONFLICT(ticket_no) DO UPDATE SET
-                    plate=excluded.plate,
-                    status=excluded.status,
-                    entry_at=excluded.entry_at,
-                    exit_at=excluded.exit_at,
-                    duration_min=excluded.duration_min,
-                    amount=excluded.amount,
-                    source=excluded.source,
-                    raw_json=excluded.raw_json,
-                    updated_at=datetime('now')
-            ";
+            $updates = [
+                'plate=excluded.plate',
+                'status=excluded.status',
+                'entry_at=excluded.entry_at',
+                'exit_at=excluded.exit_at',
+                'duration_min=excluded.duration_min',
+                'amount=excluded.amount',
+            ];
+            if ($hasSource)  { $updates[] = 'source=excluded.source'; }
+            if ($hasRawJson) { $updates[] = 'raw_json=excluded.raw_json'; }
+            if ($hasUpdatedAt) { $updates[] = "updated_at=datetime('now')"; }
+
+            $sql = sprintf(
+                'INSERT INTO tickets (%s) VALUES (%s) ON CONFLICT(ticket_no) DO UPDATE SET %s',
+                implode(',', $insertColumns),
+                implode(',', $valuePlaceholders),
+                implode(',', $updates)
+            );
         } else {
-            $sql = "
-                INSERT INTO tickets (ticket_no, plate, status, entry_at, exit_at, duration_min, amount, source, raw_json, created_at, updated_at)
-                VALUES (:ticket_no,:plate,:status,:entry_at,:exit_at,:duration_min,:amount,:source,:raw_json, NOW(), NOW())
-                ON DUPLICATE KEY UPDATE
-                    plate=VALUES(plate),
-                    status=VALUES(status),
-                    entry_at=VALUES(entry_at),
-                    exit_at=VALUES(exit_at),
-                    duration_min=VALUES(duration_min),
-                    amount=VALUES(amount),
-                    source=VALUES(source),
-                    raw_json=VALUES(raw_json),
-                    updated_at=NOW()
-            ";
+            $updates = [
+                'plate=VALUES(plate)',
+                'status=VALUES(status)',
+                'entry_at=VALUES(entry_at)',
+                'exit_at=VALUES(exit_at)',
+                'duration_min=VALUES(duration_min)',
+                'amount=VALUES(amount)',
+            ];
+            if ($hasSource)  { $updates[] = 'source=VALUES(source)'; }
+            if ($hasRawJson) { $updates[] = 'raw_json=VALUES(raw_json)'; }
+            if ($hasUpdatedAt) { $updates[] = 'updated_at=NOW()'; }
+
+            $sql = sprintf(
+                'INSERT INTO tickets (%s) VALUES (%s) ON DUPLICATE KEY UPDATE %s',
+                implode(',', $insertColumns),
+                implode(',', $valuePlaceholders),
+                implode(',', $updates)
+            );
         }
 
         $stmt = $pdo->prepare($sql);
         $touched = 0;
+
         foreach ($rows as $row) {
-            $stmt->execute([
-                ':ticket_no' => $row['ticket_no'],
-                ':plate' => $row['plate'],
-                ':status' => $row['status'],
-                ':entry_at' => $row['entry_at'],
-                ':exit_at' => $row['exit_at'],
-                ':duration_min' => $row['duration_min'],
-                ':amount' => $row['amount'],
-                ':source' => $row['source'] ?? null,
-                ':raw_json' => $row['raw_json'] ?? null,
-            ]);
+            $params = [
+                ':ticket_no'    => $row['ticket_no'],
+                ':plate'        => $row['plate'] ?? null,
+                ':status'       => $row['status'] ?? 'CLOSED',
+                ':entry_at'     => $row['entry_at'] ?? null,
+                ':exit_at'      => $row['exit_at'] ?? null,
+                ':duration_min' => $row['duration_min'] ?? null,
+                ':amount'       => $row['amount'] ?? null,
+            ];
+            if ($hasSource)  { $params[':source']   = $row['source'] ?? null; }
+            if ($hasRawJson) { $params[':raw_json'] = $row['raw_json'] ?? null; }
+
+            $stmt->execute($params);
             $touched++;
+
+            // 👉 crea stub en payments si no hay ninguno aún
+            $this->ensurePaymentStub($pdo, $row);
         }
 
+        // NO tocar payments aquí con alias raros ni otras tablas
+        // NO llamar a persistFacturacion() para payments
+
         return $touched;
+    }
+
+    private function ensurePaymentStub(PDO $pdo, array $t): void {
+        $ticketNo = trim((string)($t['ticket_no'] ?? ''));
+        if ($ticketNo === '') return;
+
+        // ¿ya hay algún pago para este ticket?
+        $chk = $pdo->prepare("SELECT 1 FROM payments WHERE ticket_no = :t LIMIT 1");
+        $chk->execute([':t' => $ticketNo]);
+        if ($chk->fetchColumn()) {
+            return; // ya existe algo; no dupliques
+        }
+
+        // Elegimos una fecha razonable para paid_at (o lo dejamos NULL)
+        $paidAt = $t['exit_at'] ?? $t['entry_at'] ?? null;
+
+        // Para compatibilidad MySQL/SQLite con NOW()
+        try {
+            $driver = strtolower((string)$pdo->getAttribute(PDO::ATTR_DRIVER_NAME));
+        } catch (\Throwable $e) {
+            $driver = 'mysql';
+        }
+        $nowExpr = $driver === 'sqlite' ? "datetime('now')" : "NOW()";
+
+        // Inserta el stub. Si `paid_at` no permite NULL en tu esquema, usa $paidAt o $nowExpr.
+        $sql = "INSERT INTO payments (ticket_no, amount, method, paid_at, created_at)
+                VALUES (:ticket_no, :amount, :method, :paid_at, {$nowExpr})";
+        $ins = $pdo->prepare($sql);
+        $ins->execute([
+            ':ticket_no' => $ticketNo,
+            ':amount'    => 0.00,          // “sin pagos” => 0.00
+            ':method'    => 'pending',     // marca clara de que es un stub
+            ':paid_at'   => $paidAt,       // o null si tu columna lo permite
+        ]);
     }
 
     private function extractParkRecords(array $payload): array {
@@ -781,8 +885,8 @@ class ApiController {
                 $uuid = $resp['uuid'] ?? $resp['UUID'] ?? null;
                 $status = $uuid ? 'OK' : 'ERROR';
 
-                $insertSql = "INSERT INTO invoices (ticket_no, total, uuid, status, request_json, response_json, receptor_nit, entry_at, exit_at, duration_min, hours_billed, billing_mode, hourly_rate, created_at)
-                                VALUES (:ticket_no, :total, :uuid, :status, :request_json, :response_json, :receptor_nit, :entry_at, :exit_at, :duration_min, :hours_billed, :billing_mode, :hourly_rate, {$nowExpr})";
+                $insertSql = "INSERT INTO invoices (ticket_no, total, uuid, status, request_json, response_json, receptor_nit, entry_at, exit_at, duration_min, hours_billed, billing_mode, hourly_rate, monthly_rate, created_at)
+                                VALUES (:ticket_no, :total, :uuid, :status, :request_json, :response_json, :receptor_nit, :entry_at, :exit_at, :duration_min, :hours_billed, :billing_mode, :hourly_rate, :monthly_rate, {$nowExpr})";
                 $ins = $pdo->prepare($insertSql);
                 $ins->execute([
                     ':ticket_no' => $t['ticket_no'],
@@ -798,6 +902,7 @@ class ApiController {
                     ':hours_billed' => $billing['hours'],
                     ':billing_mode' => $billing['mode'],
                     ':hourly_rate' => $billing['hourly_rate'],
+                    ':monthly_rate' => null,
                 ]);
 
                 $results[] = [
@@ -934,6 +1039,7 @@ class ApiController {
             Schema::ensureInvoiceMetadataColumns($pdo);
 
             $hourlyRate = $this->getHourlyRate($pdo);
+            $monthlyRate = $this->getMonthlyRate($pdo);
             $billing = $this->calculateTicketBilling($row, $hourlyRate);
             $durationMin = $billing['duration_minutes'];
             $hours = $billing['hours'];
@@ -961,6 +1067,21 @@ class ApiController {
                 $appliedHourlyRate = $hourlyRate;
                 if ($description === '') {
                     $concept = sprintf('Servicio de parqueo %.2f h x Q%.2f', $itemQuantity, $hourlyRate);
+                }
+            } elseif ($mode === 'monthly') {
+                if ($monthlyRate === null) {
+                    throw new \RuntimeException('Configura la tarifa mensual en Ajustes antes de facturar por mes.');
+                }
+                $total = round($monthlyRate, 2);
+                if ($total <= 0) {
+                    throw new \RuntimeException('El total mensual configurado es inválido.');
+                }
+                $itemQuantity = 1.0;
+                $itemPrice = $total;
+                $billingMode = 'monthly';
+                $appliedHourlyRate = null;
+                if ($description === '') {
+                    $concept = 'Servicio de parqueo mensual';
                 }
             } elseif ($mode === 'custom') {
                 $customRaw = $b['custom_total'] ?? null;
@@ -1015,6 +1136,7 @@ class ApiController {
                     'hours'           => $hours,
                     'duration_minutes'=> $durationMin,
                     'hourly_rate'     => $billingMode === 'hourly' ? $appliedHourlyRate : null,
+                    'monthly_rate'    => $billingMode === 'monthly' ? $total : null,
                     'payments_total'  => isset($row['payments_total']) ? (float) $row['payments_total'] : null,
                     'ticket_amount'   => isset($row['ticket_amount']) ? (float) $row['ticket_amount'] : null,
                 ],
@@ -1038,12 +1160,12 @@ class ApiController {
 
             // marca PENDING
             $insPending = $pdo->prepare("
-            INSERT INTO invoices (ticket_no, total, uuid, status, request_json, response_json, receptor_nit, entry_at, exit_at, duration_min, hours_billed, billing_mode, hourly_rate, created_at)
-            VALUES (:t, :total, NULL, 'PENDING', :req, NULL, :receptor, :entry_at, :exit_at, :duration_min, :hours_billed, :billing_mode, :hourly_rate, NOW())
+            INSERT INTO invoices (ticket_no, total, uuid, status, request_json, response_json, receptor_nit, entry_at, exit_at, duration_min, hours_billed, billing_mode, hourly_rate, monthly_rate, created_at)
+            VALUES (:t, :total, NULL, 'PENDING', :req, NULL, :receptor, :entry_at, :exit_at, :duration_min, :hours_billed, :billing_mode, :hourly_rate, :monthly_rate, NOW())
             ON DUPLICATE KEY UPDATE uuid=NULL, status='PENDING', request_json=VALUES(request_json), response_json=NULL,
                 receptor_nit=VALUES(receptor_nit), entry_at=VALUES(entry_at), exit_at=VALUES(exit_at),
                 duration_min=VALUES(duration_min), hours_billed=VALUES(hours_billed),
-                billing_mode=VALUES(billing_mode), hourly_rate=VALUES(hourly_rate), total=VALUES(total)
+                billing_mode=VALUES(billing_mode), hourly_rate=VALUES(hourly_rate), monthly_rate=VALUES(monthly_rate), total=VALUES(total)
             ");
             $insPending->execute([
                 ':t'=>$ticketNo,
@@ -1056,6 +1178,7 @@ class ApiController {
                 ':hours_billed'=>$hours,
                 ':billing_mode'=>$billingMode,
                 ':hourly_rate'=>$billingMode === 'hourly' ? $appliedHourlyRate : null,
+                ':monthly_rate'=>$billingMode === 'monthly' ? $total : null,
             ]);
 
             // === llamada a G4S ===
@@ -1100,224 +1223,6 @@ class ApiController {
         }
     }
 
-    public function ingestTickets() {
-        try {
-            // seguridad simple por header
-            $key = $this->config->get('INGEST_KEY', '');
-            if ($key !== '' && ($_SERVER['HTTP_X_INGEST_KEY'] ?? '') !== $key) {
-                \App\Utils\Http::json(['ok'=>false,'error'=>'Unauthorized'], 401);
-                return;
-            }
-
-            $pdo = \App\Utils\DB::pdo($this->config);
-            $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
-
-            $body = \App\Utils\Http::body();
-
-            $rows = [];
-
-            // A) Formato “raw ZKBio CVSecurity”: { code, message, data: { data: [ ... ] } }
-            if (isset($body['data']['data']) && is_array($body['data']['data'])) {
-                foreach ($body['data']['data'] as $r) {
-                    // Mapeo de campos de tu ejemplo:
-                    $id        = (string)($r['id'] ?? '');
-                    if ($id === '') continue;
-
-                    $car       = (string)($r['carNumber'] ?? null);
-                    $exit      = (string)($r['checkOutTime'] ?? null); // "yyyy-MM-dd HH:mm:ss.SSS"
-                    $parking   = (string)($r['parkingTime'] ?? null);  // "HH:mm:ss"
-
-                    // Calcula entry_at si tenemos parkingTime y checkOutTime
-                    $entryAt = null;
-                    if ($exit && $parking && preg_match('/^\d{2}:\d{2}:\d{2}/', $parking)) {
-                        $secs = 0;
-                        [$h,$m,$s] = array_map('intval', explode(':', substr($parking,0,8)));
-                        $secs = $h*3600 + $m*60 + $s;
-                        $exitTs = strtotime(str_replace('.', '', $exit)); // tolerante a .mmm
-                        if ($exitTs) $entryAt = date('Y-m-d H:i:s', $exitTs - $secs);
-                    }
-
-                    $rows[] = [
-                        'ticket_no'   => $id,
-                        'plate'       => $car ?: null,
-                        'status'      => 'CLOSED',             // por ser record OUT
-                        'entry_at'    => $entryAt,
-                        'exit_at'     => $exit ? substr($exit,0,19) : null,
-                        'duration_min'=> isset($parking) && strlen($parking)>=5 ? 
-                                        (int)floor((($h??0)*60)+($m??0)+(($s??0)>0?1:0)) : null,
-                        'amount'      => null,                 // si no viene, queda null
-                        'source'      => 'zkbio',
-                        'raw_json'    => json_encode($r, JSON_UNESCAPED_UNICODE),
-                    ];
-                }
-
-            // B) Formato normalizado: { tickets: [ {ticket_no, plate, entry_at, exit_at, duration_min, amount, status} ] }
-            } elseif (isset($body['tickets']) && is_array($body['tickets'])) {
-                foreach ($body['tickets'] as $t) {
-                    if (empty($t['ticket_no'])) continue;
-                    $rows[] = [
-                        'ticket_no'   => (string)$t['ticket_no'],
-                        'plate'       => $t['plate'] ?? null,
-                        'status'      => strtoupper((string)($t['status'] ?? 'CLOSED')),
-                        'entry_at'    => $t['entry_at'] ?? null,
-                        'exit_at'     => $t['exit_at'] ?? null,
-                        'duration_min'=> isset($t['duration_min']) ? (int)$t['duration_min'] : null,
-                        'amount'      => isset($t['amount']) ? (float)$t['amount'] : null,
-                        'source'      => $t['source'] ?? 'external',
-                        'raw_json'    => json_encode($t, JSON_UNESCAPED_UNICODE),
-                    ];
-                }
-            } else {
-                \App\Utils\Http::json(['ok'=>false,'error'=>'Payload inválido'], 400);
-                return;
-            }
-
-            if (!$rows) { \App\Utils\Http::json(['ok'=>true,'ingested'=>0]); return; }
-
-            $up = $pdo->prepare("
-                INSERT INTO tickets (ticket_no, plate, status, entry_at, exit_at, duration_min, amount, source, raw_json, created_at, updated_at)
-                VALUES (:ticket_no,:plate,:status,:entry_at,:exit_at,:duration_min,:amount,:source,:raw_json, NOW(), NOW())
-                ON DUPLICATE KEY UPDATE
-                plate=VALUES(plate),
-                status=VALUES(status),
-                entry_at=VALUES(entry_at),
-                exit_at=VALUES(exit_at),
-                duration_min=VALUES(duration_min),
-                amount=VALUES(amount),
-                source=VALUES(source),
-                raw_json=VALUES(raw_json),
-                updated_at=NOW()
-            ");
-
-            $n=0;
-            foreach ($rows as $r) { $up->execute($r); $n++; }
-
-            \App\Utils\Http::json(['ok'=>true,'ingested'=>$n]);
-        } catch (\Throwable $e) {
-            \App\Utils\Http::json(['ok'=>false,'error'=>$e->getMessage()], 500);
-        }
-    }
-
-    public function ingestPayments() {
-        try {
-            // seguridad simple
-            $key = $this->config->get('INGEST_KEY', '');
-            if ($key !== '' && ($_SERVER['HTTP_X_INGEST_KEY'] ?? '') !== $key) {
-                \App\Utils\Http::json(['ok'=>false,'error'=>'Unauthorized'], 401);
-                return;
-            }
-
-            $pdo = \App\Utils\DB::pdo($this->config);
-            $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
-
-            $body = \App\Utils\Http::body();
-            $rows = [];
-
-            // A) Normalizado: { payments: [ {ticket_no, amount, method, paid_at, ref} ] }
-            if (isset($body['payments']) && is_array($body['payments'])) {
-                foreach ($body['payments'] as $p) {
-                    if (empty($p['ticket_no']) || !isset($p['amount'])) continue;
-                    $rows[] = [
-                        'ticket_no' => (string)$p['ticket_no'],
-                        'amount'    => (float)$p['amount'],
-                        'method'    => $p['method'] ?? 'cash',
-                        'paid_at'   => $p['paid_at'] ?? date('Y-m-d H:i:s'),
-                        'ref'       => $p['ref'] ?? null,
-                        'raw_json'  => json_encode($p, JSON_UNESCAPED_UNICODE),
-                    ];
-                }
-
-            // B) Raw ZKBio (si algún endpoint de ZK trae pagos; aquí dejamos ejemplo genérico)
-            } elseif (isset($body['data']['data']) && is_array($body['data']['data'])) {
-                foreach ($body['data']['data'] as $r) {
-                    // adapta si tu fuente de pagos trae otros nombres
-                    $rows[] = [
-                        'ticket_no' => (string)($r['id'] ?? ''),
-                        'amount'    => (float)($r['amount'] ?? 0),
-                        'method'    => (string)($r['method'] ?? 'cash'),
-                        'paid_at'   => (string)($r['paidAt'] ?? date('Y-m-d H:i:s')),
-                        'ref'       => (string)($r['txn'] ?? null),
-                        'raw_json'  => json_encode($r, JSON_UNESCAPED_UNICODE),
-                    ];
-                }
-            } else {
-                \App\Utils\Http::json(['ok'=>false,'error'=>'Payload inválido'], 400);
-                return;
-            }
-
-            if (!$rows) { \App\Utils\Http::json(['ok'=>true,'ingested'=>0]); return; }
-
-            $ins = $pdo->prepare("
-                INSERT INTO payments (ticket_no, amount, method, paid_at, ref, raw_json, created_at)
-                VALUES (:ticket_no,:amount,:method,:paid_at,:ref,:raw_json, NOW())
-            ");
-            $n=0;
-            foreach ($rows as $r) { $ins->execute($r); $n++; }
-
-            \App\Utils\Http::json(['ok'=>true,'ingested'=>$n]);
-        } catch (\Throwable $e) {
-            \App\Utils\Http::json(['ok'=>false,'error'=>$e->getMessage()], 500);
-        }
-    }
-
-    public function ingestBulk(){
-        try {
-            $pdo = \App\Utils\DB::pdo($this->config);
-            $b = \App\Utils\Http::body();
-
-            $tickets  = is_array($b['tickets']  ?? null) ? $b['tickets']  : [];
-            $payments = is_array($b['payments'] ?? null) ? $b['payments'] : [];
-
-            $pdo->beginTransaction();
-
-            // upsert tickets
-            if ($tickets) {
-                $stT = $pdo->prepare("
-                INSERT INTO tickets (ticket_no, plate, status, entry_at, exit_at, duration_min, amount, created_at)
-                VALUES (:ticket_no,:plate,:status,:entry_at,:exit_at,:duration_min,:amount, datetime('now'))
-                ON CONFLICT(ticket_no) DO UPDATE SET
-                    plate=excluded.plate, status=excluded.status, entry_at=excluded.entry_at,
-                    exit_at=excluded.exit_at, duration_min=excluded.duration_min, amount=excluded.amount
-                ");
-                foreach ($tickets as $t) {
-                    if (empty($t['ticket_no'])) continue;
-                    $stT->execute([
-                        ':ticket_no'=>$t['ticket_no'],
-                        ':plate'=>$t['plate'] ?? null,
-                        ':status'=>$t['status'] ?? 'OPEN',
-                        ':entry_at'=>$t['entry_at'] ?? null,
-                        ':exit_at'=>$t['exit_at'] ?? null,
-                        ':duration_min'=> isset($t['duration_min']) ? (int)$t['duration_min'] : null,
-                        ':amount'=> isset($t['amount']) ? (float)$t['amount'] : 0,
-                    ]);
-                }
-            }
-
-            // insert payments
-            if ($payments) {
-                $stP = $pdo->prepare("
-                INSERT INTO payments (ticket_no, amount, method, paid_at, created_at)
-                VALUES (:ticket_no,:amount,:method,:paid_at, datetime('now'))
-                ");
-                foreach ($payments as $p) {
-                    if (empty($p['ticket_no']) || (float)($p['amount'] ?? 0) <= 0) continue;
-                    $stP->execute([
-                        ':ticket_no'=>$p['ticket_no'],
-                        ':amount'=>(float)$p['amount'],
-                        ':method'=>$p['method'] ?? null,
-                        ':paid_at'=>$p['paid_at'] ?? date('c'),
-                    ]);
-                }
-            }
-
-            $pdo->commit();
-            \App\Utils\Http::json(['ok'=>true,'tickets'=>count($tickets),'payments'=>count($payments)]);
-        } catch (\Throwable $e) {
-            if (isset($pdo) && $pdo->inTransaction()) $pdo->rollBack();
-            \App\Utils\Http::json(['ok'=>false,'error'=>$e->getMessage()], 400);
-        }
-    }
-
     public function getTicketsFromDB() {
         try {
             $pdo = \App\Utils\DB::pdo($this->config);
@@ -1355,7 +1260,7 @@ class ApiController {
                 NULL AS estado
             FROM tickets t
             LEFT JOIN payments p ON p.ticket_no = t.ticket_no
-            WHERE t.status = 'CLOSED'
+            WHERE t.status = 'OPEN'
                 AND NOT EXISTS (
                 SELECT 1 FROM invoices i2
                 WHERE i2.ticket_no = t.ticket_no
@@ -1698,77 +1603,60 @@ class ApiController {
         }
     }
 
+    private function calculateTicketBilling(array $ticket, ?float $hourlyRate, bool $enforceMinimumHour = true): array {
+        $tz = $this->appTimezone();
 
-    private function calculateTicketBilling(array $ticket, ?float $hourlyRate, bool $enforceMinimumHour = false): array {
-        $entryAt = $ticket['entry_at'] ?? null;
-        $exitAt = $ticket['exit_at'] ?? null;
-
-        $entryTs = $entryAt ? strtotime((string) $entryAt) : false;
-        $exitTs  = $exitAt ? strtotime((string) $exitAt) : false;
-
-        $durationMin = null;
-        if ($entryTs && $exitTs && $exitTs > $entryTs) {
-            $durationMin = (int) round(($exitTs - $entryTs) / 60);
-        } elseif (isset($ticket['duration_min']) && is_numeric($ticket['duration_min'])) {
-            $durationMin = (int) $ticket['duration_min'];
+        $entry = $this->parseAppDateTime($ticket['entry_at'] ?? null);
+        $exit  = $this->parseAppDateTime($ticket['exit_at']  ?? null);
+        if ($entry === null) {
+            return [
+                'total' => 0.0,
+                'duration_minutes' => null,
+                'hours' => null,
+                'mode' => 'ticket_amount',
+                'hourly_rate' => $hourlyRate,
+                'payments_total' => isset($ticket['payments_total']) ? (float)$ticket['payments_total'] : null,
+                'ticket_amount'  => isset($ticket['ticket_amount'])  ? (float)$ticket['ticket_amount']  : null,
+            ];
         }
-        if ($durationMin !== null && $durationMin <= 0) {
-            if (
-                $enforceMinimumHour
-                && $entryTs !== false
-                && $exitTs !== false
-                && $entryTs === $exitTs
-            ) {
+        if ($exit === null) {
+            $exit = new \DateTimeImmutable('now', $tz); // “ahora” en la misma TZ
+        }
+
+        $diffSec = max(0, $exit->getTimestamp() - $entry->getTimestamp());
+        $durationMin = (int) ceil($diffSec / 60);
+
+        // Reglas: mínimo 1h; si se pasa 1 minuto, se cobra la siguiente hora.
+        if ($enforceMinimumHour) {
+            if ($durationMin <= 60) {
                 $durationMin = 60;
             } else {
-                $durationMin = null;
+                $durationMin = (int) (ceil($durationMin / 60) * 60);
             }
+        } elseif ($durationMin === 0) {
+            $durationMin = null;
         }
 
-        $hours = null;
-        if ($durationMin !== null && $durationMin > 0) {
-            if ($enforceMinimumHour) {
-                $hours = (float) max(1, (int) ceil($durationMin / 60));
-            } else {
-                $hours = round($durationMin / 60, 2);
-                if ($hours <= 0) {
-                    $hours = null;
-                }
-            }
-        }
+        $hours = $durationMin !== null ? ($durationMin / 60.0) : null;
 
+        // Total
         $paymentsTotal = isset($ticket['payments_total']) ? (float) $ticket['payments_total'] : null;
-        $ticketAmount = isset($ticket['ticket_amount']) ? (float) $ticket['ticket_amount'] : null;
+        $ticketAmount  = isset($ticket['ticket_amount'])  ? (float) $ticket['ticket_amount']  : null;
 
         $mode = 'ticket_amount';
-        $total = null;
+        $total = 0.0;
         $appliedRate = null;
 
-        if ($hourlyRate !== null && $hours !== null) {
-            $candidate = round($hours * $hourlyRate, 2);
-            if ($candidate > 0) {
-                $total = $candidate;
-                $mode = 'hourly';
-                $appliedRate = $hourlyRate;
-            }
-        }
-
-        if (($total === null || $total <= 0) && $ticketAmount !== null && $ticketAmount > 0) {
+        if ($hourlyRate !== null && $hours !== null && $hours > 0) {
+            $total = round($hours * $hourlyRate, 2);
+            $mode = 'hourly';
+            $appliedRate = $hourlyRate;
+        } elseif ($ticketAmount !== null && $ticketAmount > 0) {
             $total = round($ticketAmount, 2);
-            if ($mode !== 'hourly') {
-                $mode = 'ticket_amount';
-            }
-        }
-
-        if (($total === null || $total <= 0) && $paymentsTotal !== null && $paymentsTotal > 0) {
+            $mode = 'ticket_amount';
+        } elseif ($paymentsTotal !== null && $paymentsTotal > 0) {
             $total = round($paymentsTotal, 2);
-            if ($mode !== 'hourly') {
-                $mode = 'payments';
-            }
-        }
-
-        if ($total === null) {
-            $total = 0.0;
+            $mode = 'payments';
         }
 
         return [
@@ -1781,7 +1669,6 @@ class ApiController {
             'ticket_amount' => $ticketAmount,
         ];
     }
-
 
     private function mask($value, int $visible = 4): ?string {
         if ($value === null) {
@@ -1810,133 +1697,7 @@ class ApiController {
         return true;
     }
 
-    public function ingestZKBioMerge() {
-        try {
-            // Seguridad por header
-            $key = $this->config->get('INGEST_KEY', '');
-            if ($key !== '' && ($_SERVER['HTTP_X_INGEST_KEY'] ?? '') !== $key) {
-                \App\Utils\Http::json(['ok'=>false,'error'=>'Unauthorized'], 401);
-                return;
-            }
 
-            $pdo = \App\Utils\DB::pdo($this->config);
-            $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
-
-            $body = \App\Utils\Http::body();  // <- wrapper
-            if (!is_array($body)) { \App\Utils\Http::json(['ok'=>false,'error'=>'Payload inválido (no JSON)'],400); return; }
-            $outRoot = $body['out'] ?? null;
-            $inRoot  = $body['in']  ?? null;
-
-            // Helpers para sacar el array de data
-            $toArray = function($root) {
-                if (!$root) return [];
-                if (isset($root['data']['data']) && is_array($root['data']['data'])) return $root['data']['data'];
-                if (isset($root['data']) && is_array($root['data'])) return $root['data'];
-                return [];
-            };
-
-            $outs = $toArray($outRoot);
-            $ins  = $toArray($inRoot);
-
-            // Indexar entradas por placa y ordenar por checkInTime asc
-            $insByPlate = [];
-            foreach ($ins as $r) {
-                $plate = (string)($r['carNumber'] ?? '');
-                if ($plate === '') continue;
-                $insByPlate[$plate][] = $r;
-            }
-            foreach ($insByPlate as &$arr) {
-                usort($arr, function($a,$b){
-                    $da = strtotime((string)($a['checkInTime'] ?? '')) ?: 0;
-                    $db = strtotime((string)($b['checkInTime'] ?? '')) ?: 0;
-                    return $da <=> $db;
-                });
-            }
-            unset($arr);
-
-            // Armar filas normalizadas
-            $rows = [];
-            foreach ($outs as $o) {
-                $id    = (string)($o['id'] ?? '');
-                if ($id === '') continue;
-
-                $plate = (string)($o['carNumber'] ?? '');
-                $exitS = (string)($o['checkOutTime'] ?? '');
-                $exitS = $exitS !== '' ? substr($exitS,0,19) : null; // quitar .mmm
-                $exitT = $exitS ? strtotime($exitS) : null;
-
-                // Buscar la última entrada <= salida
-                $entryS = null;
-                if ($plate !== '' && $exitT && !empty($insByPlate[$plate])) {
-                    $cands = $insByPlate[$plate];
-                    for ($i = count($cands)-1; $i >= 0; $i--) {
-                        $ci = (string)($cands[$i]['checkInTime'] ?? '');
-                        $ci = $ci !== '' ? substr($ci,0,19) : null;
-                        if (!$ci) continue;
-                        $ciT = strtotime($ci);
-                        if ($ciT && $ciT <= $exitT) { $entryS = $ci; break; }
-                    }
-                }
-
-                // Calcular duración
-                $dur = null;
-                if ($entryS && $exitT) {
-                    $enT = strtotime($entryS);
-                    if ($enT && $exitT >= $enT) {
-                        $mins = (int)round(($exitT - $enT)/60);
-                        if ($mins >= 0) $dur = $mins;
-                    }
-                } else {
-                    // fallback a parkingTime si existe
-                    $pt = (string)($o['parkingTime'] ?? '');
-                    if (preg_match('/^\d{2}:\d{2}:\d{2}/', $pt)) {
-                        [$hh,$mm,$ss] = array_map('intval', explode(':', substr($pt,0,8)));
-                        $dur = $hh*60 + $mm + ($ss > 0 ? 1 : 0);
-                        if ($exitT && $dur !== null) {
-                            $entryS = date('Y-m-d H:i:s', $exitT - ($dur*60));
-                        }
-                    }
-                }
-
-                $rows[] = [
-                    'ticket_no'    => $id,
-                    'plate'        => $plate ?: null,
-                    'status'       => 'CLOSED',
-                    'entry_at'     => $entryS,
-                    'exit_at'      => $exitS,
-                    'duration_min' => $dur,
-                    'amount'       => null,
-                    'source'       => 'zkbio',
-                    'raw_json'     => json_encode($o, JSON_UNESCAPED_UNICODE),
-                ];
-            }
-
-            if (!$rows) { \App\Utils\Http::json(['ok'=>true,'ingested'=>0]); return; }
-
-            // UPSERT (tu misma consulta)
-            $up = $pdo->prepare("
-                INSERT INTO tickets (ticket_no, plate, status, entry_at, exit_at, duration_min, amount, source, raw_json, created_at, updated_at)
-                VALUES (:ticket_no,:plate,:status,:entry_at,:exit_at,:duration_min,:amount,:source,:raw_json, NOW(), NOW())
-                ON DUPLICATE KEY UPDATE
-                    plate=VALUES(plate),
-                    status=VALUES(status),
-                    entry_at=VALUES(entry_at),
-                    exit_at=VALUES(exit_at),
-                    duration_min=VALUES(duration_min),
-                    amount=VALUES(amount),
-                    source=VALUES(source),
-                    raw_json=VALUES(raw_json),
-                    updated_at=NOW()
-            ");
-
-            $n=0;
-            foreach ($rows as $r) { $up->execute($r); $n++; }
-
-            \App\Utils\Http::json(['ok'=>true,'ingested'=>$n]);
-        } catch (\Throwable $e) {
-            \App\Utils\Http::json(['ok'=>false,'error'=>$e->getMessage()], 500);
-        }
-    }
 
 }
 

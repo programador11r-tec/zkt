@@ -226,6 +226,67 @@
     return request;
   }
 
+  const hamachiSyncState = { timer: null, promise: null };
+
+  async function triggerHamachiSync({ silent = false, force = false } = {}) {
+    if (hamachiSyncState.promise) {
+      if (!force) {
+        return hamachiSyncState.promise;
+      }
+      try {
+        await hamachiSyncState.promise;
+      } catch (error) {
+        if (!silent) {
+          throw error;
+        }
+        console.warn('No se pudo sincronizar los registros remotos', error);
+      }
+    }
+
+    let taskPromise;
+    const task = async () => {
+      try {
+        return await fetchJSON(api('sync/park-records/hamachi'), { method: 'POST' });
+      } catch (error) {
+        if (!silent) {
+          throw error;
+        }
+        console.warn('No se pudo sincronizar los registros remotos', error);
+        return null;
+      } finally {
+        if (hamachiSyncState.promise === taskPromise) {
+          hamachiSyncState.promise = null;
+        }
+      }
+    };
+
+    taskPromise = task();
+    hamachiSyncState.promise = taskPromise;
+    return taskPromise;
+  }
+
+  function startHamachiSyncPolling() {
+    if (hamachiSyncState.timer) {
+      return;
+    }
+
+    const POLL_INTERVAL = 30000;
+
+    const poll = async () => {
+      try {
+        const response = await triggerHamachiSync({ silent: true });
+        if (response) {
+          await loadSettings(true);
+        }
+      } catch (error) {
+        console.warn('Error durante la sincronización automática de tickets remotos', error);
+      }
+    };
+
+    hamachiSyncState.timer = window.setInterval(poll, POLL_INTERVAL);
+    void poll();
+  }
+
   function buildTimeline(items) {
     if (!Array.isArray(items) || !items.length) {
       return '<div class="empty small mb-0">Sin eventos recientes.</div>';
@@ -248,6 +309,7 @@
     }).join('');
   }
 
+  startHamachiSyncPolling();
   loadSettings().catch(() => {});
 
   const refreshBtn = document.getElementById('refreshBtn');
@@ -506,6 +568,7 @@
   async function renderInvoices() {
     const settings = await loadSettings();
     const hourlyRateSetting = settings?.billing?.hourly_rate ?? null;
+    const monthlyRateSetting = settings?.billing?.monthly_rate ?? null;
 
     app.innerHTML = `
       <div class='card p-3'>
@@ -568,12 +631,18 @@
     };
 
     if (hourlyRateHint) {
-      const rateNumber = Number(hourlyRateSetting);
-      if (Number.isFinite(rateNumber) && rateNumber > 0) {
-        hourlyRateHint.textContent = `Tarifa por hora configurada: ${formatCurrency(rateNumber)}.`;
-      } else {
-        hourlyRateHint.textContent = 'Configura una tarifa por hora en Ajustes para habilitar el cálculo automático.';
+      const hourlyNumber = Number(hourlyRateSetting);
+      const monthlyNumber = Number(monthlyRateSetting);
+      const parts = [];
+      if (Number.isFinite(hourlyNumber) && hourlyNumber > 0) {
+        parts.push(`Tarifa por hora ${formatCurrency(hourlyNumber)}`);
       }
+      if (Number.isFinite(monthlyNumber) && monthlyNumber > 0) {
+        parts.push(`Tarifa mensual ${formatCurrency(monthlyNumber)}`);
+      }
+      hourlyRateHint.textContent = parts.length
+        ? `${parts.join('. ')}.`
+        : 'Configura una tarifa por hora o mensual en Ajustes para habilitar los cálculos automáticos.';
     }
 
     function filterRows() {
@@ -597,35 +666,44 @@
       exit_at: row.exit_at ?? null,
     });
 
-    function openInvoiceConfirmation(ticket, hourlyRate) {
+    function openInvoiceConfirmation(ticket, billingConfig = {}) {
       return new Promise((resolve) => {
         const hoursValue = typeof ticket.hours === 'number' ? ticket.hours : Number(ticket.hours);
         const hours = Number.isFinite(hoursValue) && hoursValue > 0 ? Number(hoursValue.toFixed(2)) : null;
         const minutesValue = typeof ticket.duration_minutes === 'number' ? ticket.duration_minutes : Number(ticket.duration_minutes);
         const minutes = Number.isFinite(minutesValue) && minutesValue > 0 ? Math.round(minutesValue) : null;
-        const rate = Number.isFinite(Number(hourlyRate)) && Number(hourlyRate) > 0 ? Number(hourlyRate) : null;
-        const hourlyTotal = rate !== null && hours !== null ? Math.round(hours * rate * 100) / 100 : null;
+        const hourlyRateNumber = Number(billingConfig?.hourly_rate ?? null);
+        const hourlyRate = Number.isFinite(hourlyRateNumber) && hourlyRateNumber > 0 ? hourlyRateNumber : null;
+        const monthlyRateNumber = Number(billingConfig?.monthly_rate ?? null);
+        const monthlyRate = Number.isFinite(monthlyRateNumber) && monthlyRateNumber > 0 ? monthlyRateNumber : null;
+        const canHourly = hourlyRate !== null && hours !== null;
+        const hourlyTotal = canHourly ? Math.round(hours * hourlyRate * 100) / 100 : null;
         const totalFromDb = ticket.total !== null && ticket.total !== undefined && ticket.total !== ''
           ? Number(ticket.total)
           : null;
         const normalizedDbTotal = Number.isFinite(totalFromDb) ? Number(totalFromDb.toFixed(2)) : null;
-        const customDefault = hourlyTotal ?? normalizedDbTotal;
+        const customDefault = hourlyTotal ?? (monthlyRate !== null ? monthlyRate : normalizedDbTotal);
         const customValue = customDefault !== null ? customDefault.toFixed(2) : '';
-        const canHourly = hourlyTotal !== null;
-        const selectedMode = canHourly ? 'hourly' : 'custom';
-        const rateLabel = rate !== null ? formatCurrency(rate) : null;
+        const selectedMode = canHourly ? 'hourly' : (monthlyRate !== null ? 'monthly' : 'custom');
+        const rateLabel = hourlyRate !== null ? formatCurrency(hourlyRate) : null;
         const hourlyLabel = hourlyTotal !== null ? formatCurrency(hourlyTotal) : null;
+        const monthlyLabel = monthlyRate !== null ? formatCurrency(monthlyRate) : null;
         const defaultLabel = normalizedDbTotal !== null ? formatCurrency(normalizedDbTotal) : '—';
         const dateCandidate = ticket.exit_at || ticket.entry_at || ticket.fecha || null;
         const dateLabel = dateCandidate ? formatDateTime(dateCandidate) : '—';
         const relative = dateCandidate ? formatRelativeTime(dateCandidate) : '';
         const hoursLabel = hours !== null ? `${hours.toFixed(2)} h${minutes && minutes % 60 ? ` (${minutes} min)` : ''}` : '—';
+        const hourlyRadioAttr = canHourly ? (selectedMode === 'hourly' ? 'checked' : '') : 'disabled';
+        const monthlyRadioAttr = monthlyRate !== null ? (selectedMode === 'monthly' ? 'checked' : '') : 'disabled';
 
         const backdrop = document.createElement('div');
         backdrop.className = 'app-modal-backdrop';
         const hourlyHelp = hourlyLabel
           ? `Tarifa ${rateLabel ?? '—'} × ${hours !== null ? `${hours.toFixed(2)} h` : '—'}.`
           : 'Define una tarifa por hora en Ajustes para habilitar esta opción.';
+        const monthlyHelp = monthlyLabel
+          ? 'Se usará la tarifa mensual configurada en Ajustes.'
+          : 'Define una tarifa mensual en Ajustes para habilitar esta opción.';
 
         backdrop.innerHTML = `
           <form class="app-modal-card" id="invoiceConfirmForm" role="dialog" aria-modal="true">
@@ -640,15 +718,24 @@
                 <div class="app-modal-summary-row"><span>Horas registradas</span><span>${escapeHtml(hoursLabel)}</span></div>
                 <div class="app-modal-summary-row"><span>Total en BD</span><span>${escapeHtml(defaultLabel)}</span></div>
                 ${hourlyLabel ? `<div class="app-modal-summary-row"><span>Total por hora</span><span>${escapeHtml(hourlyLabel)}</span></div>` : ''}
+                ${monthlyLabel ? `<div class="app-modal-summary-row"><span>Tarifa mensual</span><span>${escapeHtml(monthlyLabel)}</span></div>` : ''}
               </div>
               <div class="app-modal-options">
                 <label class="form-check">
-                  <input class="form-check-input" type="radio" name="billingMode" value="hourly" ${canHourly ? 'checked' : 'disabled'} />
+                  <input class="form-check-input" type="radio" name="billingMode" value="hourly" ${hourlyRadioAttr} />
                   <span class="form-check-label">
                     Cobro por hora ${hourlyLabel ? `<strong class="ms-1">${escapeHtml(hourlyLabel)}</strong>` : ''}
                     <small class="form-text">${escapeHtml(hourlyHelp)}</small>
                   </span>
                 </label>
+                ${monthlyRate !== null ? `
+                <label class="form-check mt-3">
+                  <input class="form-check-input" type="radio" name="billingMode" value="monthly" ${monthlyRadioAttr} />
+                  <span class="form-check-label">
+                    Cobro mensual ${monthlyLabel ? `<strong class="ms-1">${escapeHtml(monthlyLabel)}</strong>` : ''}
+                    <small class="form-text">${escapeHtml(monthlyHelp)}</small>
+                  </span>
+                </label>` : ''}
                 <label class="form-check mt-3">
                   <input class="form-check-input" type="radio" name="billingMode" value="custom" ${selectedMode === 'custom' ? 'checked' : ''} />
                   <span class="form-check-label">
@@ -656,6 +743,16 @@
                     <small class="form-text">Indica el total que deseas facturar manualmente.</small>
                   </span>
                 </label>
+                <div class="form-group mt-3">
+                  <label for="receptor_nit" class="form-label">NIT del cliente</label>
+                  <input
+                    type="text"
+                    id="receptor_nit"
+                    class="form-control"
+                    placeholder="Ejemplo: 12345678 o CF"
+                    value="CF"
+                  />
+                </div>
                 <div class="input-group input-group-sm mt-2" data-role="customWrapper">
                   <span class="input-group-text">Q</span>
                   <input type="number" step="0.01" min="0" class="form-control" data-role="customInput" value="${customValue}" ${selectedMode === 'custom' ? '' : 'disabled'} placeholder="0.00" />
@@ -737,6 +834,20 @@
             });
             return;
           }
+          if (selected === 'monthly') {
+            if (monthlyRate === null) {
+              errorBox.textContent = 'Configura una tarifa mensual válida en Ajustes para usar esta opción.';
+              errorBox.hidden = false;
+              return;
+            }
+            cleanup({
+              mode: 'monthly',
+              total: monthlyRate,
+              label: `Cobro mensual ${monthlyLabel ?? ''}`.trim(),
+              description: '',
+            });
+            return;
+          }
 
           const customVal = parseFloat(customInput.value);
           if (!Number.isFinite(customVal) || customVal <= 0) {
@@ -764,9 +875,7 @@
           btn.textContent = 'Confirmando…';
           try {
             const settingsSnapshot = await loadSettings();
-            const rateNumber = Number(settingsSnapshot?.billing?.hourly_rate ?? 0);
-            const hourlyRate = Number.isFinite(rateNumber) && rateNumber > 0 ? rateNumber : null;
-            const confirmation = await openInvoiceConfirmation(payload, hourlyRate);
+            const confirmation = await openInvoiceConfirmation(payload, settingsSnapshot?.billing ?? {});
             if (!confirmation) {
               btn.disabled = false;
               btn.textContent = originalText;
@@ -1885,6 +1994,10 @@
     const hourlyRateValue = hourlyRate !== null && hourlyRate !== undefined && hourlyRate !== ''
       ? Number(hourlyRate).toFixed(2)
       : '';
+    const monthlyRate = settings.billing?.monthly_rate ?? null;
+    const monthlyRateValue = monthlyRate !== null && monthlyRate !== undefined && monthlyRate !== ''
+      ? Number(monthlyRate).toFixed(2)
+      : '';
     const env = String(settings.app?.environment ?? '').toLowerCase();
     let envClass = 'neutral';
     if (['production', 'prod'].includes(env)) envClass = 'danger';
@@ -2000,11 +2113,19 @@
                   </div>
                   <small class="text-muted d-block mt-1">Se aplicará automáticamente a los tickets facturados por hora.</small>
                 </div>
+                <div>
+                  <label for="monthlyRateInput" class="form-label small mb-1">Tarifa mensual (GTQ)</label>
+                  <div class="input-group input-group-sm">
+                    <span class="input-group-text">Q</span>
+                    <input type="number" step="0.01" min="0" class="form-control" id="monthlyRateInput" value="${escapeHtml(monthlyRateValue)}" placeholder="0.00" />
+                  </div>
+                  <small class="text-muted d-block mt-1">Se aplicará al seleccionar cobro mensual en las facturas.</small>
+                </div>
                 <div class="d-flex gap-2">
                   <button type="submit" class="btn btn-primary btn-sm" id="hourlyRateSave">Guardar</button>
                   <button type="button" class="btn btn-outline-secondary btn-sm" id="hourlyRateClear">Limpiar</button>
                 </div>
-                <div class="alert alert-success py-2 px-3 small mb-0 d-none" id="hourlyRateFeedback">Tarifa actualizada correctamente.</div>
+                <div class="alert alert-success py-2 px-3 small mb-0 d-none" id="hourlyRateFeedback">Tarifas actualizadas correctamente.</div>
               </form>
             </div>
           </div>
@@ -2023,12 +2144,15 @@
         <div class="col-12">
           <div class="card shadow-sm">
             <div class="card-body d-flex flex-column gap-3">
-              <div class="d-flex align-items-start justify-content-between gap-2">
+              <div class="d-flex align-items-start justify-content-between gap-2 flex-wrap">
                 <div>
                   <h5 class="card-title mb-1">Actividad de sincronización</h5>
                   <p class="text-muted small mb-0">Resumen generado ${escapeHtml(formatRelativeTime(settings.generated_at) || 'hace instantes')}.</p>
                 </div>
-                <button class="btn btn-outline-primary btn-sm" id="settingsReload">Actualizar</button>
+                <div class="d-flex flex-wrap gap-2 justify-content-end">
+                  <button class="btn btn-primary btn-sm" id="settingsManualSync">actualizacion de data manual</button>
+                  <button class="btn btn-outline-primary btn-sm" id="settingsReload">Actualizar</button>
+                </div>
               </div>
               <div class="timeline" id="settingsTimeline">${buildTimeline(settings.activity)}</div>
             </div>
@@ -2046,8 +2170,32 @@
       });
     }
 
+    const manualSyncBtn = document.getElementById('settingsManualSync');
+    if (manualSyncBtn) {
+      manualSyncBtn.addEventListener('click', async () => {
+        manualSyncBtn.classList.add('is-loading');
+        manualSyncBtn.disabled = true;
+        let shouldRefresh = false;
+        try {
+          const result = await triggerHamachiSync({ silent: false, force: true });
+          await loadSettings(true);
+          shouldRefresh = true;
+        } catch (error) {
+          console.error('No se pudo sincronizar los registros remotos', error);
+          window.alert('No se pudo sincronizar los registros remotos. Inténtalo nuevamente en unos instantes.');
+        } finally {
+          manualSyncBtn.classList.remove('is-loading');
+          manualSyncBtn.disabled = false;
+          if (shouldRefresh && currentPage === 'settings') {
+            void renderSettings();
+          }
+        }
+      });
+    }
+
     const hourlyForm = document.getElementById('hourlyRateForm');
     const hourlyInput = document.getElementById('hourlyRateInput');
+    const monthlyInput = document.getElementById('monthlyRateInput');
     const hourlyFeedback = document.getElementById('hourlyRateFeedback');
     const hourlyClear = document.getElementById('hourlyRateClear');
     const hourlySave = document.getElementById('hourlyRateSave');
@@ -2055,19 +2203,29 @@
       hourlyInput.addEventListener('input', () => {
         if (hourlyFeedback) hourlyFeedback.classList.add('d-none');
       });
+      if (monthlyInput) {
+        monthlyInput.addEventListener('input', () => {
+          if (hourlyFeedback) hourlyFeedback.classList.add('d-none');
+        });
+      }
 
       if (hourlyClear) {
         hourlyClear.addEventListener('click', (event) => {
           event.preventDefault();
           hourlyInput.value = '';
+          if (monthlyInput) monthlyInput.value = '';
           if (hourlyFeedback) hourlyFeedback.classList.add('d-none');
         });
       }
 
       hourlyForm.addEventListener('submit', async (event) => {
         event.preventDefault();
-        const rawValue = hourlyInput.value.trim();
-        const body = rawValue === '' ? { hourly_rate: null } : { hourly_rate: rawValue };
+        const rawHourly = hourlyInput.value.trim();
+        const body = { hourly_rate: rawHourly === '' ? null : rawHourly };
+        if (monthlyInput) {
+          const rawMonthly = monthlyInput.value.trim();
+          body.monthly_rate = rawMonthly === '' ? null : rawMonthly;
+        }
         if (hourlySave) {
           hourlySave.disabled = true;
           hourlySave.classList.add('is-loading');
@@ -2084,10 +2242,18 @@
           hourlyInput.value = refreshedRate !== null && refreshedRate !== undefined && refreshedRate !== ''
             ? Number(refreshedRate).toFixed(2)
             : '';
+          if (monthlyInput) {
+            const refreshedMonthly = refreshed?.billing?.monthly_rate ?? null;
+            monthlyInput.value = refreshedMonthly !== null && refreshedMonthly !== undefined && refreshedMonthly !== ''
+              ? Number(refreshedMonthly).toFixed(2)
+              : '';
+          }
           if (hourlyFeedback) {
-            hourlyFeedback.textContent = hourlyInput.value
-              ? 'Tarifa actualizada correctamente.'
-              : 'Tarifa eliminada. Configura un valor para habilitar el cálculo automático.';
+            const hasHourly = hourlyInput.value !== '';
+            const hasMonthly = monthlyInput ? monthlyInput.value !== '' : false;
+            hourlyFeedback.textContent = (hasHourly || hasMonthly)
+              ? 'Tarifas actualizadas correctamente.'
+              : 'Tarifas eliminadas. Configura valores para habilitar los cálculos automáticos.';
             hourlyFeedback.classList.remove('d-none');
           }
         } catch (error) {

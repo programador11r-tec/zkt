@@ -242,7 +242,7 @@ class ApiController {
             $pendingSql = "
                 SELECT COUNT(1)
                 FROM tickets t
-                WHERE t.status = 'OPEN'
+                WHERE t.status = 'CLOSED'
                   AND EXISTS (SELECT 1 FROM payments p WHERE p.ticket_no = t.ticket_no)
                   AND NOT EXISTS (
                     SELECT 1 FROM invoices i2
@@ -343,7 +343,6 @@ class ApiController {
         }
     }
 
-
     public function syncRemoteParkRecords() {
         try {
             $baseUrl = rtrim((string) $this->config->get('HAMACHI_PARK_BASE_URL', ''), '/');
@@ -358,24 +357,28 @@ class ApiController {
                 return;
             }
 
-            $pageNo   = max(1, (int) ($_GET['pageNo']  ?? $_GET['page']  ?? 1));
+            $pageNo = (int) ($_GET['pageNo'] ?? $_GET['page'] ?? 1);
+            if ($pageNo < 1) {
+                $pageNo = 1;
+            }
             $pageSize = (int) ($_GET['pageSize'] ?? $_GET['limit'] ?? 100);
-            if ($pageSize <= 0) $pageSize = 100;
+            if ($pageSize <= 0) {
+                $pageSize = 100;
+            }
             $pageSize = min($pageSize, 1000);
 
-            // Modo estricto desde .env (default true)
-            $onlyWhenBillingOk = strtolower((string) $this->config->get('PARK_STRICT_BILLING', 'true')) === 'true';
-
             $query = [
-                'pageNo'       => $pageNo,
-                'pageSize'     => $pageSize,
+                'pageNo' => $pageNo,
+                'pageSize' => $pageSize,
                 'access_token' => $accessToken,
             ];
 
-            $endpoint   = $baseUrl . '/api/v2/parkTransaction/listParkRecordin?' . http_build_query($query);
-            $headers    = ['Accept: application/json'];
+            $endpoint = $baseUrl . '/api/v2/parkTransaction/listParkRecordin?' . http_build_query($query);
+            $headers = ['Accept: application/json'];
             $hostHeader = trim((string) $this->config->get('HAMACHI_PARK_HOST_HEADER', ''));
-            if ($hostHeader !== '') $headers[] = 'Host: ' . $hostHeader;
+            if ($hostHeader !== '') {
+                $headers[] = 'Host: ' . $hostHeader;
+            }
 
             $verifySsl = strtolower((string) $this->config->get('HAMACHI_PARK_VERIFY_SSL', 'false')) === 'true';
 
@@ -383,8 +386,8 @@ class ApiController {
             curl_setopt_array($ch, [
                 CURLOPT_RETURNTRANSFER => true,
                 CURLOPT_CONNECTTIMEOUT => 10,
-                CURLOPT_TIMEOUT        => 30,
-                CURLOPT_HTTPHEADER     => $headers,
+                CURLOPT_TIMEOUT => 30,
+                CURLOPT_HTTPHEADER => $headers,
             ]);
             if (!$verifySsl) {
                 curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
@@ -413,82 +416,38 @@ class ApiController {
             $records = $this->extractParkRecords($payload);
             if (!$records) {
                 Http::json([
-                    'ok'       => true,
+                    'ok' => true,
                     'endpoint' => $endpoint,
-                    'fetched'  => 0,
+                    'fetched' => 0,
                     'upserted' => 0,
-                    'skipped'  => 0,
-                    'message'  => 'La API remota no devolvió registros.',
+                    'skipped' => 0,
+                    'message' => 'La API remota no devolvió registros.',
                 ]);
                 return;
             }
 
-            $normalized    = [];
-            $skipped       = 0;
-            $billingHits   = 0;
-            $billingMisses = 0;
-
+            $normalized = [];
+            $skipped = 0;
             foreach ($records as $row) {
-                if (!is_array($row)) { $skipped++; continue; }
-
+                if (!is_array($row)) {
+                    $skipped++;
+                    continue;
+                }
                 $ticket = $this->normalizeParkRecordRow($row);
-                if ($ticket === null) { $skipped++; continue; }
-
-                // En modo estricto, inicialmente NO lo agregamos hasta que billing diga OK
-                // En modo laxo, sí lo agregamos aunque billing falle
-                $shouldAppend = !$onlyWhenBillingOk;
-
-                $plate = trim((string)($ticket['plate'] ?? ''));
-                if ($plate !== '') {
-                    try {
-                        $resp = $this->fetchRecordIdForPlate($baseUrl, $plate, $verifySsl, $hostHeader);
-                    } catch (\Throwable $e) {
-                        $resp = ['ok' => false, 'error' => $e->getMessage()];
-                    }
-
-                    if (!empty($resp['ok']) && !empty($resp['recordId'])) {
-                        // ✓ Encontrado: sobreescribe ticket_no y arrastra extras si vienen
-                        $ticket['ticket_no'] = (string)$resp['recordId'];
-                        $billingHits++;
-
-                        if (!empty($resp['checkInTime'])) {
-                            $ticket['entry_at'] = substr((string)$resp['checkInTime'], 0, 19);
-                        }
-                        if (!empty($resp['parkingTime']) && preg_match('/^\d{2}:\d{2}:\d{2}/', $resp['parkingTime'])) {
-                            [$hh,$mm,$ss] = array_map('intval', explode(':', substr($resp['parkingTime'],0,8)));
-                            $ticket['duration_min'] = $hh*60 + $mm + ($ss>0 ? 1 : 0);
-                        }
-                        if (isset($resp['finalAmount'])) {
-                            $ticket['amount'] = (float)$resp['finalAmount'];
-                        }
-
-                        $ticket['source'] = 'zkbio+vehicleBilling';
-                        $shouldAppend = true; // en estricto, sólo ahora se agrega
-                    } else {
-                        $billingMisses++;
-                    }
-                } else {
-                    // sin placa → no podemos consultar billing
-                    $billingMisses++;
+                if ($ticket === null) {
+                    $skipped++;
+                    continue;
                 }
-
-                if ($shouldAppend) {
-                    $normalized[] = $ticket;
-                }
+                $normalized[] = $ticket;
             }
 
             if (!$normalized) {
                 Http::json([
-                    'ok'             => true,
-                    'endpoint'       => $endpoint,
-                    'fetched'        => count($records),
-                    'upserted'       => 0,
-                    'skipped'        => $skipped,
-                    'billing_hits'   => $billingHits,
-                    'billing_misses' => $billingMisses,
-                    'message'        => $onlyWhenBillingOk
-                        ? 'Modo estricto: se ignoraron registros sin recordId de vehicleBilling.'
-                        : 'No hubo registros normalizados.',
+                    'ok' => true,
+                    'endpoint' => $endpoint,
+                    'fetched' => count($records),
+                    'upserted' => 0,
+                    'skipped' => $skipped,
                 ]);
                 return;
             }
@@ -499,23 +458,17 @@ class ApiController {
             $upserted = $this->persistTickets($pdo, $normalized);
 
             Logger::info('remote.park.sync_success', [
-                'endpoint'       => $endpoint,
-                'normalized'     => $upserted,
-                'skipped'        => $skipped,
-                'billing_hits'   => $billingHits,
-                'billing_misses' => $billingMisses,
-                'strict'         => $onlyWhenBillingOk,
+                'endpoint' => $endpoint,
+                'normalized' => $upserted,
+                'skipped' => $skipped,
             ]);
 
             Http::json([
-                'ok'             => true,
-                'endpoint'       => $endpoint,
-                'fetched'        => count($records),
-                'upserted'       => $upserted,
-                'skipped'        => $skipped,
-                'billing_hits'   => $billingHits,
-                'billing_misses' => $billingMisses,
-                'strict'         => $onlyWhenBillingOk,
+                'ok' => true,
+                'endpoint' => $endpoint,
+                'fetched' => count($records),
+                'upserted' => $upserted,
+                'skipped' => $skipped,
             ]);
         } catch (\Throwable $e) {
             Logger::error('remote.park.sync_failed', ['error' => $e->getMessage()]);
@@ -523,9 +476,6 @@ class ApiController {
         }
     }
 
-    /**
-     * Upsert de tickets (sin cambios estructurales; se persisten sólo los que sobrevivieron al filtro).
-     */
     private function persistTickets(PDO $pdo, array $rows): int {
         if (!$rows) return 0;
 
@@ -540,8 +490,8 @@ class ApiController {
         $hasRawJson   = isset($columns['raw_json']);
         $hasUpdatedAt = isset($columns['updated_at']);
 
-        $insertColumns       = ['ticket_no','plate','status','entry_at','exit_at','duration_min','amount'];
-        $valuePlaceholders   = [':ticket_no',':plate',':status',':entry_at',':exit_at',':duration_min',':amount'];
+        $insertColumns = ['ticket_no','plate','status','entry_at','exit_at','duration_min','amount'];
+        $valuePlaceholders = [':ticket_no',':plate',':status',':entry_at',':exit_at',':duration_min',':amount'];
 
         if ($hasSource)  { $insertColumns[] = 'source';   $valuePlaceholders[] = ':source'; }
         if ($hasRawJson) { $insertColumns[] = 'raw_json'; $valuePlaceholders[] = ':raw_json'; }
@@ -555,9 +505,9 @@ class ApiController {
                 'duration_min=excluded.duration_min',
                 'amount=excluded.amount',
             ];
-            if ($hasSource)    $updates[] = 'source=excluded.source';
-            if ($hasRawJson)   $updates[] = 'raw_json=excluded.raw_json';
-            if ($hasUpdatedAt) $updates[] = "updated_at=datetime('now')";
+            if ($hasSource)  { $updates[] = 'source=excluded.source'; }
+            if ($hasRawJson) { $updates[] = 'raw_json=excluded.raw_json'; }
+            if ($hasUpdatedAt) { $updates[] = "updated_at=datetime('now')"; }
 
             $sql = sprintf(
                 'INSERT INTO tickets (%s) VALUES (%s) ON CONFLICT(ticket_no) DO UPDATE SET %s',
@@ -574,9 +524,9 @@ class ApiController {
                 'duration_min=VALUES(duration_min)',
                 'amount=VALUES(amount)',
             ];
-            if ($hasSource)    $updates[] = 'source=VALUES(source)';
-            if ($hasRawJson)   $updates[] = 'raw_json=VALUES(raw_json)';
-            if ($hasUpdatedAt) $updates[] = 'updated_at=NOW()';
+            if ($hasSource)  { $updates[] = 'source=VALUES(source)'; }
+            if ($hasRawJson) { $updates[] = 'raw_json=VALUES(raw_json)'; }
+            if ($hasUpdatedAt) { $updates[] = 'updated_at=NOW()'; }
 
             $sql = sprintf(
                 'INSERT INTO tickets (%s) VALUES (%s) ON DUPLICATE KEY UPDATE %s',
@@ -586,7 +536,7 @@ class ApiController {
             );
         }
 
-        $stmt    = $pdo->prepare($sql);
+        $stmt = $pdo->prepare($sql);
         $touched = 0;
 
         foreach ($rows as $row) {
@@ -605,92 +555,15 @@ class ApiController {
             $stmt->execute($params);
             $touched++;
 
-            // Crea stub en payments si no hay ninguno aún
+            // 👉 crea stub en payments si no hay ninguno aún
             $this->ensurePaymentStub($pdo, $row);
         }
 
+        // NO tocar payments aquí con alias raros ni otras tablas
+        // NO llamar a persistFacturacion() para payments
+
         return $touched;
     }
-
-    /**
-     * Consulta individual para obtener recordId desde /api/v1/parkCost/vehicleBilling.
-     * Prueba primero JSON {"carNumber": "..."} y luego texto plano (body crudo).
-     */
-    private function fetchRecordIdForPlate(string $baseUrl,string $carNumber,bool $verifySsl = false,string $hostHeader = ''): array {
-        $endpoint = rtrim($baseUrl, '/') . '/api/v1/parkCost/vehicleBilling';
-
-        $doCall = function (string $body, array $headers) use ($endpoint, $verifySsl) {
-            $ch = curl_init($endpoint);
-            curl_setopt_array($ch, [
-                CURLOPT_RETURNTRANSFER => true,
-                CURLOPT_POST           => true,
-                CURLOPT_POSTFIELDS     => $body,
-                CURLOPT_CONNECTTIMEOUT => 8,
-                CURLOPT_TIMEOUT        => 15,
-                CURLOPT_HTTPHEADER     => $headers,
-            ]);
-            if (!$verifySsl) {
-                curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-                curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
-            }
-            $raw    = curl_exec($ch);
-            $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            $err    = curl_error($ch);
-            curl_close($ch);
-            return [$status, $raw, $err];
-        };
-
-        // Variante A) JSON
-        $headers = ['Accept: application/json','Content-Type: application/json'];
-        if ($hostHeader !== '') $headers[] = 'Host: '.$hostHeader;
-
-        [$stA, $rawA, $errA] = $doCall(json_encode(['carNumber'=>$carNumber], JSON_UNESCAPED_UNICODE), $headers);
-        if ($stA >= 200 && $stA < 300) {
-            $js = json_decode($rawA, true);
-            if (is_array($js) && isset($js['code']) && (int)$js['code'] === 0 && isset($js['data']['recordId'])) {
-                return [
-                    'ok'          => true,
-                    'recordId'    => (string)$js['data']['recordId'],
-                    'finalAmount' => isset($js['data']['finalAmount']) ? (float)$js['data']['finalAmount'] : null,
-                    'checkInTime' => $js['data']['checkInTime'] ?? null,
-                    'parkingTime' => $js['data']['parkingTime'] ?? null,
-                    'raw'         => $rawA,
-                    'variant'     => 'json',
-                ];
-            }
-        }
-
-        // Variante B) texto plano (body crudo con la placa/tag)
-        $headersTxt = ['Accept: application/json','Content-Type: text/plain; charset=utf-8'];
-        if ($hostHeader !== '') $headersTxt[] = 'Host: '.$hostHeader;
-
-        [$stB, $rawB, $errB] = $doCall($carNumber, $headersTxt);
-        if ($stB >= 200 && $stB < 300) {
-            $js = json_decode($rawB, true);
-            if (is_array($js) && isset($js['code']) && (int)$js['code'] === 0 && isset($js['data']['recordId'])) {
-                return [
-                    'ok'          => true,
-                    'recordId'    => (string)$js['data']['recordId'],
-                    'finalAmount' => isset($js['data']['finalAmount']) ? (float)$js['data']['finalAmount'] : null,
-                    'checkInTime' => $js['data']['checkInTime'] ?? null,
-                    'parkingTime' => $js['data']['parkingTime'] ?? null,
-                    'raw'         => $rawB,
-                    'variant'     => 'text',
-                ];
-            }
-        }
-
-        return [
-            'ok'       => false,
-            'recordId' => null,
-            'error'    => $errA ?: $errB ?: 'vehicleBilling sin recordId',
-            'statusA'  => $stA ?? null,
-            'statusB'  => $stB ?? null,
-            'rawA'     => $rawA ?? null,
-            'rawB'     => $rawB ?? null,
-        ];
-    }
-
 
     private function ensurePaymentStub(PDO $pdo, array $t): void {
         $ticketNo = trim((string)($t['ticket_no'] ?? ''));
@@ -954,6 +827,178 @@ class ApiController {
         return true;
     }
 
+    public function invoiceClosedTickets() {
+        try {
+            $pdo = DB::pdo($this->config);
+            $g4s = new G4SClient($this->config);
+            Schema::ensureInvoiceMetadataColumns($pdo);
+
+            $hourlyRate = $this->getHourlyRate($pdo);
+            try {
+                $driver = strtolower((string) $pdo->getAttribute(PDO::ATTR_DRIVER_NAME));
+            } catch (\Throwable $e) {
+                $driver = 'mysql';
+            }
+            $nowExpr = $driver === 'sqlite' ? "datetime('now')" : 'NOW()';
+
+            // Seleccionar tickets CERRADOS con pagos y sin factura
+            $sql = "SELECT t.* FROM tickets t
+                    WHERE t.status='CLOSED'
+                    AND EXISTS (SELECT 1 FROM payments p WHERE p.ticket_no=t.ticket_no)
+                    AND NOT EXISTS (SELECT 1 FROM invoices i WHERE i.ticket_no=t.ticket_no)";
+            $tickets = $pdo->query($sql)->fetchAll();
+
+            $results = [];
+            foreach ($tickets as $t) {
+                $ps = $pdo->prepare("SELECT amount, method, paid_at FROM payments WHERE ticket_no=? ORDER BY paid_at ASC");
+                $ps->execute([$t['ticket_no']]);
+                $payments = $ps->fetchAll();
+                $paymentsTotal = 0.0;
+                foreach ($payments as $p) {
+                    $paymentsTotal += (float)($p['amount'] ?? 0);
+                }
+
+                $ticketContext = $t;
+                $ticketContext['payments_total'] = $paymentsTotal;
+                $billing = $this->calculateTicketBilling($ticketContext, $hourlyRate, true);
+                if ($billing['total'] <= 0) {
+                    continue;
+                }
+
+                $ticketContext['amount'] = $billing['total'];
+                if ($billing['duration_minutes'] !== null) {
+                    $ticketContext['duration_min'] = $billing['duration_minutes'];
+                }
+
+                $paidAt = $t['exit_at'] ?? $t['entry_at'] ?? date('Y-m-d H:i:s');
+                $syntheticPayment = [
+                    'ticket_no' => $t['ticket_no'],
+                    'amount' => $billing['total'],
+                    'method' => $billing['mode'] === 'hourly' ? 'hourly' : 'auto',
+                    'paid_at' => $paidAt,
+                ];
+
+                $payload = $g4s->buildInvoiceFromTicket($ticketContext, [$syntheticPayment]);
+
+                $resp = $g4s->submitInvoice($payload);
+
+                $uuid = $resp['uuid'] ?? $resp['UUID'] ?? null;
+                $status = $uuid ? 'OK' : 'ERROR';
+
+                $insertSql = "INSERT INTO invoices (ticket_no, total, uuid, status, request_json, response_json, receptor_nit, entry_at, exit_at, duration_min, hours_billed, billing_mode, hourly_rate, monthly_rate, created_at)
+                                VALUES (:ticket_no, :total, :uuid, :status, :request_json, :response_json, :receptor_nit, :entry_at, :exit_at, :duration_min, :hours_billed, :billing_mode, :hourly_rate, :monthly_rate, {$nowExpr})";
+                $ins = $pdo->prepare($insertSql);
+                $ins->execute([
+                    ':ticket_no' => $t['ticket_no'],
+                    ':total' => $billing['total'],
+                    ':uuid' => $uuid,
+                    ':status' => $status,
+                    ':request_json' => json_encode($payload, JSON_UNESCAPED_UNICODE),
+                    ':response_json' => json_encode($resp, JSON_UNESCAPED_UNICODE),
+                    ':receptor_nit' => $t['receptor_nit'] ?? null,
+                    ':entry_at' => $t['entry_at'] ?? null,
+                    ':exit_at' => $t['exit_at'] ?? null,
+                    ':duration_min' => $billing['duration_minutes'],
+                    ':hours_billed' => $billing['hours'],
+                    ':billing_mode' => $billing['mode'],
+                    ':hourly_rate' => $billing['hourly_rate'],
+                    ':monthly_rate' => null,
+                ]);
+
+                $results[] = [
+                    'ticket_no' => $t['ticket_no'],
+                    'total' => $billing['total'],
+                    'status' => $status,
+                    'uuid' => $uuid,
+                    'billing_mode' => $billing['mode'],
+                ];
+            }
+
+            Http::json(['ok'=>true, 'invoices'=> $results, 'count'=> count($results)]);
+        } catch (\Throwable $e) {
+            Logger::error('invoiceClosedTickets error', ['e'=>$e->getMessage()]);
+            Http::json(['ok'=>false,'error'=>$e->getMessage()], 500);
+        }
+    }
+
+    public function felIssuedRT() {
+        try {
+            $g4s = new \App\Services\G4SClient($this->config);
+            $filters = [
+                'from'      => $_GET['from'] ?? date('Y-m-d'),
+                'to'        => $_GET['to']   ?? date('Y-m-d'),
+                'page'      => (int)($_GET['page'] ?? 1),
+                'page_size' => (int)($_GET['page_size'] ?? 50),
+            ];
+            if (!empty($_GET['nitReceptor'])) $filters['nitReceptor'] = $_GET['nitReceptor'];
+            if (!empty($_GET['uuid']))        $filters['uuid'] = $_GET['uuid'];
+
+            $resp = $g4s->issuedListRT($filters);
+
+            // Normalización → filas para tabla
+            $rows = [];
+            $candidates = [
+                $resp['Response']['Identifier'] ?? null,
+                $resp['ResponseData']['ResponseDataSet'] ?? null,
+                $resp['items'] ?? null,
+                $resp['data'] ?? null,
+                $resp
+            ];
+            foreach ($candidates as $cand) {
+                if (empty($cand)) continue;
+                $iter = is_array($cand) && (array_keys($cand) !== range(0, count($cand) - 1)) ? [$cand] : (is_array($cand) ? $cand : []);
+                foreach ($iter as $r) {
+                    if (!is_array($r)) continue;
+                    $rows[] = [
+                        'ticket_no'=> $r['InternalID'] ?? $r['ANumber'] ?? null,
+                        'fecha'    => $r['IssuedTimeStamp'] ?? $r['fecha'] ?? $resp['Response']['TimeStamp'] ?? null,
+                        'serie'    => $r['Serial'] ?? $r['serie'] ?? null,
+                        'numero'   => $r['ANumber'] ?? $r['numero'] ?? null,
+                        'uuid'     => $r['DocumentGUID'] ?? $r['UUID'] ?? $r['uuid'] ?? null,
+                        'receptor' => $r['ReceiverTaxID'] ?? $r['nitReceptor'] ?? $r['ReceiverName'] ?? null,
+                        'total'    => $r['TotalAmount'] ?? $r['total'] ?? null,
+                        'estado'   => $resp['Response']['LastResult'] ?? $r['estado'] ?? null,
+                    ];
+                }
+                if ($rows) break;
+            }
+
+            \App\Utils\Http::json(['ok'=>true, 'rows'=>$rows, 'raw'=>$resp]);
+        } catch (\Throwable $e) {
+            \App\Utils\Logger::error('felIssuedRT error', ['e'=>$e->getMessage()]);
+            \App\Utils\Http::json(['ok'=>false,'error'=>$e->getMessage()], 500);
+        }
+    }
+
+    public function getTickets(){
+        try {
+            $g4s = new \App\Services\G4SClient($this->config);
+            $filters = [
+                'from'      => $_GET['from'] ?? date('Y-m-d'),
+                'to'        => $_GET['to']   ?? date('Y-m-d'),
+                'page'      => 1,
+                'page_size' => 50,
+            ];
+            // Puedes mapear lo que venga de G4S a una tabla simple para el dashboard
+            $resp = $g4s->issuedListRT($filters);
+
+            $src  = $resp['Response']['Identifier'] ?? $resp['items'] ?? $resp['data'] ?? $resp;
+            $iter = is_array($src) && (array_keys($src) !== range(0, count($src)-1)) ? [$src] : (is_array($src) ? $src : []);
+            $rows = [];
+            foreach ($iter as $r) {
+                if (!is_array($r)) continue;
+                $rows[] = [
+                    'name'    => $r['ReceiverName'] ?? ($r['ReceiverTaxID'] ?? '—'),
+                    'checkIn' => $r['IssuedTimeStamp'] ?? ($r['fecha'] ?? ''),
+                    'checkOut'=> '',
+                ];
+            }
+            \App\Utils\Http::json(['ok'=>true,'data'=>$rows]);
+        } catch (\Throwable $e) {
+            \App\Utils\Http::json(['ok'=>false,'error'=>$e->getMessage()], 500);
+        }
+    }                   
+
     function is_assoc(array $arr): bool {
         return array_keys($arr) !== range(0, count($arr) - 1);
     }
@@ -1027,7 +1072,7 @@ class ApiController {
         }
     }
 
-/** Helper simple para logging */
+    /** Helper simple para logging */
     private function debugLog(string $file, array $data): void
     {
         $dir = __DIR__ . '/../../storage/logs';
@@ -1039,7 +1084,7 @@ class ApiController {
         );
     }
 
-/** Devuelve [hours, minutes, total] según tu lógica actual */
+    /** Devuelve [hours, minutes, total] según tu lógica actual */
     private function resolveTicketAmount(string $ticketNo, string $mode, ?float $customTotal): array
     {
         if ($mode === 'custom') {

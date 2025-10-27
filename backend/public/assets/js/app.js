@@ -747,16 +747,17 @@
                 <div class="form-group mt-3">
                   <label for="receptor_nit" class="form-label">NIT del cliente</label>
                   <input
-                    type="text"
-                    id="receptor_nit"
-                    class="form-control"
-                    placeholder="Solo números (ej. 1234567)"
-                    value="CF"
-                    inputmode="numeric"
-                    pattern="[0-9]*"
-                    autocomplete="off"
-                  />
-                  <small class="form-text text-muted" id="nitStatus">Escribe el NIT para consultar en SAT (G4S).</small>
+  type="text"
+  id="receptor_nit"
+  class="form-control"
+  placeholder='Escribe el NIT o "CF"'
+  value="CF"
+  autocomplete="off"
+/>
+<small class="form-text text-muted" id="nitStatus">
+  Escribe el NIT o “CF” (consumidor final). Si ingresas NIT, se consultará en SAT (G4S).
+</small>
+
                 </div>
                 <div class="input-group input-group-sm mt-2" data-role="customWrapper">
                   <span class="input-group-text">Q</span>
@@ -785,15 +786,41 @@
           const nitInput = form.querySelector('#receptor_nit');
           const nitStatus = form.querySelector('#nitStatus');
 
-          // Sanitiza a dígitos solamente
-          const onlyDigits = (s) => (s || '').replace(/\D+/g, '');
+          // Sanitiza a dígitos solamente (para NIT)
+const onlyDigits = (s) => (s || '').replace(/\D+/g, '');
 
-          // Pequeño debounce
-          let nitTimer = null;
-          const debounce = (fn, ms = 400) => (...args) => {
-            clearTimeout(nitTimer);
-            nitTimer = setTimeout(() => fn(...args), ms);
-          };
+// Debounce básico
+let nitTimer = null;
+const debounce = (fn, ms = 400) => (...args) => {
+  clearTimeout(nitTimer);
+  nitTimer = setTimeout(() => fn(...args), ms);
+};
+
+nitInput.addEventListener('input', debounce(() => {
+  const raw = nitInput.value.trim();
+  if (raw.toUpperCase() === 'CF') {
+    nitStatus.textContent = '✓ Consumidor final (CF)';
+    nitStatus.classList.remove('text-danger');
+    nitStatus.classList.add('text-success');
+    return;
+  }
+  if (raw === '') {
+    nitStatus.textContent = 'Escribe el NIT o “CF”.';
+    nitStatus.classList.remove('text-danger', 'text-success');
+    return;
+  }
+  const digits = onlyDigits(raw);
+  if (digits !== raw) {
+    nitInput.value = digits; // fuerza solo números para NIT (no afecta “CF”)
+  }
+  if (digits.length >= 4) {
+    lookupNit(digits); // tu función existente para consultar SAT vía backend
+  } else {
+    nitStatus.textContent = 'Ingresa al menos 4 dígitos para consultar.';
+    nitStatus.classList.remove('text-danger', 'text-success');
+  }
+}, 500));
+
 
           // Llamada al backend
           async function lookupNit(nit) {

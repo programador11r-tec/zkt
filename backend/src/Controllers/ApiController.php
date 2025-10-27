@@ -242,11 +242,11 @@ class ApiController {
             $pendingSql = "
                 SELECT COUNT(1)
                 FROM tickets t
-                WHERE t.status = 'CLOSED'
-                  AND EXISTS (SELECT 1 FROM payments p WHERE p.ticket_no = t.ticket_no)
+                WHERE t.status = 'OPEN'
+                  AND EXISTS (SELECT 1 FROM payments p WHERE p.plate = t.plate)
                   AND NOT EXISTS (
                     SELECT 1 FROM invoices i2
-                    WHERE i2.ticket_no = t.ticket_no
+                    WHERE i2.ticket_no = t.plate
                       AND i2.status IN ('PENDING','OK')
                   )
             ";
@@ -343,243 +343,357 @@ class ApiController {
         }
     }
 
-    public function syncRemoteParkRecords() {
-        try {
-            $baseUrl = rtrim((string) $this->config->get('HAMACHI_PARK_BASE_URL', ''), '/');
-            if ($baseUrl === '') {
-                Http::json(['ok' => false, 'error' => 'HAMACHI_PARK_BASE_URL no está configurado.'], 400);
-                return;
-            }
 
-            $accessToken = (string) ($_GET['access_token'] ?? $this->config->get('HAMACHI_PARK_ACCESS_TOKEN', ''));
-            if ($accessToken === '') {
-                Http::json(['ok' => false, 'error' => 'HAMACHI_PARK_ACCESS_TOKEN no está configurado.'], 400);
-                return;
-            }
 
-            $pageNo = (int) ($_GET['pageNo'] ?? $_GET['page'] ?? 1);
-            if ($pageNo < 1) {
-                $pageNo = 1;
-            }
-            $pageSize = (int) ($_GET['pageSize'] ?? $_GET['limit'] ?? 100);
-            if ($pageSize <= 0) {
-                $pageSize = 100;
-            }
-            $pageSize = min($pageSize, 1000);
+/////////////////////////////////////////////
+// Helpers de correlación y medición de tiempo
+/////////////////////////////////////////////
+private function newCorrelationId(string $prefix = 'cid'): string {
+    return $prefix . '-' . bin2hex(random_bytes(4)) . '-' . dechex(time());
+}
+private function msSince(float $t0): int {
+    return (int) round((microtime(true) - $t0) * 1000);
+}
 
-            $query = [
-                'pageNo' => $pageNo,
-                'pageSize' => $pageSize,
-                'access_token' => $accessToken,
-            ];
+/////////////////////////////////////////////////////////
+// Sincronización desde API remota (con logs detallados)
+/////////////////////////////////////////////////////////
+public function syncRemoteParkRecords() {
+    $cid = $this->newCorrelationId('sync');
+    $t0  = microtime(true);
 
-            $endpoint = $baseUrl . '/api/v2/parkTransaction/listParkRecordin?' . http_build_query($query);
-            $headers = ['Accept: application/json'];
-            $hostHeader = trim((string) $this->config->get('HAMACHI_PARK_HOST_HEADER', ''));
-            if ($hostHeader !== '') {
-                $headers[] = 'Host: ' . $hostHeader;
-            }
+    try {
+        Logger::info('park.sync.start', ['cid' => $cid]);
 
-            $verifySsl = strtolower((string) $this->config->get('HAMACHI_PARK_VERIFY_SSL', 'false')) === 'true';
+        $baseUrl = rtrim((string) $this->config->get('HAMACHI_PARK_BASE_URL', ''), '/');
+        if ($baseUrl === '') {
+            Logger::error('park.sync.no_base_url', ['cid' => $cid]);
+            Http::json(['ok' => false, 'error' => 'HAMACHI_PARK_BASE_URL no está configurado.'], 400);
+            return;
+        }
 
-            $ch = curl_init($endpoint);
-            curl_setopt_array($ch, [
-                CURLOPT_RETURNTRANSFER => true,
-                CURLOPT_CONNECTTIMEOUT => 10,
-                CURLOPT_TIMEOUT => 30,
-                CURLOPT_HTTPHEADER => $headers,
-            ]);
-            if (!$verifySsl) {
-                curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-                curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
-            }
+        $accessToken = (string) ($_GET['access_token'] ?? $this->config->get('HAMACHI_PARK_ACCESS_TOKEN', ''));
+        if ($accessToken === '') {
+            Logger::warning('park.sync.no_token', ['cid' => $cid]);
+            // sigue si tu API no exige token
+        }
 
-            $raw = curl_exec($ch);
-            if ($raw === false) {
-                $err = curl_error($ch) ?: 'Error desconocido';
-                curl_close($ch);
-                throw new \RuntimeException('Error al contactar API remota: ' . $err);
-            }
-            $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $pageNo   = (int) ($_GET['pageNo'] ?? $_GET['page'] ?? 1);
+        if ($pageNo < 1) $pageNo = 1;
+        $pageSize = (int) ($_GET['pageSize'] ?? $_GET['limit'] ?? 100);
+        if ($pageSize <= 0) $pageSize = 10;
+        $pageSize = min($pageSize, 1000);
+
+        $query = [
+            'pageNo'       => $pageNo,
+            'pageSize'     => $pageSize,
+            'access_token' => $accessToken,
+        ];
+        $endpoint = $baseUrl . '/api/v2/parkTransaction/listParkRecordin?' . http_build_query($query);
+
+        $headers = ['Accept: application/json'];
+        $hostHeader = trim((string) $this->config->get('HAMACHI_PARK_HOST_HEADER', ''));
+        if ($hostHeader !== '') $headers[] = 'Host: ' . $hostHeader;
+
+        $verifySsl = strtolower((string) $this->config->get('HAMACHI_PARK_VERIFY_SSL', 'false')) === 'true';
+        Logger::debug('park.sync.req', [
+            'cid'        => $cid,
+            'endpoint'   => $endpoint,
+            'headers'    => $headers,
+            'verify_ssl' => $verifySsl,
+            'pageNo'     => $pageNo,
+            'pageSize'   => $pageSize,
+        ]);
+
+        // cURL request con logs finos y ajustes de protocolo/timeout
+        $ch = curl_init($endpoint);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_CONNECTTIMEOUT => 15,
+            CURLOPT_TIMEOUT        => 35,
+            CURLOPT_HTTPHEADER     => $headers,
+            CURLOPT_NOSIGNAL       => true,
+            CURLOPT_TCP_KEEPALIVE  => 1,
+            CURLOPT_TCP_KEEPIDLE   => 30,
+            CURLOPT_TCP_KEEPINTVL  => 10,
+            CURLOPT_HTTP_VERSION   => CURL_HTTP_VERSION_1_1,
+        ]);
+        if (!$verifySsl) {
+            curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+            curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+        }
+
+        // Opcional: enrutar SNI/CONNECT_TO si se configura
+        $connectTo = trim((string)$this->config->get('HAMACHI_PARK_CONNECT_TO', '')); // ej: "localhost:8098:25.21.54.208:8098"
+        if ($connectTo !== '') {
+            curl_setopt($ch, CURLOPT_CONNECT_TO, [$connectTo]);
+            Logger::debug('http.connect_to', ['cid' => $cid, 'connect_to' => $connectTo]);
+        }
+
+        $raw = curl_exec($ch);
+        if ($raw === false) {
+            $err  = curl_error($ch) ?: 'Error desconocido';
+            $info = curl_getinfo($ch) ?: [];
             curl_close($ch);
 
-            if ($status < 200 || $status >= 300) {
-                $preview = substr($raw, 0, 500);
-                throw new \RuntimeException('API remota respondió ' . $status . ': ' . $preview);
-            }
-
-            $payload = json_decode($raw, true);
-            if (!is_array($payload)) {
-                throw new \RuntimeException('Respuesta remota inválida, no es JSON.');
-            }
-
-            $records = $this->extractParkRecords($payload);
-            if (!$records) {
-                Http::json([
-                    'ok' => true,
-                    'endpoint' => $endpoint,
-                    'fetched' => 0,
-                    'upserted' => 0,
-                    'skipped' => 0,
-                    'message' => 'La API remota no devolvió registros.',
-                ]);
-                return;
-            }
-
-            $normalized = [];
-            $skipped = 0;
-            foreach ($records as $row) {
-                if (!is_array($row)) {
-                    $skipped++;
-                    continue;
-                }
-                $ticket = $this->normalizeParkRecordRow($row);
-                if ($ticket === null) {
-                    $skipped++;
-                    continue;
-                }
-                $normalized[] = $ticket;
-            }
-
-            if (!$normalized) {
-                Http::json([
-                    'ok' => true,
-                    'endpoint' => $endpoint,
-                    'fetched' => count($records),
-                    'upserted' => 0,
-                    'skipped' => $skipped,
-                ]);
-                return;
-            }
-
-            $pdo = DB::pdo($this->config);
-            $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-
-            $upserted = $this->persistTickets($pdo, $normalized);
-
-            Logger::info('remote.park.sync_success', [
-                'endpoint' => $endpoint,
-                'normalized' => $upserted,
-                'skipped' => $skipped,
+            Logger::error('park.sync.http_failed', [
+                'cid'               => $cid,
+                'endpoint'          => $endpoint,
+                'error'             => $err,
+                'curl_info'         => $info,
+                'duration_ms'       => $this->msSince($t0),
+                'hint'              => 'Verifica IP/puerto, firewall, y que BASE_URL/CONNECT_TO sean correctos',
             ]);
+            throw new \RuntimeException('Error al contactar API remota: ' . $err);
+        }
 
+        $info   = curl_getinfo($ch) ?: [];
+        $status = (int)($info['http_code'] ?? 0);
+        curl_close($ch);
+
+        $len = strlen($raw);
+        Logger::info('park.sync.http_ok', [
+            'cid'               => $cid,
+            'status'            => $status,
+            'resp_bytes'        => $len,
+            'namelookup_time'   => $info['namelookup_time'] ?? null,
+            'connect_time'      => $info['connect_time'] ?? null,
+            'pretransfer_time'  => $info['pretransfer_time'] ?? null,
+            'starttransfer_time'=> $info['starttransfer_time'] ?? null,
+            'total_time'        => $info['total_time'] ?? null,
+            'primary_ip'        => $info['primary_ip'] ?? null,
+            'local_ip'          => $info['local_ip'] ?? null,
+        ]);
+
+        if ($status < 200 || $status >= 300) {
+            $preview = substr($raw, 0, 500);
+            Logger::error('park.sync.bad_status', ['cid' => $cid, 'status' => $status, 'preview' => $preview]);
+            throw new \RuntimeException('API remota respondió ' . $status . ': ' . $preview);
+        }
+
+        $payload = json_decode($raw, true);
+        if (!is_array($payload)) {
+            Logger::error('park.sync.non_json', ['cid' => $cid, 'preview' => substr($raw, 0, 300)]);
+            throw new \RuntimeException('Respuesta remota inválida, no es JSON.');
+        }
+
+        $records = $this->extractParkRecords($payload);
+        if (!$records) {
+            Logger::info('park.sync.no_records', ['cid' => $cid, 'endpoint' => $endpoint]);
             Http::json([
-                'ok' => true,
+                'ok'       => true,
                 'endpoint' => $endpoint,
-                'fetched' => count($records),
-                'upserted' => $upserted,
-                'skipped' => $skipped,
+                'fetched'  => 0,
+                'upserted' => 0,
+                'skipped'  => 0,
+                'message'  => 'La API remota no devolvió registros.',
             ]);
-        } catch (\Throwable $e) {
-            Logger::error('remote.park.sync_failed', ['error' => $e->getMessage()]);
-            Http::json(['ok' => false, 'error' => $e->getMessage()], 500);
+            return;
         }
+
+        $pdo = DB::pdo($this->config);
+        $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+
+        $upserted = $this->persistTickets($pdo, $records); // persistTickets normaliza adentro si lo prefieres
+
+        Logger::info('remote.park.sync_success', [
+            'cid'        => $cid,
+            'endpoint'   => $endpoint,
+            'fetched'    => count($records),
+            'upserted'   => $upserted,
+            'skipped'    => 0, // si normalizas fuera, ajusta
+            'total_ms'   => $this->msSince($t0),
+        ]);
+
+        Http::json([
+            'ok'       => true,
+            'endpoint' => $endpoint,
+            'fetched'  => count($records),
+            'upserted' => $upserted,
+            'skipped'  => 0,
+        ]);
+    } catch (\Throwable $e) {
+        Logger::error('remote.park.sync_failed', [
+            'cid'       => $cid,
+            'error'     => $e->getMessage(),
+            'total_ms'  => $this->msSince($t0),
+        ]);
+        Http::json(['ok' => false, 'error' => $e->getMessage()], 500);
+    }
+}
+
+//////////////////////////////////////////////////////////////////
+// Upsert de tickets + llamada a billing (logs separados por cid)
+//////////////////////////////////////////////////////////////////
+private function persistTickets(PDO $pdo, array $rows): int {
+    if (!$rows) return 0;
+
+    // Detecta driver
+    try {
+        $driver = strtolower((string) $pdo->getAttribute(PDO::ATTR_DRIVER_NAME));
+    } catch (\Throwable $e) {
+        $driver = 'mysql';
     }
 
-    private function persistTickets(PDO $pdo, array $rows): int {
-        if (!$rows) return 0;
+    // Columnas disponibles
+    $columns      = $this->getTableColumns($pdo, 'tickets');
+    $hasSource    = isset($columns['source']);
+    $hasRawJson   = isset($columns['raw_json']);
+    $hasUpdatedAt = isset($columns['updated_at']);
 
+    // Construye SQL upsert para tickets
+    $insertColumns = ['ticket_no','plate','status','entry_at','exit_at','duration_min','amount'];
+    $valuePlaceholders = [':ticket_no',':plate',':status',':entry_at',':exit_at',':duration_min',':amount'];
+    if ($hasSource)  { $insertColumns[] = 'source';   $valuePlaceholders[] = ':source'; }
+    if ($hasRawJson) { $insertColumns[] = 'raw_json'; $valuePlaceholders[] = ':raw_json'; }
+
+    if ($driver === 'sqlite') {
+        $updates = [
+            'plate=excluded.plate',
+            'status=excluded.status',
+            'entry_at=excluded.entry_at',
+            'exit_at=excluded.exit_at',
+            'duration_min=excluded.duration_min',
+            'amount=excluded.amount',
+        ];
+        if ($hasSource)    { $updates[] = 'source=excluded.source'; }
+        if ($hasRawJson)   { $updates[] = 'raw_json=excluded.raw_json'; }
+        if ($hasUpdatedAt) { $updates[] = "updated_at=datetime('now')"; }
+
+        $sql = sprintf(
+            'INSERT INTO tickets (%s) VALUES (%s) ON CONFLICT(ticket_no) DO UPDATE SET %s',
+            implode(',', $insertColumns),
+            implode(',', $valuePlaceholders),
+            implode(',', $updates)
+        );
+    } else {
+        $updates = [
+            'plate=VALUES(plate)',
+            'status=VALUES(status)',
+            'entry_at=VALUES(entry_at)',
+            'exit_at=VALUES(exit_at)',
+            'duration_min=VALUES(duration_min)',
+            'amount=VALUES(amount)',
+        ];
+        if ($hasSource)    { $updates[] = 'source=VALUES(source)'; }
+        if ($hasRawJson)   { $updates[] = 'raw_json=VALUES(raw_json)'; }
+        if ($hasUpdatedAt) { $updates[] = 'updated_at=NOW()'; }
+
+        $sql = sprintf(
+            'INSERT INTO tickets (%s) VALUES (%s) ON DUPLICATE KEY UPDATE %s',
+            implode(',', $insertColumns),
+            implode(',', $valuePlaceholders),
+            implode(',', $updates)
+        );
+    }
+
+    $stmt = $pdo->prepare($sql);
+    $touched = 0;
+    $idx = 0;
+
+    foreach ($rows as $rowRaw) {
+        $idx++;
+        // Si te llegan crudos, normaliza aquí:
+        $row = is_array($rowRaw) ? $this->normalizeParkRecordRow($rowRaw) : null;
+        if ($row === null) {
+            Logger::warning('tickets.normalize.skip', ['i' => $idx]);
+            continue;
+        }
+
+        $cid = $this->newCorrelationId('tkt');
+        $t0  = microtime(true);
+        Logger::info('tickets.upsert.begin', [
+            'cid' => $cid,
+            'i'   => $idx,
+            'ticket_no' => $row['ticket_no'] ?? null,
+            'plate'     => $row['plate'] ?? null,
+        ]);
+
+        $params = [
+            ':ticket_no'    => $row['ticket_no'],
+            ':plate'        => $row['plate'] ?? null,
+            ':status'       => $row['status'] ?? 'CLOSED',
+            ':entry_at'     => $row['entry_at'] ?? null,
+            ':exit_at'      => $row['exit_at'] ?? null,
+            ':duration_min' => $row['duration_min'] ?? null,
+            ':amount'       => $row['amount'] ?? null,
+        ];
+        if ($hasSource)  { $params[':source']   = $row['source'] ?? null; }
+        if ($hasRawJson) { $params[':raw_json'] = $row['raw_json'] ?? null; }
+
+        $stmt->execute($params);
+        $touched++;
+
+        Logger::info('tickets.upsert.ok', [
+            'cid' => $cid,
+            'i'   => $idx,
+            'ticket_no' => $row['ticket_no'] ?? null,
+            'elapsed_ms' => $this->msSince($t0),
+        ]);
+
+        // BILLING (aislado y con logs separados)
+        $b0 = microtime(true);
         try {
-            $driver = strtolower((string) $pdo->getAttribute(PDO::ATTR_DRIVER_NAME));
+            $billingEnabled = strtolower((string)$this->config->get('BILLING_ENABLED','true')) === 'true';
+            if (!$billingEnabled) {
+                Logger::info('billing.skip.disabled', ['cid' => $cid, 'ticket_no' => $row['ticket_no'] ?? null]);
+            } else {
+                Logger::info('billing.ensure.begin', [
+                    'cid' => $cid,
+                    'ticket_no' => $row['ticket_no'] ?? null,
+                    'plate'     => $row['plate'] ?? null,
+                ]);
+                $this->ensurePaymentStub($pdo, $row);
+                Logger::info('billing.ensure.done', [
+                    'cid' => $cid,
+                    'ticket_no' => $row['ticket_no'] ?? null,
+                    'elapsed_ms' => $this->msSince($b0),
+                ]);
+            }
         } catch (\Throwable $e) {
-            $driver = 'mysql';
+            Logger::error('billing.ensure.failed', [
+                'cid' => $cid,
+                'ticket_no' => $row['ticket_no'] ?? null,
+                'error' => $e->getMessage(),
+                'elapsed_ms' => $this->msSince($b0),
+            ]);
+            // no relanzar para no tumbar el ciclo
         }
 
-        $columns      = $this->getTableColumns($pdo, 'tickets');
-        $hasSource    = isset($columns['source']);
-        $hasRawJson   = isset($columns['raw_json']);
-        $hasUpdatedAt = isset($columns['updated_at']);
-
-        $insertColumns = ['ticket_no','plate','status','entry_at','exit_at','duration_min','amount'];
-        $valuePlaceholders = [':ticket_no',':plate',':status',':entry_at',':exit_at',':duration_min',':amount'];
-
-        if ($hasSource)  { $insertColumns[] = 'source';   $valuePlaceholders[] = ':source'; }
-        if ($hasRawJson) { $insertColumns[] = 'raw_json'; $valuePlaceholders[] = ':raw_json'; }
-
-        if ($driver === 'sqlite') {
-            $updates = [
-                'plate=excluded.plate',
-                'status=excluded.status',
-                'entry_at=excluded.entry_at',
-                'exit_at=excluded.exit_at',
-                'duration_min=excluded.duration_min',
-                'amount=excluded.amount',
-            ];
-            if ($hasSource)  { $updates[] = 'source=excluded.source'; }
-            if ($hasRawJson) { $updates[] = 'raw_json=excluded.raw_json'; }
-            if ($hasUpdatedAt) { $updates[] = "updated_at=datetime('now')"; }
-
-            $sql = sprintf(
-                'INSERT INTO tickets (%s) VALUES (%s) ON CONFLICT(ticket_no) DO UPDATE SET %s',
-                implode(',', $insertColumns),
-                implode(',', $valuePlaceholders),
-                implode(',', $updates)
-            );
-        } else {
-            $updates = [
-                'plate=VALUES(plate)',
-                'status=VALUES(status)',
-                'entry_at=VALUES(entry_at)',
-                'exit_at=VALUES(exit_at)',
-                'duration_min=VALUES(duration_min)',
-                'amount=VALUES(amount)',
-            ];
-            if ($hasSource)  { $updates[] = 'source=VALUES(source)'; }
-            if ($hasRawJson) { $updates[] = 'raw_json=VALUES(raw_json)'; }
-            if ($hasUpdatedAt) { $updates[] = 'updated_at=NOW()'; }
-
-            $sql = sprintf(
-                'INSERT INTO tickets (%s) VALUES (%s) ON DUPLICATE KEY UPDATE %s',
-                implode(',', $insertColumns),
-                implode(',', $valuePlaceholders),
-                implode(',', $updates)
-            );
-        }
-
-        $stmt = $pdo->prepare($sql);
-        $touched = 0;
-
-        foreach ($rows as $row) {
-            $params = [
-                ':ticket_no'    => $row['ticket_no'],
-                ':plate'        => $row['plate'] ?? null,
-                ':status'       => $row['status'] ?? 'CLOSED',
-                ':entry_at'     => $row['entry_at'] ?? null,
-                ':exit_at'      => $row['exit_at'] ?? null,
-                ':duration_min' => $row['duration_min'] ?? null,
-                ':amount'       => $row['amount'] ?? null,
-            ];
-            if ($hasSource)  { $params[':source']   = $row['source'] ?? null; }
-            if ($hasRawJson) { $params[':raw_json'] = $row['raw_json'] ?? null; }
-
-            $stmt->execute($params);
-            $touched++;
-
-            // crea stub en payments si no hay ninguno aún
-            $this->ensurePaymentStub($pdo, $row);
-        }
-
-        // NO tocar payments aquí con alias raros ni otras tablas
-        // NO llamar a persistFacturacion() para payments
-
-        return $touched;
+        Logger::info('tickets.upsert.end', [
+            'cid' => $cid,
+            'i'   => $idx,
+            'ticket_no' => $row['ticket_no'] ?? null,
+            'total_ms'  => $this->msSince($t0),
+        ]);
     }
 
-    private function ensurePaymentStub(PDO $pdo, array $t): void {
-        $ticketNo = trim((string)($t['ticket_no'] ?? ''));
-        if ($ticketNo === '') return;
+    return $touched;
+}
 
-        // Â¿ya hay algÃºn pago para este ticket?
+//////////////////////////////////////////////////////////
+// Stub/actualización de payment + llamada a vehicleBilling
+//////////////////////////////////////////////////////////
+private function ensurePaymentStub(PDO $pdo, array $t): void {
+    $cid = $this->newCorrelationId('bill');
+    $t0  = microtime(true);
+
+    try {
+        $ticketNo = trim((string)($t['ticket_no'] ?? ''));
+        $plate    = isset($t['plate']) ? trim((string)$t['plate']) : '';
+
+        if ($ticketNo === '') {
+            Logger::warning('billing.stub.skip_empty_ticket', ['cid' => $cid, 'row' => $t]);
+            return;
+        }
+
+        // ¿Existe ya payment?
         $chk = $pdo->prepare("SELECT 1 FROM payments WHERE ticket_no = :t LIMIT 1");
         $chk->execute([':t' => $ticketNo]);
-        if ($chk->fetchColumn()) {
-            return; // ya existe algo; no dupliques
-        }
+        $exists = (bool)$chk->fetchColumn();
 
-        // Elegimos una fecha razonable para paid_at (o lo dejamos NULL)
         $paidAt = $t['exit_at'] ?? $t['entry_at'] ?? null;
 
-        // Para compatibilidad MySQL/SQLite con NOW()
         try {
             $driver = strtolower((string)$pdo->getAttribute(PDO::ATTR_DRIVER_NAME));
         } catch (\Throwable $e) {
@@ -587,17 +701,204 @@ class ApiController {
         }
         $nowExpr = $driver === 'sqlite' ? "datetime('now')" : "NOW()";
 
-        // Inserta el stub. Si `paid_at` no permite NULL en tu esquema, usa $paidAt o $nowExpr.
-        $sql = "INSERT INTO payments (ticket_no, amount, method, paid_at, created_at)
-                VALUES (:ticket_no, :amount, :method, :paid_at, {$nowExpr})";
-        $ins = $pdo->prepare($sql);
-        $ins->execute([
-            ':ticket_no' => $ticketNo,
-            ':amount'    => 0.00,          // â€œsin pagosâ€ => 0.00
-            ':method'    => 'pending',     // marca clara de que es un stub
-            ':paid_at'   => $paidAt,       // o null si tu columna lo permite
+        // Asegura columna `billin`
+        $this->ensurePaymentsTableHasBillin($pdo);
+
+        // Llama a billing y obtén valor numérico; si no hay, 0
+        $resp      = $this->fetchVehicleBilling($plate, $cid);
+        $billValue = $resp['bill_value'] ?? 0;
+        if (!is_numeric($billValue)) $billValue = 0;
+        $billValue = (float)$billValue;
+
+        if (!$exists) {
+            // INSERT
+            $sql = "INSERT INTO payments (ticket_no, amount, method, paid_at, created_at, billin)
+                    VALUES (:ticket_no, :amount, :method, :paid_at, {$nowExpr}, :billin)";
+            $ins = $pdo->prepare($sql);
+            $ins->execute([
+                ':ticket_no' => $ticketNo,
+                ':amount'    => 0.00,
+                ':method'    => 'pending',
+                ':paid_at'   => $paidAt,
+                ':billin'    => $billValue,
+            ]);
+            Logger::info('billing.insert.ok', [
+                'cid' => $cid, 'ticket_no' => $ticketNo, 'billin' => $billValue, 'row_count' => $ins->rowCount()
+            ]);
+        } else {
+            // UPDATE (upsert branch)
+            $sql = "UPDATE payments
+                       SET billin = :billin,
+                           method = COALESCE(method, 'pending'),
+                           paid_at = COALESCE(paid_at, :paid_at)
+                     WHERE ticket_no = :t
+                     LIMIT 1";
+            $up  = $pdo->prepare($sql);
+            $up->execute([
+                ':billin'  => $billValue,
+                ':paid_at' => $paidAt,
+                ':t'       => $ticketNo,
+            ]);
+            Logger::info('billing.update.ok', [
+                'cid' => $cid, 'ticket_no' => $ticketNo, 'billin' => $billValue, 'row_count' => $up->rowCount()
+            ]);
+        }
+
+        Logger::info('billing.stub.done', ['cid' => $cid, 'ticket_no' => $ticketNo, 'ms' => $this->msSince($t0)]);
+    } catch (\PDOException $e) {
+        Logger::error('billing.stub.sql_failed', [
+            'cid' => $cid, 'ticket_no' => $t['ticket_no'] ?? null, 'sqlstate' => $e->getCode(), 'error' => $e->getMessage()
         ]);
+        // no relanzar
+    } catch (\Throwable $e) {
+        Logger::error('billing.stub.failed', [
+            'cid' => $cid, 'ticket_no' => $t['ticket_no'] ?? null, 'error' => $e->getMessage()
+        ]);
+        // no relanzar
     }
+}
+
+////////////////////////////////////////////////////////
+// Asegura columna `billin` en la tabla payments (logs)
+////////////////////////////////////////////////////////
+private function ensurePaymentsTableHasBillin(PDO $pdo): void {
+    $cid = $this->newCorrelationId('schema');
+    try {
+        Logger::debug('payments.ensure_billin.check', ['cid' => $cid]);
+        $columns = $this->getTableColumns($pdo, 'payments');
+
+        if (!isset($columns['billin'])) {
+            try {
+                $driver = strtolower((string)$pdo->getAttribute(PDO::ATTR_DRIVER_NAME));
+            } catch (\Throwable $e) {
+                $driver = 'mysql';
+            }
+
+            if ($driver === 'sqlite') {
+                $sql = "ALTER TABLE payments ADD COLUMN billin TEXT";
+                Logger::info('payments.ensure_billin.alter', ['cid' => $cid, 'driver' => $driver, 'sql' => $sql]);
+                $pdo->exec($sql);
+            } else {
+                $sql = "ALTER TABLE payments ADD COLUMN billin LONGTEXT NULL";
+                Logger::info('payments.ensure_billin.alter', ['cid' => $cid, 'driver' => $driver, 'sql' => $sql]);
+                $pdo->exec($sql);
+            }
+            Logger::info('payments.ensure_billin.created', ['cid' => $cid, 'driver' => $driver]);
+        } else {
+            Logger::debug('payments.ensure_billin.exists', ['cid' => $cid]);
+        }
+    } catch (\Throwable $e) {
+        Logger::error('payments.ensure_billin.failed', ['cid' => $cid, 'error' => $e->getMessage()]);
+        throw $e;
+    }
+}
+
+//////////////////////////////////////////////////////////////
+// Llamada a /api/v1/parkCost/vehicleBilling (con logs finos)
+//////////////////////////////////////////////////////////////
+private function fetchVehicleBilling(?string $plate, ?string $cid = null): array {
+    $cid = $cid ?: $this->newCorrelationId('vb');
+
+    $plate = trim((string)$plate);
+    if ($plate === '') {
+        Logger::warning('billing.http.skip_empty_plate', ['cid' => $cid]);
+        return ['status' => 0, 'body_raw' => '', 'json' => null, 'bill_value' => 0];
+    }
+
+    $baseUrl = rtrim((string)$this->config->get('HAMACHI_PARK_BASE_URL', ''), '/');
+    if ($baseUrl === '') {
+        Logger::error('billing.http.no_base_url', ['cid' => $cid]);
+        return ['status' => 0, 'body_raw' => '', 'json' => null, 'bill_value' => 0];
+    }
+
+    $endpoint = $baseUrl . '/api/v1/parkCost/vehicleBilling';
+    $accessToken = (string)($this->config->get('HAMACHI_PARK_ACCESS_TOKEN', ''));
+    if ($accessToken !== '') {
+        $endpoint .= (strpos($endpoint, '?') === false ? '?' : '&') . 'access_token=' . urlencode($accessToken);
+    }
+
+    $headers = ['Accept: application/json', 'Content-Type: application/json'];
+    $verifySsl = strtolower((string)$this->config->get('HAMACHI_PARK_VERIFY_SSL', 'false')) === 'true';
+
+    $body = json_encode(['carNumber' => $plate], JSON_UNESCAPED_UNICODE);
+
+    $ch = curl_init($endpoint);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_CONNECTTIMEOUT => 5,
+        CURLOPT_TIMEOUT        => 12,
+        CURLOPT_HTTPHEADER     => $headers,
+        CURLOPT_POST           => true,
+        CURLOPT_POSTFIELDS     => $body,
+        CURLOPT_NOSIGNAL       => true,
+        CURLOPT_HTTP_VERSION   => CURL_HTTP_VERSION_1_1,
+    ]);
+    if (!$verifySsl) {
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+    }
+
+    $raw = curl_exec($ch);
+    if ($raw === false) {
+        $err = curl_error($ch) ?: 'Error desconocido';
+        curl_close($ch);
+        Logger::error('billing.http.failed', ['cid' => $cid, 'error' => $err]);
+        return ['status' => 0, 'body_raw' => '', 'json' => null, 'bill_value' => 0];
+    }
+
+    $status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    $json = json_decode($raw, true);
+    if (!is_array($json)) {
+        Logger::warning('billing.http.non_json', ['cid' => $cid, 'status' => $status]);
+        return ['status' => $status, 'body_raw' => $raw, 'json' => null, 'bill_value' => 0];
+    }
+
+    // Buscar candidato de monto en data
+    $billValue = 0.0;
+    if (isset($json['data']) && is_array($json['data'])) {
+        foreach (['amount','total','totalCost','bill','cost'] as $k) {
+            if (isset($json['data'][$k]) && is_numeric($json['data'][$k])) {
+                $billValue = (float)$json['data'][$k];
+                break;
+            }
+        }
+    }
+
+    Logger::info('billing.http.ok', ['cid' => $cid, 'status' => $status, 'bill_value' => $billValue]);
+    return ['status' => $status, 'body_raw' => $raw, 'json' => $json, 'bill_value' => $billValue];
+}
+
+//////////////////////////////////////////////////////
+// Actualiza `payments.billin` (con logs y row count)
+//////////////////////////////////////////////////////
+private function upsertPaymentBillin(PDO $pdo, string $ticketNo, $billinValue, ?string $cid = null): void {
+    $cid = $cid ?: $this->newCorrelationId('billin');
+    $t0  = microtime(true);
+
+    $this->ensurePaymentsTableHasBillin($pdo);
+
+    // Si es texto vacío o nulo → 0
+    if ($billinValue === null || $billinValue === '' || !is_numeric($billinValue)) {
+        $billinValue = 0;
+    }
+
+    $sql = "UPDATE payments SET billin = :billin WHERE ticket_no = :t LIMIT 1";
+    $st  = $pdo->prepare($sql);
+    $st->execute([':billin' => $billinValue, ':t' => $ticketNo]);
+
+    Logger::info('payments.billin.update.ok', [
+        'cid' => $cid,
+        'ticket_no' => $ticketNo,
+        'billin' => $billinValue,
+        'affected' => $st->rowCount(),
+        'duration_ms' => $this->msSince($t0),
+    ]);
+}
+
+ 
+  
 
     private function extractParkRecords(array $payload): array {
         $candidates = [];

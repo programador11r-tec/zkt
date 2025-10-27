@@ -563,6 +563,22 @@
           </div>
         </div>`;
     }
+    async function loadList() {
+      tbody.innerHTML = `<tr><td colspan="5" class="text-muted">Consultando BD…</td></tr>`;
+      meta.textContent = '';
+      try {
+        const js = await fetchJSON(api('facturacion/list'));
+        if (!js.ok && js.error) throw new Error(js.error);
+        allRows = js.rows || [];
+        state.page = 1;
+        renderPage();
+      } catch (e) {
+        tbody.innerHTML = `<tr><td colspan="5" class="text-danger">Error: ${e.message}</td></tr>`;
+        meta.textContent = '';
+      }
+    }
+
+    loadList();
   }
 
   // ===== Facturación (tabla + Facturar) =====
@@ -656,6 +672,7 @@
 
     const buildPayload = (row) => ({
       ticket_no: row.ticket_no,
+      plate: row.plate,
       receptor_nit: row.receptor || 'CF',
       serie: row.serie || 'A',
       numero: row.numero || null,
@@ -994,6 +1011,7 @@ nitInput.addEventListener('input', debounce(() => {
 
         const requestPayload = {
           ticket_no: payload.ticket_no,
+          plate: payload.plate,
           receptor_nit: receptorNit,
           serie: payload.serie || 'A',
           numero: payload.numero || null,
@@ -1008,7 +1026,7 @@ nitInput.addEventListener('input', debounce(() => {
 
         // Opcional: inspecciona qué se envía
         // console.log('POST /api/fel/invoice =>', requestPayload);
-console.log('POST /api/fel/invoice =>', requestPayload);
+        //console.log('POST /api/fel/invoice =>', requestPayload);
 
         const js = await fetchJSON(api('fel/invoice'), {
           method: 'POST',
@@ -1016,10 +1034,10 @@ console.log('POST /api/fel/invoice =>', requestPayload);
           body: JSON.stringify(requestPayload),
         });
 
-        alert(`Factura enviada (${confirmation.label}). UUID ${js.uuid || '(verifique respuesta)'}`);
+        Dialog.ok(`Factura enviada (${confirmation.label}). UUID ${js.uuid || '(verifique respuesta)'}`, 'FEL enviado');
         await loadList();
       } catch (e) {
-        alert('Error al facturar: ' + e.message);
+        Dialog.err(e, 'Error al facturar');
       } finally {
         btn.disabled = false;
         btn.textContent = originalText;
@@ -1050,7 +1068,7 @@ console.log('POST /api/fel/invoice =>', requestPayload);
           const disabled = d.uuid ? 'disabled' : '';
           return `
             <tr>
-              <td>${escapeHtml(d.ticket_no ?? '')}</td>
+              <td>${escapeHtml(d.plate ?? '(sin placa)')}</td>
               <td>${escapeHtml(d.fecha ?? '')}</td>
               <td class="text-end">${totalFmt}</td>
               <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(d.uuid ?? '')}</td>
@@ -1216,7 +1234,7 @@ console.log('POST /api/fel/invoice =>', requestPayload);
     const openPrintWindow = (html) => {
       const w = window.open('', '_blank');
       if (!w) {
-        alert('Permite ventanas emergentes para mostrar el reporte.');
+        Dialog.warn('Permite ventanas emergentes para mostrar el reporte.', 'Ventana bloqueada');
         return;
       }
       w.document.write(html);
@@ -1225,7 +1243,7 @@ console.log('POST /api/fel/invoice =>', requestPayload);
 
     const exportCsv = (filename, headers, rows) => {
       if (!rows.length) {
-        alert('No hay datos para exportar');
+        Dialog.info('No hay datos para exportar', 'Exportación CSV')
         return;
       }
       const headerLine = headers.map((h) => `"${h.label}"`).join(',');
@@ -1293,7 +1311,7 @@ console.log('POST /api/fel/invoice =>', requestPayload);
 
       const tableRows = rows.length ? rows.map((row) => `
         <tr>
-          <td>${escapeHtml(row.ticket_no)}</td>
+          <td>${escapeHtml(row.plate)}</td>
           <td>${escapeHtml(row.receptor_nit ?? 'CF')}</td>
           <td>${escapeHtml(formatTicketStatus(row.status))}</td>
           <td>${escapeHtml(formatDateValue(row.entry_at))}</td>
@@ -1804,7 +1822,7 @@ if (nitInput) {
         const statusClass = status === 'CLOSED' ? 'bg-success-subtle text-success' : status === 'OPEN' ? 'bg-warning-subtle text-warning' : 'bg-secondary-subtle text-secondary';
         return `
           <tr>
-            <td><span class="fw-semibold">${escapeHtml(row.ticket_no)}</span></td>
+            <td><span class="fw-semibold">${escapeHtml(row.plate)}</span></td>
             <td>${escapeHtml(row.receptor_nit ?? 'CF')}</td>
             <td><span class="badge ${statusClass}">${escapeHtml(formatTicketStatus(row.status))}</span></td>
             <td>${escapeHtml(formatDateValue(row.entry_at))}</td>
@@ -2092,7 +2110,7 @@ if (nitInput) {
     await fetchInvoiceReport();
   }
 
-  // ===== Ajustes (igual que lo tenías) =====
+  // ===== Ajustes  =====
   async function renderSettings() {
     app.innerHTML = `
       <div class="card shadow-sm">
@@ -2303,14 +2321,15 @@ if (nitInput) {
         manualSyncBtn.classList.add('is-loading');
         manualSyncBtn.disabled = true;
         let shouldRefresh = false;
+        const m = Dialog.loading({ title:'Sincronizando', message:'Consultando registros remotos…' });
         try {
-          const result = await triggerHamachiSync({ silent: false, force: true });
+          await triggerHamachiSync({ silent:false, force:true });
           await loadSettings(true);
           shouldRefresh = true;
         } catch (error) {
-          console.error('No se pudo sincronizar los registros remotos', error);
-          window.alert('No se pudo sincronizar los registros remotos. Inténtalo nuevamente en unos instantes.');
+          Dialog.err(error, 'No se pudo sincronizar');
         } finally {
+          m.close();
           manualSyncBtn.classList.remove('is-loading');
           manualSyncBtn.disabled = false;
           if (shouldRefresh && currentPage === 'settings') {
@@ -2347,42 +2366,47 @@ if (nitInput) {
 
       hourlyForm.addEventListener('submit', async (event) => {
         event.preventDefault();
+
         const rawHourly = hourlyInput.value.trim();
-        const body = { hourly_rate: rawHourly === '' ? null : rawHourly };
-        if (monthlyInput) {
-          const rawMonthly = monthlyInput.value.trim();
-          body.monthly_rate = rawMonthly === '' ? null : rawMonthly;
-        }
+        const rawMonthly = monthlyInput ? monthlyInput.value.trim() : '';
+
+        // Normaliza a número o null
+        const body = {
+          hourly_rate: rawHourly === '' ? null : Number(rawHourly),
+          monthly_rate: monthlyInput ? (rawMonthly === '' ? null : Number(rawMonthly)) : undefined,
+        };
+
         if (hourlySave) {
           hourlySave.disabled = true;
           hourlySave.classList.add('is-loading');
         }
         if (hourlyFeedback) hourlyFeedback.classList.add('d-none');
+
         try {
-          // justo antes del fetch en Facturar
-console.debug('[FACTURAR → payload]', requestPayload);
-const js = await fetchJSON(api('fel/invoice'), {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify(requestPayload),
-});
-console.debug('[FACTURAR ← respuesta]', js);
+          // ✅ Solo guardar tarifas (NADA de fel/invoice aquí)
           await fetchJSON(api('settings/hourly-rate'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
           });
+
+          // refresca y muestra valores formateados
           const refreshed = await loadSettings(true);
+
           const refreshedRate = refreshed?.billing?.hourly_rate ?? null;
-          hourlyInput.value = refreshedRate !== null && refreshedRate !== undefined && refreshedRate !== ''
-            ? Number(refreshedRate).toFixed(2)
-            : '';
+          hourlyInput.value =
+            refreshedRate !== null && refreshedRate !== undefined && refreshedRate !== ''
+              ? Number(refreshedRate).toFixed(2)
+              : '';
+
           if (monthlyInput) {
             const refreshedMonthly = refreshed?.billing?.monthly_rate ?? null;
-            monthlyInput.value = refreshedMonthly !== null && refreshedMonthly !== undefined && refreshedMonthly !== ''
-              ? Number(refreshedMonthly).toFixed(2)
-              : '';
+            monthlyInput.value =
+              refreshedMonthly !== null && refreshedMonthly !== undefined && refreshedMonthly !== ''
+                ? Number(refreshedMonthly).toFixed(2)
+                : '';
           }
+
           if (hourlyFeedback) {
             const hasHourly = hourlyInput.value !== '';
             const hasMonthly = monthlyInput ? monthlyInput.value !== '' : false;
@@ -2392,7 +2416,7 @@ console.debug('[FACTURAR ← respuesta]', js);
             hourlyFeedback.classList.remove('d-none');
           }
         } catch (error) {
-          alert('No se pudo guardar la tarifa: ' + error.message);
+          Dialog.err(error, 'No se pudo guardar la tarifa');
         } finally {
           if (hourlySave) {
             hourlySave.classList.remove('is-loading');
@@ -2400,6 +2424,7 @@ console.debug('[FACTURAR ← respuesta]', js);
           }
         }
       });
+
     }
   }
 

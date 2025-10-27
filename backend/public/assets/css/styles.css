@@ -866,3 +866,86 @@ body.modal-open {
   background: linear-gradient(135deg, var(--brand-600), var(--brand-500));
   box-shadow: 0 18px 40px rgba(13, 202, 240, 0.24);
 }
+
+/* Overlay 100% pantalla y centrado real */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(10, 15, 25, .55);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  z-index: 9999;                /* más alto que cualquier card */
+  animation: overlayIn .18s ease-out;
+}
+
+/* Card siempre centrada, tamaño controlado y animación suave */
+.modal-card {
+  width: min(640px, 92vw);
+  max-height: min(86vh, 800px);
+  overflow: auto;
+  background: var(--modal-bg, #0f1320);
+  color: var(--modal-fg, #f6f7fb);
+  border-radius: 16px;
+  box-shadow: 0 24px 60px rgba(0,0,0,.45), 0 0 0 1px rgba(255,255,255,.06) inset;
+  transform: translateY(8px) scale(.98);
+  opacity: 0;
+  animation: cardIn .22s ease-out forwards;
+}
+
+@keyframes overlayIn { from { opacity: 0 } to { opacity: 1 } }
+@keyframes cardIn { to { transform: translateY(0) scale(1); opacity: 1 } }
+
+/* Header / Body / Footer */
+.modal-head { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:14px 16px; border-bottom: 1px solid rgba(255,255,255,.06); }
+.modal-title { font-size: 16px; font-weight: 700; letter-spacing:.2px }
+.modal-body { padding: 16px; font-size: 14px; color: #cfd6e6 }
+.modal-foot { display:flex; justify-content:flex-end; gap:10px; padding: 14px 16px; border-top: 1px solid rgba(255,255,255,.06); }
+
+.modal-close {
+  appearance: none; border:0; background:transparent; color:inherit;
+  font-size: 22px; line-height: 1; padding: 2px 6px; opacity:.7; cursor:pointer;
+}
+.modal-close:hover { opacity: 1 }
+
+/* Variantes */
+.badge { font-size: 11px; padding: 4px 8px; border-radius: 999px; font-weight: 700; letter-spacing:.3px; opacity:.95; }
+.badge.ok     { background:#163e2b; color:#9af3c7 }
+.badge.warn   { background:#3e2f16; color:#ffd27a }
+.badge.danger { background:#3e1620; color:#ff96b0 }
+.badge.info   { background:#162a3e; color:#9ad5ff }
+
+
+/* Loading state (ruedita + barra) */
+.modal-card.is-loading .modal-foot { display: none; }
+.modal-loading {
+  display:flex; align-items:center; gap:10px; font-weight:600;
+}
+.modal-loading .spinner {
+  width: 18px; height: 18px; border-radius: 50%;
+  border: 2px solid currentColor; border-top-color: transparent;
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.modal-progress {
+  position: relative; height: 3px; border-radius: 999px;
+  background: rgba(255,255,255,.08); overflow: hidden; margin-top: 10px;
+}
+.modal-progress::after {
+  content:''; position:absolute; inset:0 auto 0 0; width:40%;
+  background: linear-gradient(90deg, rgba(255,255,255,.1), rgba(255,255,255,.55), rgba(255,255,255,.1));
+  animation: indeterminate 1.2s ease-in-out infinite;
+}
+@keyframes indeterminate {
+  0% { left: -40% } 50% { left: 60% } 100% { left: 100% }
+}
+
+/* Tema claro opcional */
+@media (prefers-color-scheme: light) {
+  :root { --modal-bg: #ffffff; --modal-fg:#111827 }
+  .modal-body{ color:#374151 }
+  .modal-card { box-shadow: 0 24px 60px rgba(0,0,0,.18), 0 0 0 1px rgba(0,0,0,.06) inset }
+}
+

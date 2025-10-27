@@ -523,10 +523,11 @@ class ApiController {
     //////////////////////////////////////////////////////////////////
     // Upsert de tickets + llamada a billing (logs separados por cid)
     //////////////////////////////////////////////////////////////////
-    private function persistTickets(PDO $pdo, array $rows): int {
+    private function persistTickets(PDO $pdo, array $rows): int
+    {
         if (!$rows) return 0;
 
-        // Detecta driver
+        // Detecta driver (por si quieres tratar NOW()/datetime('now'))
         try {
             $driver = strtolower((string) $pdo->getAttribute(PDO::ATTR_DRIVER_NAME));
         } catch (\Throwable $e) {
@@ -539,59 +540,30 @@ class ApiController {
         $hasRawJson   = isset($columns['raw_json']);
         $hasUpdatedAt = isset($columns['updated_at']);
 
-        // Construye SQL upsert para tickets
+        // --- PREPARED: existencia ---
+        $existsSql = 'SELECT 1 FROM tickets WHERE ticket_no = :ticket_no LIMIT 1';
+        $existsStmt = $pdo->prepare($existsSql);
+
+        // --- PREPARED: insert puro (sin upsert/merge) ---
         $insertColumns = ['ticket_no','plate','status','entry_at','exit_at','duration_min','amount'];
-        $valuePlaceholders = [':ticket_no',':plate',':status',':entry_at',':exit_at',':duration_min',':amount'];
-        if ($hasSource)  { $insertColumns[] = 'source';   $valuePlaceholders[] = ':source'; }
-        if ($hasRawJson) { $insertColumns[] = 'raw_json'; $valuePlaceholders[] = ':raw_json'; }
+        $placeholders  = [':ticket_no',':plate',':status',':entry_at',':exit_at',':duration_min',':amount'];
 
-        if ($driver === 'sqlite') {
-            $updates = [
-                'plate=excluded.plate',
-                'status=excluded.status',
-                'entry_at=excluded.entry_at',
-                'exit_at=excluded.exit_at',
-                'duration_min=excluded.duration_min',
-                'amount=excluded.amount',
-            ];
-            if ($hasSource)    { $updates[] = 'source=excluded.source'; }
-            if ($hasRawJson)   { $updates[] = 'raw_json=excluded.raw_json'; }
-            if ($hasUpdatedAt) { $updates[] = "updated_at=datetime('now')"; }
+        if ($hasSource)    { $insertColumns[] = 'source';    $placeholders[] = ':source'; }
+        if ($hasRawJson)   { $insertColumns[] = 'raw_json';  $placeholders[] = ':raw_json'; }
+        if ($hasUpdatedAt) { $insertColumns[] = 'updated_at'; $placeholders[] = ':updated_at'; }
 
-            $sql = sprintf(
-                'INSERT INTO tickets (%s) VALUES (%s) ON CONFLICT(ticket_no) DO UPDATE SET %s',
-                implode(',', $insertColumns),
-                implode(',', $valuePlaceholders),
-                implode(',', $updates)
-            );
-        } else {
-            $updates = [
-                'plate=VALUES(plate)',
-                'status=VALUES(status)',
-                'entry_at=VALUES(entry_at)',
-                'exit_at=VALUES(exit_at)',
-                'duration_min=VALUES(duration_min)',
-                'amount=VALUES(amount)',
-            ];
-            if ($hasSource)    { $updates[] = 'source=VALUES(source)'; }
-            if ($hasRawJson)   { $updates[] = 'raw_json=VALUES(raw_json)'; }
-            if ($hasUpdatedAt) { $updates[] = 'updated_at=NOW()'; }
+        $insertSql = sprintf(
+            'INSERT INTO tickets (%s) VALUES (%s)',
+            implode(',', $insertColumns),
+            implode(',', $placeholders)
+        );
+        $insertStmt = $pdo->prepare($insertSql);
 
-            $sql = sprintf(
-                'INSERT INTO tickets (%s) VALUES (%s) ON DUPLICATE KEY UPDATE %s',
-                implode(',', $insertColumns),
-                implode(',', $valuePlaceholders),
-                implode(',', $updates)
-            );
-        }
-
-        $stmt = $pdo->prepare($sql);
-        $touched = 0;
+        $inserted = 0;
         $idx = 0;
 
         foreach ($rows as $rowRaw) {
             $idx++;
-            // Si te llegan crudos, normaliza aquí:
             $row = is_array($rowRaw) ? $this->normalizeParkRecordRow($rowRaw) : null;
             if ($row === null) {
                 Logger::warning('tickets.normalize.skip', ['i' => $idx]);
@@ -600,74 +572,93 @@ class ApiController {
 
             $cid = $this->newCorrelationId('tkt');
             $t0  = microtime(true);
-            Logger::info('tickets.upsert.begin', [
-                'cid' => $cid,
-                'i'   => $idx,
-                'ticket_no' => $row['ticket_no'] ?? null,
-                'plate'     => $row['plate'] ?? null,
+
+            $ticketNo = $row['ticket_no'] ?? null;
+            $plate    = $row['plate'] ?? null;
+
+            Logger::info('tickets.check.begin', [
+                'cid' => $cid, 'i' => $idx, 'ticket_no' => $ticketNo, 'plate' => $plate
             ]);
 
+            // 1) ¿Existe ya?
+            $existsStmt->execute([':ticket_no' => $ticketNo]);
+            $exists = (bool) $existsStmt->fetchColumn();
+
+            if ($exists) {
+                // NO insertar / NO actualizar / NO billing: solo saltar
+                Logger::info('tickets.skip.exists', [
+                    'cid' => $cid,
+                    'i'   => $idx,
+                    'ticket_no' => $ticketNo,
+                    'elapsed_ms' => $this->msSince($t0),
+                ]);
+                continue;
+            }
+
+            // 2) Insert puro
             $params = [
-                ':ticket_no'    => $row['ticket_no'],
-                ':plate'        => $row['plate'] ?? null,
+                ':ticket_no'    => $ticketNo,
+                ':plate'        => $plate,
                 ':status'       => $row['status'] ?? 'CLOSED',
                 ':entry_at'     => $row['entry_at'] ?? null,
                 ':exit_at'      => $row['exit_at'] ?? null,
                 ':duration_min' => $row['duration_min'] ?? null,
                 ':amount'       => $row['amount'] ?? null,
             ];
-            if ($hasSource)  { $params[':source']   = $row['source'] ?? null; }
-            if ($hasRawJson) { $params[':raw_json'] = $row['raw_json'] ?? null; }
+            if ($hasSource)    { $params[':source']    = $row['source'] ?? null; }
+            if ($hasRawJson)   { $params[':raw_json']  = $row['raw_json'] ?? null; }
+            if ($hasUpdatedAt) {
+                // valor para updated_at solo en el INSERT
+                $params[':updated_at'] = ($driver === 'sqlite')
+                    ? (new \DateTime('now'))->format('Y-m-d H:i:s')
+                    : (new \DateTime('now'))->format('Y-m-d H:i:s'); // si tu columna tiene DEFAULT ya podrías omitirlo
+            }
 
-            $stmt->execute($params);
-            $touched++;
+            Logger::info('tickets.insert.begin', [
+                'cid' => $cid, 'i' => $idx, 'ticket_no' => $ticketNo, 'plate' => $plate
+            ]);
 
-            Logger::info('tickets.upsert.ok', [
+            $insertStmt->execute($params);
+            $inserted++;
+
+            Logger::info('tickets.insert.ok', [
                 'cid' => $cid,
                 'i'   => $idx,
-                'ticket_no' => $row['ticket_no'] ?? null,
+                'ticket_no' => $ticketNo,
                 'elapsed_ms' => $this->msSince($t0),
             ]);
 
-            // BILLING (aislado y con logs separados)
+            // 3) BILLING: solo para nuevos inserts
             $b0 = microtime(true);
             try {
                 $billingEnabled = strtolower((string)$this->config->get('BILLING_ENABLED','true')) === 'true';
                 if (!$billingEnabled) {
-                    Logger::info('billing.skip.disabled', ['cid' => $cid, 'ticket_no' => $row['ticket_no'] ?? null]);
+                    Logger::info('billing.skip.disabled', ['cid' => $cid, 'ticket_no' => $ticketNo]);
                 } else {
-                    Logger::info('billing.ensure.begin', [
-                        'cid' => $cid,
-                        'ticket_no' => $row['ticket_no'] ?? null,
-                        'plate'     => $row['plate'] ?? null,
-                    ]);
+                    Logger::info('billing.ensure.begin', ['cid' => $cid, 'ticket_no' => $ticketNo, 'plate' => $plate]);
                     $this->ensurePaymentStub($pdo, $row);
-                    Logger::info('billing.ensure.done', [
-                        'cid' => $cid,
-                        'ticket_no' => $row['ticket_no'] ?? null,
-                        'elapsed_ms' => $this->msSince($b0),
-                    ]);
+                    Logger::info('billing.ensure.done', ['cid' => $cid, 'ticket_no' => $ticketNo, 'elapsed_ms' => $this->msSince($b0)]);
                 }
             } catch (\Throwable $e) {
                 Logger::error('billing.ensure.failed', [
                     'cid' => $cid,
-                    'ticket_no' => $row['ticket_no'] ?? null,
+                    'ticket_no' => $ticketNo,
                     'error' => $e->getMessage(),
                     'elapsed_ms' => $this->msSince($b0),
                 ]);
-                // no relanzar para no tumbar el ciclo
             }
 
-            Logger::info('tickets.upsert.end', [
+            Logger::info('tickets.process.end', [
                 'cid' => $cid,
                 'i'   => $idx,
-                'ticket_no' => $row['ticket_no'] ?? null,
+                'ticket_no' => $ticketNo,
                 'total_ms'  => $this->msSince($t0),
             ]);
         }
 
-        return $touched;
+        return $inserted; // cantidad realmente insertada
     }
+
 
     //////////////////////////////////////////////////////////
     // Stub/actualización de payment + llamada a vehicleBilling
@@ -699,8 +690,9 @@ class ApiController {
             }
             $nowExpr = $driver === 'sqlite' ? "datetime('now')" : "NOW()";
 
-            // Asegura columna `billin`
+            // Asegurar columnas requeridas
             $this->ensurePaymentsTableHasBillin($pdo);
+            $this->ensurePaymentsTableHasPlate($pdo); // ← NUEVO
 
             // Llama a billing y obtén valor numérico; si no hay, 0
             $resp      = $this->fetchVehicleBilling($plate, $cid);
@@ -709,9 +701,9 @@ class ApiController {
             $billValue = (float)$billValue;
 
             if (!$exists) {
-                // INSERT
-                $sql = "INSERT INTO payments (ticket_no, amount, method, paid_at, created_at, billin)
-                        VALUES (:ticket_no, :amount, :method, :paid_at, {$nowExpr}, :billin)";
+                // INSERT incluye 'plate'
+                $sql = "INSERT INTO payments (ticket_no, amount, method, paid_at, created_at, billin, plate)
+                        VALUES (:ticket_no, :amount, :method, :paid_at, {$nowExpr}, :billin, :plate)";
                 $ins = $pdo->prepare($sql);
                 $ins->execute([
                     ':ticket_no' => $ticketNo,
@@ -719,26 +711,29 @@ class ApiController {
                     ':method'    => 'pending',
                     ':paid_at'   => $paidAt,
                     ':billin'    => $billValue,
+                    ':plate'     => $plate,
                 ]);
                 Logger::info('billing.insert.ok', [
-                    'cid' => $cid, 'ticket_no' => $ticketNo, 'billin' => $billValue, 'row_count' => $ins->rowCount()
+                    'cid' => $cid, 'ticket_no' => $ticketNo, 'billin' => $billValue, 'plate' => $plate, 'row_count' => $ins->rowCount()
                 ]);
             } else {
-                // UPDATE (upsert branch)
+                // UPDATE incluye upsert suave de 'plate' (solo si está vacío/nulo)
                 $sql = "UPDATE payments
                         SET billin = :billin,
                             method = COALESCE(method, 'pending'),
-                            paid_at = COALESCE(paid_at, :paid_at)
+                            paid_at = COALESCE(paid_at, :paid_at),
+                            plate  = CASE WHEN plate IS NULL OR plate = '' THEN :plate ELSE plate END
                         WHERE ticket_no = :t
                         LIMIT 1";
                 $up  = $pdo->prepare($sql);
                 $up->execute([
                     ':billin'  => $billValue,
                     ':paid_at' => $paidAt,
+                    ':plate'   => $plate,
                     ':t'       => $ticketNo,
                 ]);
                 Logger::info('billing.update.ok', [
-                    'cid' => $cid, 'ticket_no' => $ticketNo, 'billin' => $billValue, 'row_count' => $up->rowCount()
+                    'cid' => $cid, 'ticket_no' => $ticketNo, 'billin' => $billValue, 'plate' => $plate, 'row_count' => $up->rowCount()
                 ]);
             }
 
@@ -747,14 +742,53 @@ class ApiController {
             Logger::error('billing.stub.sql_failed', [
                 'cid' => $cid, 'ticket_no' => $t['ticket_no'] ?? null, 'sqlstate' => $e->getCode(), 'error' => $e->getMessage()
             ]);
-            // no relanzar
         } catch (\Throwable $e) {
             Logger::error('billing.stub.failed', [
                 'cid' => $cid, 'ticket_no' => $t['ticket_no'] ?? null, 'error' => $e->getMessage()
             ]);
-            // no relanzar
         }
     }
+
+    /**
+     * Asegura que la tabla payments tenga la columna 'plate'.
+     * - MySQL: VARCHAR(32) NULL
+     * - SQLite: TEXT NULL
+     */
+    private function ensurePaymentsTableHasPlate(PDO $pdo): void {
+        try {
+            $driver = strtolower((string)$pdo->getAttribute(PDO::ATTR_DRIVER_NAME));
+        } catch (\Throwable $e) {
+            $driver = 'mysql';
+        }
+
+        if ($driver === 'sqlite') {
+            // Revisar PRAGMA table_info
+            $stmt = $pdo->query("PRAGMA table_info('payments')");
+            $cols = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
+            $has  = false;
+            foreach ($cols as $c) {
+                if (isset($c['name']) && strtolower($c['name']) === 'plate') { $has = true; break; }
+            }
+            if (!$has) {
+                $pdo->exec("ALTER TABLE payments ADD COLUMN plate TEXT NULL");
+            }
+            return;
+        }
+
+        // MySQL / MariaDB
+        $sql = "SELECT 1
+                FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE()
+                AND TABLE_NAME = 'payments'
+                AND COLUMN_NAME = 'plate'
+                LIMIT 1";
+        $rs  = $pdo->query($sql);
+        $has = $rs && (bool)$rs->fetchColumn();
+        if (!$has) {
+            $pdo->exec("ALTER TABLE payments ADD COLUMN plate VARCHAR(32) NULL");
+        }
+    }
+
 
     ////////////////////////////////////////////////////////
     // Asegura columna `billin` en la tabla payments (logs)
@@ -1299,161 +1333,159 @@ class ApiController {
         return array_keys($arr) !== range(0, count($arr) - 1);
     }
 
-   public function invoiceOne(): void
-{
-    header('Content-Type: application/json; charset=utf-8');
+    public function invoiceOne(): void
+    {
+        header('Content-Type: application/json; charset=utf-8');
 
-    try {
-        $raw  = file_get_contents('php://input') ?: '{}';
-        $body = json_decode($raw, true) ?: [];
-
-        $ticketNo    = trim((string)($body['ticket_no'] ?? ''));
-        $receptorNit = strtoupper(trim((string)($body['receptor_nit'] ?? 'CF'))); // ← permite CF
-        $mode        = (string)($body['mode'] ?? 'hourly'); // hourly | monthly | custom
-        $customTotal = isset($body['custom_total']) ? (float)$body['custom_total'] : null;
-
-        // Log de entrada
-        $this->debugLog('fel_invoice_in.txt', [
-            'body'   => $body,
-            'server' => $_SERVER,
-        ]);
-
-        if ($ticketNo === '') {
-            echo json_encode(['ok' => false, 'error' => 'ticket_no requerido']); return;
-        }
-        if ($mode === 'custom' && (!is_finite($customTotal) || $customTotal <= 0)) {
-            echo json_encode(['ok' => false, 'error' => 'custom_total inválido']); return;
-        }
-
-        // Validación opcional: si NO es CF, entonces debe ser solo dígitos
-        if ($receptorNit !== 'CF' && !ctype_digit($receptorNit)) {
-            echo json_encode(['ok' => false, 'error' => 'NIT inválido (use CF o solo dígitos)']); return;
-        }
-
-        // 1) Calcula montos (puede que tu función devuelva 3 o 4 valores; manejamos ambos)
-        $calc = $this->resolveTicketAmount($ticketNo, $mode, $customTotal);
-        // Normaliza retorno
-        $hours   = (float)($calc[0] ?? 0);
-        $minutes = (int)($calc[1] ?? 0);
-        $total   = (float)($calc[2] ?? 0);
-        $extra   = is_array($calc[3] ?? null) ? $calc[3] : [];
-
-        $durationMin = (int)($hours * 60 + $minutes);
-        $hoursBilled = (int)ceil($durationMin / 60);
-
-        // 2) Cliente G4S + payload
-        $cfg    = new \Config\Config(__DIR__ . '/../../.env');
-        $client = new \App\Services\G4SClient($cfg);
-
-        $payload = [
-            'ticket_no'    => $ticketNo,
-            'receptor_nit' => $receptorNit,          // ← puede ser “CF”
-            'total'        => $total,
-            'hours'        => $hours,
-            'minutes'      => $minutes,
-            'mode'         => $mode,
-            // 'receptor_nombre' => ($receptorNit === 'CF' ? 'CONSUMIDOR FINAL' : null), // si tu G4S lo admite
-        ];
-
-        // 3) Certificación
-        $res = $client->submitInvoice($payload);
-
-        $this->debugLog('fel_invoice_out.txt', [
-            'request_payload' => $payload,
-            'g4s_response'    => $res,
-        ]);
-
-        $ok    = (bool)($res['ok'] ?? false);
-        $uuid  = $res['uuid']  ?? null;
-        $error = $res['error'] ?? null;
-
-        // 4) Persistir en BD: invoices + update tickets.status = OPEN
-        $dsn  = $cfg->get('DB_DSN',  'mysql:host=127.0.0.1;dbname=zkt;charset=utf8mb4');
-        $user = $cfg->get('DB_USER', 'root');
-        $pass = $cfg->get('DB_PASS', '');
-
-        $pdo = new \PDO($dsn, $user, $pass, [
-            \PDO::ATTR_ERRMODE            => \PDO::ERRMODE_EXCEPTION,
-            \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC,
-        ]);
-
-        $pdo->beginTransaction();
-
-        // Intenta leer entry/exit si existen
-        $entryAt = null;
-        $exitAt  = null;
         try {
-            $q = $pdo->prepare("SELECT entry_at, exit_at FROM tickets WHERE ticket_no = :t LIMIT 1");
-            $q->execute([':t' => $ticketNo]);
-            if ($row = $q->fetch()) {
-                $entryAt = $row['entry_at'] ?? null;
-                $exitAt  = $row['exit_at']  ?? null;
+            $raw  = file_get_contents('php://input') ?: '{}';
+            $body = json_decode($raw, true) ?: [];
+
+            $ticketNo    = trim((string)($body['ticket_no'] ?? ''));
+            $receptorNit = strtoupper(trim((string)($body['receptor_nit'] ?? 'CF')));
+            $mode        = (string)($body['mode'] ?? 'hourly');
+            $customTotal = isset($body['custom_total']) ? (float)$body['custom_total'] : null;
+
+            $this->debugLog('fel_invoice_in.txt', [
+                'body'   => $body,
+                'server' => $_SERVER,
+            ]);
+
+            if ($ticketNo === '') {
+                echo json_encode(['ok' => false, 'error' => 'ticket_no requerido']); return;
             }
+            if ($mode === 'custom' && (!is_finite($customTotal) || $customTotal <= 0)) {
+                echo json_encode(['ok' => false, 'error' => 'custom_total inválido']); return;
+            }
+            if ($receptorNit !== 'CF' && !ctype_digit($receptorNit)) {
+                echo json_encode(['ok' => false, 'error' => 'NIT inválido (use CF o solo dígitos)']); return;
+            }
+
+            // === 1. Calcular montos ===
+            $calc = $this->resolveTicketAmount($ticketNo, $mode, $customTotal);
+            $hours   = (float)($calc[0] ?? 0);
+            $minutes = (int)($calc[1] ?? 0);
+            $total   = (float)($calc[2] ?? 0);
+            $extra   = is_array($calc[3] ?? null) ? $calc[3] : [];
+
+            $durationMin = (int)($hours * 60 + $minutes);
+            $hoursBilled = (int)ceil($durationMin / 60);
+
+            // === 2. Cliente G4S + payload ===
+            $cfg    = new \Config\Config(__DIR__ . '/../../.env');
+            $client = new \App\Services\G4SClient($cfg);
+
+            $payload = [
+                'ticket_no'    => $ticketNo,
+                'receptor_nit' => $receptorNit,
+                'total'        => $total,
+                'hours'        => $hours,
+                'minutes'      => $minutes,
+                'mode'         => $mode,
+            ];
+
+            // === 3. Certificar con G4S ===
+            $res = $client->submitInvoice($payload);
+            $this->debugLog('fel_invoice_out.txt', [
+                'request_payload' => $payload,
+                'g4s_response'    => $res,
+            ]);
+
+            $ok    = (bool)($res['ok'] ?? false);
+            $uuid  = $res['uuid']  ?? null;
+            $error = $res['error'] ?? null;
+
+            // === 4. Persistir en BD ===
+            $dsn  = $cfg->get('DB_DSN',  'mysql:host=127.0.0.1;dbname=zkt;charset=utf8mb4');
+            $user = $cfg->get('DB_USER', 'root');
+            $pass = $cfg->get('DB_PASS', '');
+
+            $pdo = new \PDO($dsn, $user, $pass, [
+                \PDO::ATTR_ERRMODE            => \PDO::ERRMODE_EXCEPTION,
+                \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC,
+            ]);
+
+            $pdo->beginTransaction();
+
+            // Leer entry/exit actuales (si existen)
+            $entryAt = null;
+            $exitAt  = null;
+            try {
+                $q = $pdo->prepare("SELECT entry_at, exit_at FROM tickets WHERE ticket_no = :t LIMIT 1");
+                $q->execute([':t' => $ticketNo]);
+                if ($row = $q->fetch()) {
+                    $entryAt = $row['entry_at'] ?? null;
+                    $exitAt  = $row['exit_at']  ?? null;
+                }
+            } catch (\Throwable $e) {
+                // ignorar si no existen las columnas
+            }
+
+            $hourlyRate  = $extra['hourly_rate']  ?? null;
+            $monthlyRate = $extra['monthly_rate'] ?? null;
+
+            // === Insertar factura ===
+            $stmt = $pdo->prepare("
+                INSERT INTO invoices
+                (
+                    ticket_no, total, uuid, status,
+                    request_json, response_json, created_at,
+                    receptor_nit, entry_at, exit_at,
+                    duration_min, hours_billed, billing_mode,
+                    hourly_rate, monthly_rate
+                )
+                VALUES
+                (
+                    :ticket_no, :total, :uuid, :status,
+                    :request_json, :response_json, NOW(),
+                    :receptor_nit, :entry_at, :exit_at,
+                    :duration_min, :hours_billed, :billing_mode,
+                    :hourly_rate, :monthly_rate
+                )
+            ");
+
+            $stmt->execute([
+                ':ticket_no'     => $ticketNo,
+                ':total'         => $total,
+                ':uuid'          => $uuid,
+                ':status'        => $ok ? 'CERTIFIED' : 'FAILED',
+                ':request_json'  => json_encode($payload, JSON_UNESCAPED_UNICODE),
+                ':response_json' => json_encode($res,     JSON_UNESCAPED_UNICODE),
+                ':receptor_nit'  => $receptorNit,
+                ':entry_at'      => $entryAt,
+                ':exit_at'       => $exitAt,
+                ':duration_min'  => $durationMin,
+                ':hours_billed'  => $hoursBilled,
+                ':billing_mode'  => $mode,
+                ':hourly_rate'   => $hourlyRate,
+                ':monthly_rate'  => $monthlyRate,
+            ]);
+
+            // === Actualizar ticket: status y exit_at ===
+            $up = $pdo->prepare("
+                UPDATE tickets
+                SET status = 'CLOSED', exit_at = NOW()
+                WHERE ticket_no = :t
+            ");
+            $up->execute([':t' => $ticketNo]);
+
+            $pdo->commit();
+
+            echo json_encode([
+                'ok'      => $ok,
+                'uuid'    => $uuid,
+                'message' => $ok ? 'Factura certificada' : 'No se pudo certificar (registrada en BD)',
+                'error'   => $error,
+            ], JSON_UNESCAPED_UNICODE);
+
         } catch (\Throwable $e) {
-            // Si no existen esas columnas, continúa
+            if (isset($pdo) && $pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            $this->debugLog('fel_invoice_exc.txt', ['exception' => $e->getMessage()]);
+            echo json_encode(['ok' => false, 'error' => $e->getMessage()]);
         }
-
-        $hourlyRate  = $extra['hourly_rate']  ?? null;
-        $monthlyRate = $extra['monthly_rate'] ?? null;
-
-        $stmt = $pdo->prepare("
-            INSERT INTO invoices
-            (
-                ticket_no, total, uuid, status,
-                request_json, response_json, created_at,
-                receptor_nit, entry_at, exit_at,
-                duration_min, hours_billed, billing_mode,
-                hourly_rate, monthly_rate
-            )
-            VALUES
-            (
-                :ticket_no, :total, :uuid, :status,
-                :request_json, :response_json, NOW(),
-                :receptor_nit, :entry_at, :exit_at,
-                :duration_min, :hours_billed, :billing_mode,
-                :hourly_rate, :monthly_rate
-            )
-        ");
-
-        $stmt->execute([
-            ':ticket_no'     => $ticketNo,
-            ':total'         => $total,
-            ':uuid'          => $uuid,
-            ':status'        => $ok ? 'CERTIFIED' : 'FAILED',
-            ':request_json'  => json_encode($payload, JSON_UNESCAPED_UNICODE),
-            ':response_json' => json_encode($res,     JSON_UNESCAPED_UNICODE),
-            ':receptor_nit'  => $receptorNit,              // ← puede ser CF
-            ':entry_at'      => $entryAt,
-            ':exit_at'       => $exitAt,
-            ':duration_min'  => $durationMin,
-            ':hours_billed'  => $hoursBilled,
-            ':billing_mode'  => $mode,
-            ':hourly_rate'   => $hourlyRate,
-            ':monthly_rate'  => $monthlyRate,
-        ]);
-
-        // Actualiza ticket a OPEN (como pediste)
-        $up = $pdo->prepare("UPDATE tickets SET status = 'OPEN' WHERE ticket_no = :t");
-        $up->execute([':t' => $ticketNo]);
-
-        $pdo->commit();
-
-        echo json_encode([
-            'ok'      => $ok,
-            'uuid'    => $uuid,
-            'message' => $ok ? 'Factura certificada' : 'No se pudo certificar (registrada en BD)',
-            'error'   => $error,
-        ], JSON_UNESCAPED_UNICODE);
-    } catch (\Throwable $e) {
-        if (isset($pdo) && $pdo->inTransaction()) {
-            $pdo->rollBack();
-        }
-        $this->debugLog('fel_invoice_exc.txt', ['exception' => $e->getMessage()]);
-        echo json_encode(['ok' => false, 'error' => $e->getMessage()]);
     }
-}
-
-
 
     /** Helper simple para logging */
     private function debugLog(string $file, array $data): void
@@ -1512,16 +1544,18 @@ class ApiController {
                 t.entry_at,
                 t.exit_at,
                 t.amount AS ticket_amount,
+                /* 👇 NUEVO: placa desde payments o tickets */
+                COALESCE(MAX(p.plate), t.plate) AS plate,
                 NULL AS uuid,
                 NULL AS estado
             FROM tickets t
             LEFT JOIN payments p ON p.ticket_no = t.ticket_no
-            WHERE t.status = 'OPEN'
-                AND NOT EXISTS (
+            WHERE t.status = 'OPEN'  -- OJO: si tu UI es para CLOSED, cámbialo a 'CLOSED'
+            AND NOT EXISTS (
                 SELECT 1 FROM invoices i2
                 WHERE i2.ticket_no = t.ticket_no
                     AND i2.status IN ('PENDING','OK')
-                )
+            )
             GROUP BY
                 t.ticket_no,
                 COALESCE(t.exit_at, t.entry_at),
@@ -1533,6 +1567,7 @@ class ApiController {
             ORDER BY fecha DESC
             LIMIT 500
             ";
+
 
             $rows = $pdo->query($sql)->fetchAll(\PDO::FETCH_ASSOC);
             $hourlyRate = $this->getHourlyRate($pdo);
@@ -1565,14 +1600,28 @@ class ApiController {
         try {
             $pdo = \App\Utils\DB::pdo($this->config);
 
-            $status = strtoupper(trim((string)($_GET['status'] ?? 'ANY')));
-            if ($status === 'ALL') { $status = 'ANY'; }
+            // === Filtros base ===
+            $status = strtoupper(trim((string)($_GET['status'] ?? 'OPEN'))); // por defecto solo 'OPEN'
+            $from   = $_GET['from'] ?? null; // formato: 'YYYY-MM-DD 00:00:00'
+            $to     = $_GET['to']   ?? null; // formato: 'YYYY-MM-DD 23:59:59'
 
-            $filters = [
-                'from' => $_GET['from'] ?? null,
-                'to' => $_GET['to'] ?? null,
-            ];
+            $params = [];
+            $conds  = [];
 
+            // Solo tickets abiertos (requerido)
+            $conds[] = "t.status = 'OPEN'";
+
+            // Filtro por fecha
+            if (!empty($from)) {
+                $conds[] = "COALESCE(t.exit_at, t.entry_at) >= :from";
+                $params[':from'] = $from;
+            }
+            if (!empty($to)) {
+                $conds[] = "COALESCE(t.exit_at, t.entry_at) <= :to";
+                $params[':to'] = $to;
+            }
+
+            // === SQL principal ===
             $sql = "
                 SELECT
                     t.ticket_no,
@@ -1582,27 +1631,17 @@ class ApiController {
                     t.entry_at,
                     t.exit_at,
                     t.duration_min,
-                    COALESCE(SUM(p.amount), t.amount, 0)        AS payments_total,
-                    COUNT(p.id)                                  AS payments_count,
-                    MIN(p.paid_at)                               AS first_payment_at,
-                    MAX(p.paid_at)                               AS last_payment_at
+                    COALESCE(SUM(p.amount), t.amount, 0) AS payments_total,
+                    COUNT(p.id) AS payments_count,
+                    MIN(p.paid_at) AS first_payment_at,
+                    MAX(p.paid_at) AS last_payment_at,
+                    COALESCE(t.exit_at, t.entry_at) AS fecha
                 FROM tickets t
                 LEFT JOIN payments p ON p.ticket_no = t.ticket_no
-                WHERE 1=1
             ";
 
-            $args = [];
-            if ($filters['from']) {
-                $sql .= " AND COALESCE(t.exit_at, t.entry_at) >= :from";
-                $args[':from'] = $filters['from'] . ' 00:00:00';
-            }
-            if ($filters['to']) {
-                $sql .= " AND COALESCE(t.exit_at, t.entry_at) <= :to";
-                $args[':to'] = $filters['to'] . ' 23:59:59';
-            }
-            if ($status !== 'ANY') {
-                $sql .= " AND t.status = :status";
-                $args[':status'] = $status;
+            if ($conds) {
+                $sql .= "WHERE " . implode(' AND ', $conds) . "\n";
             }
 
             $sql .= "
@@ -1613,18 +1652,19 @@ class ApiController {
                     t.status,
                     t.entry_at,
                     t.exit_at,
-                    t.duration_min,
-                    t.amount
-                ORDER BY COALESCE(t.exit_at, t.entry_at) DESC, t.ticket_no DESC
+                    t.duration_min
+                ORDER BY fecha DESC
                 LIMIT 1000
             ";
 
-            $st = $pdo->prepare($sql);
-            $st->execute($args);
-            $rows = $st->fetchAll(\PDO::FETCH_ASSOC);
+            $stmt = $pdo->prepare($sql);
+            $stmt->execute($params);
+            $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
+
+            // === Procesamiento adicional ===
             $hourlyRate = $this->getHourlyRate($pdo);
             foreach ($rows as &$row) {
-                $row['payments_total'] = isset($row['payments_total']) ? (float) $row['payments_total'] : null;
+                $row['payments_total'] = isset($row['payments_total']) ? (float)$row['payments_total'] : null;
                 $billing = $this->calculateTicketBilling($row, $hourlyRate);
                 $row['duration_min'] = $billing['duration_minutes'];
                 $row['duration_minutes'] = $billing['duration_minutes'];
@@ -1636,6 +1676,7 @@ class ApiController {
             }
             unset($row);
 
+            // === Filtros secundarios (placa, NIT, montos) ===
             $plate = trim((string)($_GET['plate'] ?? ''));
             $nitRaw = trim((string)($_GET['nit'] ?? ''));
             $nitFilter = $nitRaw === '' ? '' : strtoupper($nitRaw);
@@ -1649,23 +1690,18 @@ class ApiController {
                 if ($nitFilter !== '') {
                     $rowNit = strtoupper(trim((string)($row['receptor_nit'] ?? '')));
                     if ($nitFilter === 'CF') {
-                        if ($rowNit !== '' && $rowNit !== 'CF') {
-                            return false;
-                        }
+                        if ($rowNit !== '' && $rowNit !== 'CF') return false;
                     } elseif ($rowNit !== $nitFilter) {
                         return false;
                     }
                 }
                 $amount = (float)($row['billing_total'] ?? $row['total'] ?? 0);
-                if ($minTotal !== null && $amount < $minTotal) {
-                    return false;
-                }
-                if ($maxTotal !== null && $amount > $maxTotal) {
-                    return false;
-                }
+                if ($minTotal !== null && $amount < $minTotal) return false;
+                if ($maxTotal !== null && $amount > $maxTotal) return false;
                 return true;
             }));
 
+            // === Mapeo de pagos ===
             if ($rows) {
                 $ticketNos = array_column($rows, 'ticket_no');
                 $placeholders = implode(',', array_fill(0, count($ticketNos), '?'));
@@ -1687,6 +1723,7 @@ class ApiController {
                 $paymentMap = [];
             }
 
+            // === Estadísticas ===
             $totalTickets = count($rows);
             $totalAmount = 0.0;
             $withPayments = 0;
@@ -1719,14 +1756,13 @@ class ApiController {
                     }
                 }
                 if ($duration !== null) {
-                    $duration = (int) $duration;
+                    $duration = (int)$duration;
                     if ($duration >= 0) {
                         $totalMinutes += $duration;
                         $countDuration++;
                     }
                 }
                 $row['duration_min'] = $duration;
-
                 $row['total'] = round($amount, 2);
             }
             unset($row);
@@ -1734,15 +1770,16 @@ class ApiController {
             $averageAmount = $totalTickets > 0 ? round($totalAmount / $totalTickets, 2) : 0.0;
             $averageMinutes = $countDuration > 0 ? (int) round($totalMinutes / $countDuration) : null;
 
+            // === Respuesta final ===
             \App\Utils\Http::json([
                 'ok' => true,
                 'generated_at' => date('c'),
                 'filters' => [
-                    'from' => $filters['from'],
-                    'to' => $filters['to'],
-                    'status' => $status !== 'ANY' ? $status : 'ANY',
-                    'plate' => $plate !== '' ? $plate : null,
-                    'nit' => $nitRaw !== '' ? $nitRaw : null,
+                    'from' => $from,
+                    'to' => $to,
+                    'status' => 'OPEN', // fijo
+                    'plate' => $plate ?: null,
+                    'nit' => $nitRaw ?: null,
                     'min_total' => $minTotal,
                     'max_total' => $maxTotal,
                 ],
@@ -1762,6 +1799,7 @@ class ApiController {
             \App\Utils\Http::json(['ok' => false, 'error' => $e->getMessage()], 500);
         }
     }
+
 
     public function facturacionEmitidas() {
         try {

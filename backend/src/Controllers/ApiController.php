@@ -1342,14 +1342,11 @@ class ApiController {
             $body = json_decode($raw, true) ?: [];
 
             $ticketNo    = trim((string)($body['ticket_no'] ?? ''));
-            $receptorNit = strtoupper(trim((string)($body['receptor_nit'] ?? 'CF')));
-            $mode        = (string)($body['mode'] ?? 'hourly');
+            $receptorNit = strtoupper(trim((string)($body['receptor_nit'] ?? 'CF'))); // CF permitido
+            $mode        = (string)($body['mode'] ?? 'hourly'); // hourly | monthly | custom
             $customTotal = isset($body['custom_total']) ? (float)$body['custom_total'] : null;
 
-            $this->debugLog('fel_invoice_in.txt', [
-                'body'   => $body,
-                'server' => $_SERVER,
-            ]);
+            $this->debugLog('fel_invoice_in.txt', ['body' => $body, 'server' => $_SERVER]);
 
             if ($ticketNo === '') {
                 echo json_encode(['ok' => false, 'error' => 'ticket_no requerido']); return;
@@ -1361,17 +1358,20 @@ class ApiController {
                 echo json_encode(['ok' => false, 'error' => 'NIT inválido (use CF o solo dígitos)']); return;
             }
 
-            // === 1. Calcular montos ===
+            // === 1) Calcular montos ===
             $calc = $this->resolveTicketAmount($ticketNo, $mode, $customTotal);
             $hours   = (float)($calc[0] ?? 0);
-            $minutes = (int)($calc[1] ?? 0);
+            $minutes = (int)  ($calc[1] ?? 0);
             $total   = (float)($calc[2] ?? 0);
             $extra   = is_array($calc[3] ?? null) ? $calc[3] : [];
 
             $durationMin = (int)($hours * 60 + $minutes);
             $hoursBilled = (int)ceil($durationMin / 60);
 
-            // === 2. Cliente G4S + payload ===
+            // Dato de billing: si viene en $extra úsalo; si no, usa $total
+            $billingAmount = isset($extra['billing_amount']) ? (float)$extra['billing_amount'] : $total;
+
+            // === 2) Cliente G4S + payload ===
             $cfg    = new \Config\Config(__DIR__ . '/../../.env');
             $client = new \App\Services\G4SClient($cfg);
 
@@ -1384,7 +1384,7 @@ class ApiController {
                 'mode'         => $mode,
             ];
 
-            // === 3. Certificar con G4S ===
+            // === 3) Certificar con G4S ===
             $res = $client->submitInvoice($payload);
             $this->debugLog('fel_invoice_out.txt', [
                 'request_payload' => $payload,
@@ -1395,7 +1395,7 @@ class ApiController {
             $uuid  = $res['uuid']  ?? null;
             $error = $res['error'] ?? null;
 
-            // === 4. Persistir en BD ===
+            // === 4) Persistir en BD ===
             $dsn  = $cfg->get('DB_DSN',  'mysql:host=127.0.0.1;dbname=zkt;charset=utf8mb4');
             $user = $cfg->get('DB_USER', 'root');
             $pass = $cfg->get('DB_PASS', '');
@@ -1407,15 +1407,15 @@ class ApiController {
 
             $pdo->beginTransaction();
 
-            // Leer entry/exit actuales (si existen)
-            $entryAt = null;
-            $exitAt  = null;
+            // Leer entry/exit/plate actuales (si existen)
+            $entryAt = $exitAt = $plate = null;
             try {
-                $q = $pdo->prepare("SELECT entry_at, exit_at FROM tickets WHERE ticket_no = :t LIMIT 1");
+                $q = $pdo->prepare("SELECT entry_at, exit_at, plate FROM tickets WHERE ticket_no = :t LIMIT 1");
                 $q->execute([':t' => $ticketNo]);
                 if ($row = $q->fetch()) {
                     $entryAt = $row['entry_at'] ?? null;
                     $exitAt  = $row['exit_at']  ?? null;
+                    $plate   = $row['plate']    ?? null;
                 }
             } catch (\Throwable $e) {
                 // ignorar si no existen las columnas
@@ -1424,7 +1424,7 @@ class ApiController {
             $hourlyRate  = $extra['hourly_rate']  ?? null;
             $monthlyRate = $extra['monthly_rate'] ?? null;
 
-            // === Insertar factura ===
+            // Insertar factura
             $stmt = $pdo->prepare("
                 INSERT INTO invoices
                 (
@@ -1443,7 +1443,6 @@ class ApiController {
                     :hourly_rate, :monthly_rate
                 )
             ");
-
             $stmt->execute([
                 ':ticket_no'     => $ticketNo,
                 ':total'         => $total,
@@ -1461,22 +1460,162 @@ class ApiController {
                 ':monthly_rate'  => $monthlyRate,
             ]);
 
-            // === Actualizar ticket: status y exit_at ===
-            $up = $pdo->prepare("
-                UPDATE tickets
-                SET status = 'CLOSED', exit_at = NOW()
-                WHERE ticket_no = :t
-            ");
+            // Cerrar ticket
+            $up = $pdo->prepare("UPDATE tickets SET status = 'CLOSED', exit_at = NOW() WHERE ticket_no = :t");
             $up->execute([':t' => $ticketNo]);
 
             $pdo->commit();
 
+            // === 5) Lógica de apertura automática / manual (estilo Hamachi) ===
+            $manualOpen     = false;
+            $payNotifySent  = false;  // HTTP 2xx
+            $payNotifyAck   = false;  // JSON {code:0}
+            $payNotifyError = null;
+            $payNotifyRaw   = null;
+            $payNotifyType  = null;
+
+            if ($ok) {
+                if ($billingAmount <= 0) {
+                    // Pago válido, pero sin dato de billing: apertura manual
+                    $manualOpen = true;
+                } else {
+                    // Construir endpoint igual que en syncRemoteParkRecords (baseUrl + path + headers + verify/connect_to)
+                    $cid = $this->newCorrelationId('paynotify');
+
+                    $baseUrl = rtrim((string) $this->config->get('HAMACHI_PARK_BASE_URL', ''), '/');
+                    if ($baseUrl === '') {
+                        Logger::error('paynotify.no_base_url', ['cid' => $cid]);
+                        $payNotifyError = 'HAMACHI_PARK_BASE_URL no está configurado.';
+                        $manualOpen = true; // fallback manual
+                    } else {
+                        $endpoint = $baseUrl . '/api/v1/parkCost/payNotify';
+
+                        $headers = ['Accept: application/json', 'Content-Type: application/json'];
+                        $hostHeader = trim((string) $this->config->get('HAMACHI_PARK_HOST_HEADER', ''));
+                        if ($hostHeader !== '') $headers[] = 'Host: ' . $hostHeader;
+
+                        $verifySsl = strtolower((string) $this->config->get('HAMACHI_PARK_VERIFY_SSL', 'false')) === 'true';
+                        $connectTo = trim((string) $this->config->get('HAMACHI_PARK_CONNECT_TO', '')); // ej: "localhost:8098:25.21.54.208:8098"
+
+                        $notifyPayload = [
+                            'carNumber' => $plate ?: ($extra['plate'] ?? ''),   // placa si está
+                            'recordId'  => $extra['record_id'] ?? $ticketNo,    // tu identificador del registro
+                        ];
+
+                        Logger::debug('paynotify.req', [
+                            'cid'        => $cid,
+                            'endpoint'   => $endpoint,
+                            'headers'    => $headers,
+                            'verify_ssl' => $verifySsl,
+                            'connect_to' => $connectTo ?: null,
+                            'payload'    => $notifyPayload,
+                        ]);
+
+                        try {
+                            // cURL POST como en syncRemoteParkRecords
+                            $ch = curl_init($endpoint);
+                            curl_setopt_array($ch, [
+                                CURLOPT_RETURNTRANSFER => true,
+                                CURLOPT_CONNECTTIMEOUT => 15,
+                                CURLOPT_TIMEOUT        => 20,
+                                CURLOPT_HTTPHEADER     => $headers,
+                                CURLOPT_NOSIGNAL       => true,
+                                CURLOPT_TCP_KEEPALIVE  => 1,
+                                CURLOPT_TCP_KEEPIDLE   => 30,
+                                CURLOPT_TCP_KEEPINTVL  => 10,
+                                CURLOPT_HTTP_VERSION   => CURL_HTTP_VERSION_1_1,
+                                CURLOPT_POST           => true,
+                                CURLOPT_POSTFIELDS     => json_encode($notifyPayload, JSON_UNESCAPED_UNICODE),
+                                CURLOPT_HEADER         => true,
+                            ]);
+                            if (!$verifySsl) {
+                                curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+                                curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+                            }
+                            if ($connectTo !== '') {
+                                curl_setopt($ch, CURLOPT_CONNECT_TO, [$connectTo]);
+                                Logger::debug('http.connect_to', ['cid' => $cid, 'connect_to' => $connectTo]);
+                            }
+
+                            $resp = curl_exec($ch);
+                            if ($resp === false) {
+                                $err  = curl_error($ch) ?: 'Error desconocido';
+                                $info = curl_getinfo($ch) ?: [];
+                                curl_close($ch);
+
+                                Logger::error('paynotify.http_failed', ['cid'=>$cid, 'endpoint'=>$endpoint, 'error'=>$err, 'curl_info'=>$info]);
+                                $payNotifyError = $err;
+                                $manualOpen = true; // fallback manual
+                            } else {
+                                $info   = curl_getinfo($ch) ?: [];
+                                $status = (int)($info['http_code'] ?? 0);
+                                $hsize  = (int)($info['header_size'] ?? 0);
+                                curl_close($ch);
+
+                                $body  = substr($resp, $hsize) ?: '';
+                                $ctype = (string)($info['content_type'] ?? '');
+                                $payNotifyRaw  = $body;
+                                $payNotifyType = $ctype;
+
+                                $payNotifySent = ($status >= 200 && $status < 300);
+
+                                $json = null;
+                                $looksJson = stripos($ctype, 'application/json') !== false
+                                        || (strlen($body) && ($body[0] === '{' || $body[0] === '['));
+                                if ($looksJson) {
+                                    $tmp = json_decode($body, true);
+                                    if (json_last_error() === JSON_ERROR_NONE) $json = $tmp;
+                                }
+
+                                // Ack correcto solo si JSON y code==0
+                                if ($payNotifySent && is_array($json)) {
+                                    $payNotifyAck = (isset($json['code']) && (int)$json['code'] === 0);
+                                }
+
+                                if (!$payNotifySent) {
+                                    Logger::error('paynotify.bad_status', ['cid'=>$cid, 'status'=>$status, 'preview'=>substr($body,0,500)]);
+                                    $payNotifyError = "HTTP $status";
+                                    $manualOpen = true;
+                                } elseif (!$payNotifyAck) {
+                                    // 2xx pero sin ACK válido (p.ej. HTML login o code!=0)
+                                    $payNotifyError = $ctype ? "No ACK ($ctype)" : "No ACK";
+                                    $manualOpen = true;
+                                } else {
+                                    Logger::info('paynotify.ok', ['cid'=>$cid, 'status'=>$status]);
+                                }
+                            }
+
+                            // Log completo (capamos raw)
+                            Logger::debug('paynotify.resp', [
+                                'cid'   => $cid,
+                                'sent'  => $payNotifySent,
+                                'ack'   => $payNotifyAck,
+                                'ctype' => $payNotifyType,
+                                'raw'   => $payNotifyRaw ? mb_substr($payNotifyRaw, 0, 4000) : null,
+                                'error' => $payNotifyError,
+                            ]);
+
+                        } catch (\Throwable $e) {
+                            $payNotifyError = $e->getMessage();
+                            $manualOpen = true;
+                            Logger::error('paynotify.exception', ['cid'=>$cid, 'error'=>$payNotifyError]);
+                        }
+                    }
+                }
+            }
+
             echo json_encode([
-                'ok'      => $ok,
-                'uuid'    => $uuid,
-                'message' => $ok ? 'Factura certificada' : 'No se pudo certificar (registrada en BD)',
-                'error'   => $error,
+                'ok'               => $ok,
+                'uuid'             => $uuid,
+                'message'          => $ok ? 'Factura certificada' : 'No se pudo certificar (registrada en BD)',
+                'error'            => $error,
+                'billing_amount'   => $billingAmount,
+                'manual_open'      => $manualOpen,      // ← abrir manual si billing==0 o payNotify no confirmó
+                'pay_notify_sent'  => $payNotifySent,   // HTTP 2xx
+                'pay_notify_ack'   => $payNotifyAck,    // JSON code==0
+                'pay_notify_error' => $payNotifyError,
             ], JSON_UNESCAPED_UNICODE);
+
 
         } catch (\Throwable $e) {
             if (isset($pdo) && $pdo->inTransaction()) {
@@ -1486,6 +1625,46 @@ class ApiController {
             echo json_encode(['ok' => false, 'error' => $e->getMessage()]);
         }
     }
+
+/**
+ * POST JSON y acepta JSON/HTML/texto. Devuelve [statusCode, bodyString]
+ * $opts = ['timeout'=>float,'verify_ssl'=>bool,'headers'=>string[]]
+ */
+private function postJsonAny(string $url, array $data, array $opts = []): array
+{
+    $ch = curl_init($url);
+    $timeout   = isset($opts['timeout']) ? (float)$opts['timeout'] : 8.0;
+    $verifySsl = array_key_exists('verify_ssl', $opts) ? (bool)$opts['verify_ssl'] : true;
+    $headers   = isset($opts['headers']) && is_array($opts['headers']) ? $opts['headers'] : [];
+
+    $headers[] = 'Content-Type: application/json';
+
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST           => true,
+        CURLOPT_POSTFIELDS     => json_encode($data, JSON_UNESCAPED_UNICODE),
+        CURLOPT_HTTPHEADER     => $headers,
+        CURLOPT_TIMEOUT        => $timeout,
+        CURLOPT_SSL_VERIFYPEER => $verifySsl,
+        CURLOPT_SSL_VERIFYHOST => $verifySsl ? 2 : 0,
+        CURLOPT_HEADER         => true,
+    ]);
+
+    $resp = curl_exec($ch);
+    if ($resp === false) {
+        $err = curl_error($ch);
+        curl_close($ch);
+        throw new \RuntimeException("cURL error: $err");
+    }
+
+    $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $headerSize = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+    curl_close($ch);
+
+    $body = substr($resp, $headerSize) ?: '';
+    return [$status, $body];
+}
+
 
     /** Helper simple para logging */
     private function debugLog(string $file, array $data): void

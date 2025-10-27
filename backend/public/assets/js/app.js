@@ -1034,8 +1034,43 @@ nitInput.addEventListener('input', debounce(() => {
           body: JSON.stringify(requestPayload),
         });
 
-        Dialog.ok(`Factura enviada (${confirmation.label}). UUID ${js.uuid || '(verifique respuesta)'}`, 'FEL enviado');
+        if (!js.ok) {
+          throw new Error(js.error || 'No se pudo certificar.');
+        }
+
+        const uuidTxt = js.uuid ? `UUID ${js.uuid}` : 'Sin UUID (revise respuesta)';
+        const reason =
+          Number(js.billing_amount) <= 0
+            ? 'Dato de billing = 0.'
+            : (js.pay_notify_ack === false
+                ? (js.pay_notify_error ? `PayNotify sin confirmación (${js.pay_notify_error}).` : 'PayNotify sin confirmación.')
+                : null);
+
+        if (js.manual_open) {
+          // ✅ Usar Dialog.ok para mantener compatibilidad
+          Dialog.ok(
+            [
+              'Pago registrado (apertura manual requerida).',
+              uuidTxt,
+              reason ? `Motivo: ${reason}` : null,
+              '',
+              'La barrera debe aperturarse manualmente.'
+            ].filter(Boolean).join('\n'),
+            'Apertura manual'
+          );
+        } else {
+          Dialog.ok(
+            [
+              `Factura enviada (${confirmation.label}).`,
+              uuidTxt,
+              js.pay_notify_ack ? 'Notificación a ZKBio confirmada.' : null
+            ].filter(Boolean).join(' '),
+            'FEL enviado'
+          );
+        }
+
         await loadList();
+
       } catch (e) {
         Dialog.err(e, 'Error al facturar');
       } finally {

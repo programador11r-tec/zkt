@@ -403,7 +403,7 @@ class ApiController {
                 'pageSize'   => $pageSize,
             ]);
 
-            // cURL request con logs finos y ajustes de protocolo/timeout
+            // cURL request
             $ch = curl_init($endpoint);
             curl_setopt_array($ch, [
                 CURLOPT_RETURNTRANSFER => true,
@@ -421,7 +421,7 @@ class ApiController {
                 curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
             }
 
-            // Opcional: enrutar SNI/CONNECT_TO si se configura
+            // Opcional: CONNECT_TO (SNI)
             $connectTo = trim((string)$this->config->get('HAMACHI_PARK_CONNECT_TO', '')); // ej: "localhost:8098:25.21.54.208:8098"
             if ($connectTo !== '') {
                 curl_setopt($ch, CURLOPT_CONNECT_TO, [$connectTo]);
@@ -492,14 +492,14 @@ class ApiController {
             $pdo = DB::pdo($this->config);
             $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 
-            $upserted = $this->persistTickets($pdo, $records); // persistTickets normaliza adentro si lo prefieres
+            $upserted = $this->persistTickets($pdo, $records); // normaliza adentro
 
             Logger::info('remote.park.sync_success', [
                 'cid'        => $cid,
                 'endpoint'   => $endpoint,
                 'fetched'    => count($records),
                 'upserted'   => $upserted,
-                'skipped'    => 0, // si normalizas fuera, ajusta
+                'skipped'    => 0,
                 'total_ms'   => $this->msSince($t0),
             ]);
 
@@ -527,7 +527,6 @@ class ApiController {
     {
         if (!$rows) return 0;
 
-        // Detecta driver (por si quieres tratar NOW()/datetime('now'))
         try {
             $driver = strtolower((string) $pdo->getAttribute(PDO::ATTR_DRIVER_NAME));
         } catch (\Throwable $e) {
@@ -544,12 +543,12 @@ class ApiController {
         $existsSql = 'SELECT 1 FROM tickets WHERE ticket_no = :ticket_no LIMIT 1';
         $existsStmt = $pdo->prepare($existsSql);
 
-        // --- PREPARED: insert puro (sin upsert/merge) ---
+        // --- PREPARED: insert puro ---
         $insertColumns = ['ticket_no','plate','status','entry_at','exit_at','duration_min','amount'];
         $placeholders  = [':ticket_no',':plate',':status',':entry_at',':exit_at',':duration_min',':amount'];
 
-        if ($hasSource)    { $insertColumns[] = 'source';    $placeholders[] = ':source'; }
-        if ($hasRawJson)   { $insertColumns[] = 'raw_json';  $placeholders[] = ':raw_json'; }
+        if ($hasSource)    { $insertColumns[] = 'source';     $placeholders[] = ':source'; }
+        if ($hasRawJson)   { $insertColumns[] = 'raw_json';   $placeholders[] = ':raw_json'; }
         if ($hasUpdatedAt) { $insertColumns[] = 'updated_at'; $placeholders[] = ':updated_at'; }
 
         $insertSql = sprintf(
@@ -566,7 +565,7 @@ class ApiController {
             $idx++;
             $row = is_array($rowRaw) ? $this->normalizeParkRecordRow($rowRaw) : null;
             if ($row === null) {
-                Logger::warning('tickets.normalize.skip', ['i' => $idx]);
+                Logger::warning('tickets.normalize.skip', ['i' => $idx, 'rowRaw_preview' => substr(json_encode($rowRaw),0,300)]);
                 continue;
             }
 
@@ -608,10 +607,7 @@ class ApiController {
             if ($hasSource)    { $params[':source']    = $row['source'] ?? null; }
             if ($hasRawJson)   { $params[':raw_json']  = $row['raw_json'] ?? null; }
             if ($hasUpdatedAt) {
-                // valor para updated_at solo en el INSERT
-                $params[':updated_at'] = ($driver === 'sqlite')
-                    ? (new \DateTime('now'))->format('Y-m-d H:i:s')
-                    : (new \DateTime('now'))->format('Y-m-d H:i:s'); // si tu columna tiene DEFAULT ya podrías omitirlo
+                $params[':updated_at'] = (new \DateTime('now'))->format('Y-m-d H:i:s');
             }
 
             Logger::info('tickets.insert.begin', [
@@ -659,7 +655,6 @@ class ApiController {
         return $inserted; // cantidad realmente insertada
     }
 
-
     //////////////////////////////////////////////////////////
     // Stub/actualización de payment + llamada a vehicleBilling
     //////////////////////////////////////////////////////////
@@ -690,52 +685,74 @@ class ApiController {
             }
             $nowExpr = $driver === 'sqlite' ? "datetime('now')" : "NOW()";
 
-            // Asegurar columnas requeridas
+            // Asegurar columnas requeridas (reusa las que ya tienes)
             $this->ensurePaymentsTableHasBillin($pdo);
-            $this->ensurePaymentsTableHasPlate($pdo); // ← NUEVO
+            $this->ensurePaymentsTableHasBillinJson($pdo); // usaremos esta col como "ref" para recordId
+            $this->ensurePaymentsTableHasPlate($pdo);
 
-            // Llama a billing y obtén valor numérico; si no hay, 0
+            // carNumber == plate
             $resp      = $this->fetchVehicleBilling($plate, $cid);
             $billValue = $resp['bill_value'] ?? 0;
             if (!is_numeric($billValue)) $billValue = 0;
             $billValue = (float)$billValue;
 
+            // Si no es success → recordIdRef = "0"
+            $recordIdRef = ($resp['ok'] && !empty($resp['record_id'])) ? (string)$resp['record_id'] : '0';
+
             if (!$exists) {
-                // INSERT incluye 'plate'
-                $sql = "INSERT INTO payments (ticket_no, amount, method, paid_at, created_at, billin, plate)
-                        VALUES (:ticket_no, :amount, :method, :paid_at, {$nowExpr}, :billin, :plate)";
+                $sql = "INSERT INTO payments (ticket_no, amount, method, paid_at, created_at, billin, plate, billin_json)
+                        VALUES (:ticket_no, :amount, :method, :paid_at, {$nowExpr}, :billin, :plate, :billin_json)";
                 $ins = $pdo->prepare($sql);
                 $ins->execute([
-                    ':ticket_no' => $ticketNo,
-                    ':amount'    => 0.00,
-                    ':method'    => 'pending',
-                    ':paid_at'   => $paidAt,
-                    ':billin'    => $billValue,
-                    ':plate'     => $plate,
+                    ':ticket_no'   => $ticketNo,
+                    ':amount'      => 0.00,
+                    ':method'      => 'pending',
+                    ':paid_at'     => $paidAt,
+                    ':billin'      => $billValue,
+                    ':plate'       => $plate,
+                    ':billin_json' => $recordIdRef, // ← SOLO recordId o "0"
                 ]);
+
                 Logger::info('billing.insert.ok', [
-                    'cid' => $cid, 'ticket_no' => $ticketNo, 'billin' => $billValue, 'plate' => $plate, 'row_count' => $ins->rowCount()
+                    'cid' => $cid, 'ticket_no' => $ticketNo, 'billin' => $billValue,
+                    'plate' => $plate, 'billin_ref' => $recordIdRef, 'row_count' => $ins->rowCount()
                 ]);
             } else {
-                // UPDATE incluye upsert suave de 'plate' (solo si está vacío/nulo)
-                $sql = "UPDATE payments
-                        SET billin = :billin,
-                            method = COALESCE(method, 'pending'),
-                            paid_at = COALESCE(paid_at, :paid_at),
-                            plate  = CASE WHEN plate IS NULL OR plate = '' THEN :plate ELSE plate END
-                        WHERE ticket_no = :t
-                        LIMIT 1";
-                $up  = $pdo->prepare($sql);
-                $up->execute([
-                    ':billin'  => $billValue,
+                $limitClause = ($driver === 'mysql') ? ' LIMIT 1' : '';
+
+                // billin
+                $sqlBill = "UPDATE payments SET billin = :billin WHERE ticket_no = :t{$limitClause}";
+                $upBill  = $pdo->prepare($sqlBill);
+                $upBill->execute([':billin' => $billValue, ':t' => $ticketNo]);
+
+                // method/paid_at/plate
+                $sqlPlate = "UPDATE payments
+                            SET method = COALESCE(method, 'pending'),
+                                paid_at = COALESCE(paid_at, :paid_at),
+                                plate  = CASE WHEN plate IS NULL OR plate = '' THEN :plate ELSE plate END
+                            WHERE ticket_no = :t{$limitClause}";
+                $stPlate = $pdo->prepare($sqlPlate);
+                $stPlate->execute([
                     ':paid_at' => $paidAt,
                     ':plate'   => $plate,
                     ':t'       => $ticketNo,
                 ]);
+
+                // billin_json → guarda SOLO recordId o "0"
+                $sqlJson = "UPDATE payments SET billin_json = :j WHERE ticket_no = :t{$limitClause}";
+                $stJson  = $pdo->prepare($sqlJson);
+                $stJson->execute([
+                    ':j' => $recordIdRef,
+                    ':t' => $ticketNo,
+                ]);
+
                 Logger::info('billing.update.ok', [
-                    'cid' => $cid, 'ticket_no' => $ticketNo, 'billin' => $billValue, 'plate' => $plate, 'row_count' => $up->rowCount()
+                    'cid' => $cid, 'ticket_no' => $ticketNo, 'billin' => $billValue,
+                    'plate' => $plate, 'billin_ref' => $recordIdRef,
+                    'row_count_bill' => $upBill->rowCount(), 'row_count_plate' => $stPlate->rowCount(), 'row_count_json' => $stJson->rowCount()
                 ]);
             }
+
 
             Logger::info('billing.stub.done', ['cid' => $cid, 'ticket_no' => $ticketNo, 'ms' => $this->msSince($t0)]);
         } catch (\PDOException $e) {
@@ -762,7 +779,6 @@ class ApiController {
         }
 
         if ($driver === 'sqlite') {
-            // Revisar PRAGMA table_info
             $stmt = $pdo->query("PRAGMA table_info('payments')");
             $cols = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
             $has  = false;
@@ -788,7 +804,6 @@ class ApiController {
             $pdo->exec("ALTER TABLE payments ADD COLUMN plate VARCHAR(32) NULL");
         }
     }
-
 
     ////////////////////////////////////////////////////////
     // Asegura columna `billin` en la tabla payments (logs)
@@ -825,6 +840,25 @@ class ApiController {
         }
     }
 
+    /////////////////////////////////////////////////////////////////
+    // Asegura columna `billin_json` para guardar JSON completo
+    /////////////////////////////////////////////////////////////////
+    private function ensurePaymentsTableHasBillinJson(PDO $pdo): void {
+        $columns = $this->getTableColumns($pdo, 'payments');
+        if (!isset($columns['billin_json'])) {
+            try {
+                $driver = strtolower((string)$pdo->getAttribute(PDO::ATTR_DRIVER_NAME));
+            } catch (\Throwable $e) {
+                $driver = 'mysql';
+            }
+            if ($driver === 'sqlite') {
+                $pdo->exec("ALTER TABLE payments ADD COLUMN billin_json TEXT NULL");
+            } else {
+                $pdo->exec("ALTER TABLE payments ADD COLUMN billin_json LONGTEXT NULL");
+            }
+        }
+    }
+
     //////////////////////////////////////////////////////////////
     // Llamada a /api/v1/parkCost/vehicleBilling (con logs finos)
     //////////////////////////////////////////////////////////////
@@ -834,13 +868,13 @@ class ApiController {
         $plate = trim((string)$plate);
         if ($plate === '') {
             Logger::warning('billing.http.skip_empty_plate', ['cid' => $cid]);
-            return ['status' => 0, 'body_raw' => '', 'json' => null, 'bill_value' => 0];
+            return ['ok' => false, 'status' => 0, 'body_raw' => '', 'json' => null, 'bill_value' => 0, 'record_id' => null];
         }
 
         $baseUrl = rtrim((string)$this->config->get('HAMACHI_PARK_BASE_URL', ''), '/');
         if ($baseUrl === '') {
             Logger::error('billing.http.no_base_url', ['cid' => $cid]);
-            return ['status' => 0, 'body_raw' => '', 'json' => null, 'bill_value' => 0];
+            return ['ok' => false, 'status' => 0, 'body_raw' => '', 'json' => null, 'bill_value' => 0, 'record_id' => null];
         }
 
         $endpoint = $baseUrl . '/api/v1/parkCost/vehicleBilling';
@@ -852,6 +886,7 @@ class ApiController {
         $headers = ['Accept: application/json', 'Content-Type: application/json'];
         $verifySsl = strtolower((string)$this->config->get('HAMACHI_PARK_VERIFY_SSL', 'false')) === 'true';
 
+        // carNumber == plate
         $body = json_encode(['carNumber' => $plate], JSON_UNESCAPED_UNICODE);
 
         $ch = curl_init($endpoint);
@@ -875,7 +910,7 @@ class ApiController {
             $err = curl_error($ch) ?: 'Error desconocido';
             curl_close($ch);
             Logger::error('billing.http.failed', ['cid' => $cid, 'error' => $err]);
-            return ['status' => 0, 'body_raw' => '', 'json' => null, 'bill_value' => 0];
+            return ['ok' => false, 'status' => 0, 'body_raw' => '', 'json' => null, 'bill_value' => 0, 'record_id' => null];
         }
 
         $status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
@@ -883,23 +918,73 @@ class ApiController {
 
         $json = json_decode($raw, true);
         if (!is_array($json)) {
-            Logger::warning('billing.http.non_json', ['cid' => $cid, 'status' => $status]);
-            return ['status' => $status, 'body_raw' => $raw, 'json' => null, 'bill_value' => 0];
+            Logger::warning('billing.http.non_json', ['cid' => $cid, 'status' => $status, 'body_preview' => substr($raw,0,300)]);
+            return ['ok' => false, 'status' => $status, 'body_raw' => $raw, 'json' => null, 'bill_value' => 0, 'record_id' => null];
         }
 
-        // Buscar candidato de monto en data
+        // success si code == 0 y hay data
+        $ok = (isset($json['code']) && (int)$json['code'] === 0 && isset($json['data']) && is_array($json['data']));
+
+        // monto
         $billValue = 0.0;
-        if (isset($json['data']) && is_array($json['data'])) {
-            foreach (['amount','total','totalCost','bill','cost'] as $k) {
-                if (isset($json['data'][$k]) && is_numeric($json['data'][$k])) {
-                    $billValue = (float)$json['data'][$k];
+        if ($ok) {
+            $data = $json['data'];
+            foreach (['finalAmount','amount','total','totalCost','bill','cost'] as $k) {
+                if (isset($data[$k]) && is_numeric((string)$data[$k])) {
+                    $billValue = (float)$data[$k];
                     break;
+                }
+            }
+            if ($billValue === 0.0) {
+                $nestedPaths = [
+                    ['charge','finalAmount'],
+                    ['charge','amount'],
+                    ['summary','total'],
+                ];
+                foreach ($nestedPaths as $path) {
+                    $tmp = $data;
+                    foreach ($path as $seg) {
+                        if (is_array($tmp) && array_key_exists($seg, $tmp)) {
+                            $tmp = $tmp[$seg];
+                        } else { $tmp = null; break; }
+                    }
+                    if ($tmp !== null && is_numeric((string)$tmp)) {
+                        $billValue = (float)$tmp;
+                        break;
+                    }
                 }
             }
         }
 
-        Logger::info('billing.http.ok', ['cid' => $cid, 'status' => $status, 'bill_value' => $billValue]);
-        return ['status' => $status, 'body_raw' => $raw, 'json' => $json, 'bill_value' => $billValue];
+        // recordId (solo si ok)
+        $recordId = null;
+        if ($ok && isset($json['data']['recordId']) && is_string($json['data']['recordId'])) {
+            $recordId = $json['data']['recordId'];
+        }
+
+        try {
+            $keys = isset($json['data']) && is_array($json['data']) ? implode(',', array_keys($json['data'])) : '';
+            Logger::debug('billing.http.data_keys', ['cid' => $cid, 'keys' => $keys]);
+        } catch (\Throwable $e) { /* ignore */ }
+
+        Logger::info('billing.http.ok', [
+            'cid' => $cid,
+            'status' => $status,
+            'ok' => $ok,
+            'bill_value' => $billValue,
+            'record_id' => $recordId,
+            'endpoint' => $endpoint,
+            'body_preview' => substr($raw, 0, 400)
+        ]);
+
+        return [
+            'ok'         => $ok,
+            'status'     => $status,
+            'body_raw'   => $raw,
+            'json'       => $json,
+            'bill_value' => $billValue,
+            'record_id'  => $recordId,
+        ];
     }
 
     //////////////////////////////////////////////////////
@@ -911,12 +996,19 @@ class ApiController {
 
         $this->ensurePaymentsTableHasBillin($pdo);
 
-        // Si es texto vacío o nulo → 0
         if ($billinValue === null || $billinValue === '' || !is_numeric($billinValue)) {
             $billinValue = 0;
         }
 
-        $sql = "UPDATE payments SET billin = :billin WHERE ticket_no = :t LIMIT 1";
+        // Detecta driver para LIMIT
+        try {
+            $driver = strtolower((string)$pdo->getAttribute(PDO::ATTR_DRIVER_NAME));
+        } catch (\Throwable $e) {
+            $driver = 'mysql';
+        }
+        $limitClause = ($driver === 'mysql') ? ' LIMIT 1' : '';
+
+        $sql = "UPDATE payments SET billin = :billin WHERE ticket_no = :t{$limitClause}";
         $st  = $pdo->prepare($sql);
         $st->execute([':billin' => $billinValue, ':t' => $ticketNo]);
 
@@ -928,6 +1020,7 @@ class ApiController {
             'duration_ms' => $this->msSince($t0),
         ]);
     }
+
 
     private function extractParkRecords(array $payload): array {
         $candidates = [];
@@ -1334,172 +1427,207 @@ class ApiController {
     }
 
     public function invoiceOne(): void
-    {
-        header('Content-Type: application/json; charset=utf-8');
+{
+    header('Content-Type: application/json; charset=utf-8');
 
+    try {
+        $raw  = file_get_contents('php://input') ?: '{}';
+        $body = json_decode($raw, true) ?: [];
+
+        $ticketNo    = trim((string)($body['ticket_no'] ?? ''));
+        $receptorNit = strtoupper(trim((string)($body['receptor_nit'] ?? 'CF'))); // CF permitido
+        $mode        = (string)($body['mode'] ?? 'hourly'); // hourly | monthly | custom
+        $customTotal = isset($body['custom_total']) ? (float)$body['custom_total'] : null;
+
+        $this->debugLog('fel_invoice_in.txt', ['body' => $body, 'server' => $_SERVER]);
+
+        if ($ticketNo === '') {
+            echo json_encode(['ok' => false, 'error' => 'ticket_no requerido']); return;
+        }
+        if ($mode === 'custom' && (!is_finite($customTotal) || $customTotal <= 0)) {
+            echo json_encode(['ok' => false, 'error' => 'custom_total inválido']); return;
+        }
+        if ($receptorNit !== 'CF' && !ctype_digit($receptorNit)) {
+            echo json_encode(['ok' => false, 'error' => 'NIT inválido (use CF o solo dígitos)']); return;
+        }
+
+        // === 1) Calcular montos ===
+        $calc = $this->resolveTicketAmount($ticketNo, $mode, $customTotal);
+        $hours   = (float)($calc[0] ?? 0);
+        $minutes = (int)  ($calc[1] ?? 0);
+        $total   = (float)($calc[2] ?? 0);
+        $extra   = is_array($calc[3] ?? null) ? $calc[3] : [];
+
+        $durationMin = (int)($hours * 60 + $minutes);
+        $hoursBilled = (int)ceil($durationMin / 60);
+
+        // Si resolveTicketAmount ya te trae un billing calculado úsalo; si no, usa total
+        $billingAmount = isset($extra['billing_amount']) ? (float)$extra['billing_amount'] : $total;
+
+        // === 2) Cliente G4S + payload ===
+        $cfg    = new \Config\Config(__DIR__ . '/../../.env');
+        $client = new \App\Services\G4SClient($cfg);
+
+        $payload = [
+            'ticket_no'    => $ticketNo,
+            'receptor_nit' => $receptorNit,
+            'total'        => $total,
+            'hours'        => $hours,
+            'minutes'      => $minutes,
+            'mode'         => $mode,
+        ];
+
+        // === 3) Certificar con G4S ===
+        $res = $client->submitInvoice($payload);
+        $this->debugLog('fel_invoice_out.txt', [
+            'request_payload' => $payload,
+            'g4s_response'    => $res,
+        ]);
+
+        $ok    = (bool)($res['ok'] ?? false);
+        $uuid  = $res['uuid']  ?? null;
+        $error = $res['error'] ?? null;
+
+        // === 4) Persistir en BD e inspeccionar datos de tickets/payments ===
+        $dsn  = $cfg->get('DB_DSN',  'mysql:host=127.0.0.1;dbname=zkt;charset=utf8mb4');
+        $user = $cfg->get('DB_USER', 'root');
+        $pass = $cfg->get('DB_PASS', '');
+
+        $pdo = new \PDO($dsn, $user, $pass, [
+            \PDO::ATTR_ERRMODE            => \PDO::ERRMODE_EXCEPTION,
+            \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC,
+        ]);
+
+        $pdo->beginTransaction();
+
+        // Leer entry/exit/plate actuales (si existen)
+        $entryAt = $exitAt = $plate = null;
         try {
-            $raw  = file_get_contents('php://input') ?: '{}';
-            $body = json_decode($raw, true) ?: [];
-
-            $ticketNo    = trim((string)($body['ticket_no'] ?? ''));
-            $receptorNit = strtoupper(trim((string)($body['receptor_nit'] ?? 'CF'))); // CF permitido
-            $mode        = (string)($body['mode'] ?? 'hourly'); // hourly | monthly | custom
-            $customTotal = isset($body['custom_total']) ? (float)$body['custom_total'] : null;
-
-            $this->debugLog('fel_invoice_in.txt', ['body' => $body, 'server' => $_SERVER]);
-
-            if ($ticketNo === '') {
-                echo json_encode(['ok' => false, 'error' => 'ticket_no requerido']); return;
+            $q = $pdo->prepare("SELECT entry_at, exit_at, plate FROM tickets WHERE ticket_no = :t LIMIT 1");
+            $q->execute([':t' => $ticketNo]);
+            if ($row = $q->fetch()) {
+                $entryAt = $row['entry_at'] ?? null;
+                $exitAt  = $row['exit_at']  ?? null;
+                $plate   = $row['plate']    ?? null;
             }
-            if ($mode === 'custom' && (!is_finite($customTotal) || $customTotal <= 0)) {
-                echo json_encode(['ok' => false, 'error' => 'custom_total inválido']); return;
+        } catch (\Throwable $e) {
+            // ignorar si no existen las columnas
+        }
+
+        $hourlyRate  = $extra['hourly_rate']  ?? null;
+        $monthlyRate = $extra['monthly_rate'] ?? null;
+
+        // === (NUEVO) Leer payment para obtener billin y recordId (billin_json) ===
+        $payBillin   = 0.0;
+        $payRecordId = '0';
+        $payPlate    = $plate;
+        try {
+            $qp = $pdo->prepare("SELECT billin, billin_json, plate FROM payments WHERE ticket_no = :t LIMIT 1");
+            $qp->execute([':t' => $ticketNo]);
+            if ($pr = $qp->fetch()) {
+                if (isset($pr['billin']) && is_numeric($pr['billin'])) $payBillin = (float)$pr['billin'];
+                if (!empty($pr['billin_json'])) $payRecordId = (string)$pr['billin_json']; // aquí guardamos solo el recordId o "0"
+                if (!empty($pr['plate'])) $payPlate = $pr['plate'];
             }
-            if ($receptorNit !== 'CF' && !ctype_digit($receptorNit)) {
-                echo json_encode(['ok' => false, 'error' => 'NIT inválido (use CF o solo dígitos)']); return;
-            }
+        } catch (\Throwable $e) {
+            // continuar con defaults
+        }
 
-            // === 1) Calcular montos ===
-            $calc = $this->resolveTicketAmount($ticketNo, $mode, $customTotal);
-            $hours   = (float)($calc[0] ?? 0);
-            $minutes = (int)  ($calc[1] ?? 0);
-            $total   = (float)($calc[2] ?? 0);
-            $extra   = is_array($calc[3] ?? null) ? $calc[3] : [];
+        // Insertar factura
+        $stmt = $pdo->prepare("
+            INSERT INTO invoices
+            (
+                ticket_no, total, uuid, status,
+                request_json, response_json, created_at,
+                receptor_nit, entry_at, exit_at,
+                duration_min, hours_billed, billing_mode,
+                hourly_rate, monthly_rate
+            )
+            VALUES
+            (
+                :ticket_no, :total, :uuid, :status,
+                :request_json, :response_json, NOW(),
+                :receptor_nit, :entry_at, :exit_at,
+                :duration_min, :hours_billed, :billing_mode,
+                :hourly_rate, :monthly_rate
+            )
+        ");
+        $stmt->execute([
+            ':ticket_no'     => $ticketNo,
+            ':total'         => $total,
+            ':uuid'          => $uuid,
+            ':status'        => $ok ? 'CERTIFIED' : 'FAILED',
+            ':request_json'  => json_encode($payload, JSON_UNESCAPED_UNICODE),
+            ':response_json' => json_encode($res,     JSON_UNESCAPED_UNICODE),
+            ':receptor_nit'  => $receptorNit,
+            ':entry_at'      => $entryAt,
+            ':exit_at'       => $exitAt,
+            ':duration_min'  => $durationMin,
+            ':hours_billed'  => $hoursBilled,
+            ':billing_mode'  => $mode,
+            ':hourly_rate'   => $hourlyRate,
+            ':monthly_rate'  => $monthlyRate,
+        ]);
 
-            $durationMin = (int)($hours * 60 + $minutes);
-            $hoursBilled = (int)ceil($durationMin / 60);
+        // Cerrar ticket (marcar cierre lógico)
+        $up = $pdo->prepare("UPDATE tickets SET status = 'CLOSED', exit_at = NOW() WHERE ticket_no = :t");
+        $up->execute([':t' => $ticketNo]);
 
-            // Dato de billing: si viene en $extra úsalo; si no, usa $total
-            $billingAmount = isset($extra['billing_amount']) ? (float)$extra['billing_amount'] : $total;
+        $pdo->commit();
 
-            // === 2) Cliente G4S + payload ===
-            $cfg    = new \Config\Config(__DIR__ . '/../../.env');
-            $client = new \App\Services\G4SClient($cfg);
+        // === 5) Notificación a /payNotify (apertura automática si todo OK)
+        $manualOpen     = false;
+        $payNotifySent  = false;  // HTTP 2xx
+        $payNotifyAck   = false;  // JSON {code:0}
+        $payNotifyError = null;
+        $payNotifyRaw   = null;
+        $payNotifyType  = null;
 
-            $payload = [
-                'ticket_no'    => $ticketNo,
-                'receptor_nit' => $receptorNit,
-                'total'        => $total,
-                'hours'        => $hours,
-                'minutes'      => $minutes,
-                'mode'         => $mode,
-            ];
+        if ($ok) {
+            // Monto efectivo para decidir: preferimos billin real; si no hay, el billingAmount calculado
+            $effectiveBilling = ($payBillin > 0) ? $payBillin : (float)$billingAmount;
 
-            // === 3) Certificar con G4S ===
-            $res = $client->submitInvoice($payload);
-            $this->debugLog('fel_invoice_out.txt', [
-                'request_payload' => $payload,
-                'g4s_response'    => $res,
-            ]);
+            if ($effectiveBilling <= 0) {
+                // Factura certificada pero sin monto de billing → apertura manual
+                $manualOpen = true;
+            } else {
+                $cid = $this->newCorrelationId('paynotify');
 
-            $ok    = (bool)($res['ok'] ?? false);
-            $uuid  = $res['uuid']  ?? null;
-            $error = $res['error'] ?? null;
-
-            // === 4) Persistir en BD ===
-            $dsn  = $cfg->get('DB_DSN',  'mysql:host=127.0.0.1;dbname=zkt;charset=utf8mb4');
-            $user = $cfg->get('DB_USER', 'root');
-            $pass = $cfg->get('DB_PASS', '');
-
-            $pdo = new \PDO($dsn, $user, $pass, [
-                \PDO::ATTR_ERRMODE            => \PDO::ERRMODE_EXCEPTION,
-                \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC,
-            ]);
-
-            $pdo->beginTransaction();
-
-            // Leer entry/exit/plate actuales (si existen)
-            $entryAt = $exitAt = $plate = null;
-            try {
-                $q = $pdo->prepare("SELECT entry_at, exit_at, plate FROM tickets WHERE ticket_no = :t LIMIT 1");
-                $q->execute([':t' => $ticketNo]);
-                if ($row = $q->fetch()) {
-                    $entryAt = $row['entry_at'] ?? null;
-                    $exitAt  = $row['exit_at']  ?? null;
-                    $plate   = $row['plate']    ?? null;
-                }
-            } catch (\Throwable $e) {
-                // ignorar si no existen las columnas
-            }
-
-            $hourlyRate  = $extra['hourly_rate']  ?? null;
-            $monthlyRate = $extra['monthly_rate'] ?? null;
-
-            // Insertar factura
-            $stmt = $pdo->prepare("
-                INSERT INTO invoices
-                (
-                    ticket_no, total, uuid, status,
-                    request_json, response_json, created_at,
-                    receptor_nit, entry_at, exit_at,
-                    duration_min, hours_billed, billing_mode,
-                    hourly_rate, monthly_rate
-                )
-                VALUES
-                (
-                    :ticket_no, :total, :uuid, :status,
-                    :request_json, :response_json, NOW(),
-                    :receptor_nit, :entry_at, :exit_at,
-                    :duration_min, :hours_billed, :billing_mode,
-                    :hourly_rate, :monthly_rate
-                )
-            ");
-            $stmt->execute([
-                ':ticket_no'     => $ticketNo,
-                ':total'         => $total,
-                ':uuid'          => $uuid,
-                ':status'        => $ok ? 'CERTIFIED' : 'FAILED',
-                ':request_json'  => json_encode($payload, JSON_UNESCAPED_UNICODE),
-                ':response_json' => json_encode($res,     JSON_UNESCAPED_UNICODE),
-                ':receptor_nit'  => $receptorNit,
-                ':entry_at'      => $entryAt,
-                ':exit_at'       => $exitAt,
-                ':duration_min'  => $durationMin,
-                ':hours_billed'  => $hoursBilled,
-                ':billing_mode'  => $mode,
-                ':hourly_rate'   => $hourlyRate,
-                ':monthly_rate'  => $monthlyRate,
-            ]);
-
-            // Cerrar ticket
-            $up = $pdo->prepare("UPDATE tickets SET status = 'CLOSED', exit_at = NOW() WHERE ticket_no = :t");
-            $up->execute([':t' => $ticketNo]);
-
-            $pdo->commit();
-
-            // === 5) Lógica de apertura automática / manual (estilo Hamachi) ===
-            $manualOpen     = false;
-            $payNotifySent  = false;  // HTTP 2xx
-            $payNotifyAck   = false;  // JSON {code:0}
-            $payNotifyError = null;
-            $payNotifyRaw   = null;
-            $payNotifyType  = null;
-
-            if ($ok) {
-                if ($billingAmount <= 0) {
-                    // Pago válido, pero sin dato de billing: apertura manual
+                $baseUrl = rtrim((string) $this->config->get('HAMACHI_PARK_BASE_URL', ''), '/');
+                if ($baseUrl === '') {
+                    Logger::error('paynotify.no_base_url', ['cid' => $cid]);
+                    $payNotifyError = 'HAMACHI_PARK_BASE_URL no está configurado.';
                     $manualOpen = true;
                 } else {
-                    // Construir endpoint igual que en syncRemoteParkRecords (baseUrl + path + headers + verify/connect_to)
-                    $cid = $this->newCorrelationId('paynotify');
-
-                    $baseUrl = rtrim((string) $this->config->get('HAMACHI_PARK_BASE_URL', ''), '/');
-                    if ($baseUrl === '') {
-                        Logger::error('paynotify.no_base_url', ['cid' => $cid]);
-                        $payNotifyError = 'HAMACHI_PARK_BASE_URL no está configurado.';
-                        $manualOpen = true; // fallback manual
+                    // Validaciones previas: recordId viene de billin_json y carNumber debe ser la misma placa usada en billing
+                    $carNumber = $payPlate ?: ($plate ?: ($extra['plate'] ?? ''));
+                    $recordId  = $payRecordId; // guardado previamente tras vehicleBilling
+                    if ($recordId === '0' || $recordId === '' || $carNumber === '') {
+                        Logger::error('paynotify.missing_data', ['cid'=>$cid, 'carNumber'=>$carNumber, 'recordId'=>$recordId]);
+                        $payNotifyError = 'Faltan carNumber/recordId para payNotify';
+                        $manualOpen = true;
                     } else {
+                        // /api/v1/parkCost/payNotify?access_token=...
                         $endpoint = $baseUrl . '/api/v1/parkCost/payNotify';
+                        $accessToken = (string)($this->config->get('HAMACHI_PARK_ACCESS_TOKEN', ''));
+                        if ($accessToken !== '') {
+                            $endpoint .= (strpos($endpoint, '?') === false ? '?' : '&') . 'access_token=' . urlencode($accessToken);
+                        }
 
                         $headers = ['Accept: application/json', 'Content-Type: application/json'];
                         $hostHeader = trim((string) $this->config->get('HAMACHI_PARK_HOST_HEADER', ''));
                         if ($hostHeader !== '') $headers[] = 'Host: ' . $hostHeader;
 
                         $verifySsl = strtolower((string) $this->config->get('HAMACHI_PARK_VERIFY_SSL', 'false')) === 'true';
-                        $connectTo = trim((string) $this->config->get('HAMACHI_PARK_CONNECT_TO', '')); // ej: "localhost:8098:25.21.54.208:8098"
+                        $connectTo = trim((string) $this->config->get('HAMACHI_PARK_CONNECT_TO', ''));
+
+                        // paymentType configurable (por defecto "cash")
+                        $paymentType = (string)$this->config->get('HAMACHI_PARK_PAYMENT_TYPE', 'cash');
 
                         $notifyPayload = [
-                            'carNumber' => $plate ?: ($extra['plate'] ?? ''),   // placa si está
-                            'recordId'  => $extra['record_id'] ?? $ticketNo,    // tu identificador del registro
+                            'carNumber'   => $carNumber,   // DEBE coincidir con el usado en vehicleBilling
+                            'paymentType' => $paymentType, // requerido por la API
+                            'recordId'    => $recordId,    // exactamente el recordId devuelto por billing
                         ];
 
                         Logger::debug('paynotify.req', [
@@ -1512,7 +1640,6 @@ class ApiController {
                         ]);
 
                         try {
-                            // cURL POST como en syncRemoteParkRecords
                             $ch = curl_init($endpoint);
                             curl_setopt_array($ch, [
                                 CURLOPT_RETURNTRANSFER => true,
@@ -1545,7 +1672,7 @@ class ApiController {
 
                                 Logger::error('paynotify.http_failed', ['cid'=>$cid, 'endpoint'=>$endpoint, 'error'=>$err, 'curl_info'=>$info]);
                                 $payNotifyError = $err;
-                                $manualOpen = true; // fallback manual
+                                $manualOpen = true;
                             } else {
                                 $info   = curl_getinfo($ch) ?: [];
                                 $status = (int)($info['http_code'] ?? 0);
@@ -1567,25 +1694,29 @@ class ApiController {
                                     if (json_last_error() === JSON_ERROR_NONE) $json = $tmp;
                                 }
 
-                                // Ack correcto solo si JSON y code==0
+                                // Éxito: JSON con code == 0
                                 if ($payNotifySent && is_array($json)) {
                                     $payNotifyAck = (isset($json['code']) && (int)$json['code'] === 0);
+                                    if (!$payNotifyAck) {
+                                        // Si vino code != 0, registra mensaje de error de la API
+                                        $payNotifyError = isset($json['message']) ? (string)$json['message'] : 'ACK inválido';
+                                    }
+                                } else if (!$payNotifySent) {
+                                    $payNotifyError = "HTTP $status";
                                 }
 
-                                if (!$payNotifySent) {
-                                    Logger::error('paynotify.bad_status', ['cid'=>$cid, 'status'=>$status, 'preview'=>substr($body,0,500)]);
-                                    $payNotifyError = "HTTP $status";
-                                    $manualOpen = true;
-                                } elseif (!$payNotifyAck) {
-                                    // 2xx pero sin ACK válido (p.ej. HTML login o code!=0)
-                                    $payNotifyError = $ctype ? "No ACK ($ctype)" : "No ACK";
-                                    $manualOpen = true;
+                                if (!$payNotifySent || !$payNotifyAck) {
+                                    $manualOpen = true; // fallback manual si no hubo confirmación
+                                    Logger::error('paynotify.nack', [
+                                        'cid'=>$cid, 'status'=>$status, 'ack'=>$payNotifyAck,
+                                        'body_preview'=>mb_substr($body, 0, 500),
+                                        'error'=>$payNotifyError
+                                    ]);
                                 } else {
                                     Logger::info('paynotify.ok', ['cid'=>$cid, 'status'=>$status]);
                                 }
                             }
 
-                            // Log completo (capamos raw)
                             Logger::debug('paynotify.resp', [
                                 'cid'   => $cid,
                                 'sent'  => $payNotifySent,
@@ -1603,28 +1734,30 @@ class ApiController {
                     }
                 }
             }
-
-            echo json_encode([
-                'ok'               => $ok,
-                'uuid'             => $uuid,
-                'message'          => $ok ? 'Factura certificada' : 'No se pudo certificar (registrada en BD)',
-                'error'            => $error,
-                'billing_amount'   => $billingAmount,
-                'manual_open'      => $manualOpen,      // ← abrir manual si billing==0 o payNotify no confirmó
-                'pay_notify_sent'  => $payNotifySent,   // HTTP 2xx
-                'pay_notify_ack'   => $payNotifyAck,    // JSON code==0
-                'pay_notify_error' => $payNotifyError,
-            ], JSON_UNESCAPED_UNICODE);
-
-
-        } catch (\Throwable $e) {
-            if (isset($pdo) && $pdo->inTransaction()) {
-                $pdo->rollBack();
-            }
-            $this->debugLog('fel_invoice_exc.txt', ['exception' => $e->getMessage()]);
-            echo json_encode(['ok' => false, 'error' => $e->getMessage()]);
         }
+
+        echo json_encode([
+            'ok'               => $ok,
+            'uuid'             => $uuid,
+            'message'          => $ok ? 'Factura certificada' : 'No se pudo certificar (registrada en BD)',
+            'error'            => $error,
+            // monto efectivo usado para decidir notificación/apertura
+            'billing_amount'   => ($payBillin > 0 ? $payBillin : (float)$billingAmount),
+            'manual_open'      => $manualOpen,      // abrir manual si billing==0 o payNotify no confirmó
+            'pay_notify_sent'  => $payNotifySent,   // HTTP 2xx
+            'pay_notify_ack'   => $payNotifyAck,    // JSON {code:0}
+            'pay_notify_error' => $payNotifyError,
+        ], JSON_UNESCAPED_UNICODE);
+
+    } catch (\Throwable $e) {
+        if (isset($pdo) && $pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        $this->debugLog('fel_invoice_exc.txt', ['exception' => $e->getMessage()]);
+        echo json_encode(['ok' => false, 'error' => $e->getMessage()]);
     }
+}
+  
 
 /**
  * POST JSON y acepta JSON/HTML/texto. Devuelve [statusCode, bodyString]

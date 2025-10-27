@@ -2327,6 +2327,136 @@ private function postJsonAny(string $url, array $data, array $opts = []): array
         }
         return true;
     }
+
+    public function openGateManual(): void
+    {
+        header('Content-Type: application/json; charset=utf-8');
+
+        $channelId = '40288048981adc4601981b7cb2660b05';
+        $url = "https://localhost:8098/api/v1/parkBase/openGateChannel?channelId={$channelId}";
+
+        $tzGT = new \DateTimeZone('America/Guatemala');
+        $now  = new \DateTime('now', $tzGT);
+        $openedAt = $now->format('Y-m-d H:i:s');
+
+        $ok = false;
+        $code = null;
+        $message = null;
+        $respRaw = null;
+        $httpStatus = null;
+
+        try {
+            // Llamado HTTP (deshabilita verificación SSL por ser localhost con posible self-signed)
+            $ch = curl_init($url);
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_POST           => true,
+                CURLOPT_HTTPHEADER     => [
+                    'Content-Type: application/json',
+                    'Accept: application/json',
+                ],
+                CURLOPT_SSL_VERIFYPEER => false,
+                CURLOPT_SSL_VERIFYHOST => 0,
+                CURLOPT_TIMEOUT        => 8,
+            ]);
+            $respRaw = curl_exec($ch);
+            $curlErr = curl_error($ch);
+            $httpStatus = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+
+            if ($respRaw === false) {
+                throw new \RuntimeException('No se recibió respuesta del servicio local: ' . ($curlErr ?: 'desconocido'));
+            }
+
+            $resp = json_decode($respRaw, true);
+            if (!is_array($resp)) {
+                throw new \RuntimeException("Respuesta no JSON válida. HTTP={$httpStatus}. Body={$respRaw}");
+            }
+
+            $code = $resp['code'] ?? null;
+            $message = $resp['message'] ?? null;
+            $ok = ($httpStatus === 200 && (string)$code === '0');
+
+        } catch (\Throwable $e) {
+            $message = 'Error: ' . $e->getMessage();
+            $ok = false;
+        }
+
+        // Registrar en BD
+        $insertId = null;
+        try {
+            $pdo = $this->getPdo();
+            $this->ensureManualOpenTable($pdo);
+
+            $stmt = $pdo->prepare("
+                INSERT INTO manual_open_logs (channel_id, opened_at, http_status, result_code, result_message, extra_json)
+                VALUES (:channel_id, :opened_at, :http_status, :result_code, :result_message, :extra_json)
+            ");
+            $stmt->execute([
+                ':channel_id'     => $channelId,
+                ':opened_at'      => $openedAt,                // Hora local GT
+                ':http_status'    => $httpStatus,
+                ':result_code'    => $code,
+                ':result_message' => (string)$message,
+                ':extra_json'     => $respRaw ?: null,
+            ]);
+            $insertId = (string)$pdo->lastInsertId();
+        } catch (\Throwable $e) {
+            // No abortamos la respuesta por error de log; solo lo anotamos en debug si tienes logger
+            $this->debugLog('manual_open_err.txt', [
+                'when' => $openedAt,
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        echo json_encode([
+            'ok'          => $ok,
+            'title'       => 'Apertura manual',
+            'message'     => $message ?: ($ok ? 'success' : 'Fallo en la apertura'),
+            'http_status' => $httpStatus,
+            'code'        => $code,
+            'logged_id'   => $insertId,
+            'opened_at'   => $openedAt,
+        ]);
+    }
+
+    private function ensureManualOpenTable(PDO $pdo): void
+    {
+        // Compatible con MySQL y SQLite
+        $driver = strtolower((string)$pdo->getAttribute(PDO::ATTR_DRIVER_NAME));
+
+        // Crea tabla si no existe
+        if ($driver === 'sqlite') {
+            $pdo->exec("
+                CREATE TABLE IF NOT EXISTS manual_open_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    channel_id TEXT NOT NULL,
+                    opened_at TEXT NOT NULL,
+                    http_status INTEGER,
+                    result_code TEXT,
+                    result_message TEXT,
+                    extra_json TEXT
+                )
+            ");
+            // Índices útiles
+            $pdo->exec("CREATE INDEX IF NOT EXISTS idx_manual_open_logs_opened_at ON manual_open_logs(opened_at)");
+        } else {
+            // MySQL / MariaDB
+            $pdo->exec("
+                CREATE TABLE IF NOT EXISTS manual_open_logs (
+                    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    channel_id VARCHAR(64) NOT NULL,
+                    opened_at DATETIME NOT NULL,
+                    http_status INT NULL,
+                    result_code VARCHAR(16) NULL,
+                    result_message VARCHAR(255) NULL,
+                    extra_json MEDIUMTEXT NULL,
+                    KEY idx_manual_open_logs_opened_at (opened_at)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            ");
+        }
+    }
+
 }
 
     

@@ -595,8 +595,15 @@
             <p class="text-muted small mb-1">Lista tickets <strong>CLOSED</strong> con pagos (o monto) y <strong>sin factura</strong>.</p>
             <div class="text-muted small" id="invoiceHourlyRateHint"></div>
           </div>
-          <div class="ms-auto" style="max-width: 260px;">
+          <div class="ms-auto d-flex flex-wrap align-items-left gap-2" style="max-width: 420px;">
             <input type="search" id="invSearch" class="form-control form-control-sm" placeholder="Buscar ticket..." aria-label="Buscar ticket pendiente" />
+            <button type="button" id="btnManualOpen" title="Abrir barrera (Apertura manual)">
+              <svg viewBox="0 0 24 24" fill="none">
+                <path d="M7 11V7a5 5 0 0 1 10 0" />
+                <rect x="3" y="11" width="18" height="10" rx="2" ry="2" />
+              </svg>
+              <span>Apertura manual</span>
+            </button>
           </div>
         </div>
         <div class="table-responsive">
@@ -635,6 +642,51 @@
     const state = { search: '', page: 1 };
     const pageSize = 20;
     let allRows = [];
+
+    const manualOpenBtn = document.getElementById('btnManualOpen');
+
+    if (manualOpenBtn) {
+      manualOpenBtn.addEventListener('click', async () => {
+        // Confirmación simple para evitar toques accidentales
+        const sure = await Dialog.confirm?.('¿Deseas realizar una APERTURA MANUAL de la barrera?', 'Confirmar apertura');
+        if (sure === false) return;
+
+        manualOpenBtn.disabled = true;
+        const original = manualOpenBtn.textContent;
+        manualOpenBtn.textContent = 'Aperturando…';
+
+        // Loader bonito (si ya usas Dialog.loading)
+        const m = Dialog.loading?.({ title: 'Apertura manual', message: 'Contactando servicio local…' });
+
+        try {
+          const res = await fetchJSON(api('gate/manual-open'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+          });
+
+          if (!res.ok) {
+            throw new Error(res.message || 'No se pudo aperturar');
+          }
+
+          // Mensaje de éxito
+          Dialog.ok(
+            [
+              'Apertura manual ejecutada.',
+              res.opened_at ? `\nHora: ${res.opened_at}` : '',
+              res.code !== undefined ? `\nCódigo: ${res.code}` : '',
+              res.message ? `\nMensaje: ${res.message}` : '',
+            ].join(''),
+            'Apertura manual'
+          );
+        } catch (e) {
+          Dialog.err(e, 'Error en apertura manual');
+        } finally {
+          if (m && typeof m.close === 'function') m.close();
+          manualOpenBtn.disabled = false;
+          manualOpenBtn.textContent = original;
+        }
+      });
+    }
 
     const formatCurrency = (value) => {
       if (value === null || value === undefined || value === '') return '—';

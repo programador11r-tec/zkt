@@ -77,6 +77,10 @@ $router->get('/api/g4s/lookup-nit', function () {
   }
 });
 
+// POST /api/gate/manual-open
+$router->post('/api/gate/manual-open', function() use ($controller) {
+    $controller->openGateManual();
+});
 
 
 /* =============== Frontend =============== */

@@ -271,7 +271,7 @@
       return;
     }
 
-    const POLL_INTERVAL = 600000;
+    const POLL_INTERVAL = 30000;
 
     const poll = async () => {
       try {

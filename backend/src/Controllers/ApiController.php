@@ -273,7 +273,7 @@ class ApiController {
             if (!empty($metrics['invoices_last_sync'])) {
                 $activity[] = [
                     'title' => 'Factura emitida',
-                    'subtitle' => 'Última certificación FEL registrada',
+                    'subtitle' => 'Último certificación FEL registrada',
                     'timestamp' => $metrics['invoices_last_sync'],
                     'status' => 'online',
                 ];
@@ -555,7 +555,7 @@ class ApiController {
             $stmt->execute($params);
             $touched++;
 
-            // 👉 crea stub en payments si no hay ninguno aún
+            // crea stub en payments si no hay ninguno aún
             $this->ensurePaymentStub($pdo, $row);
         }
 
@@ -569,7 +569,7 @@ class ApiController {
         $ticketNo = trim((string)($t['ticket_no'] ?? ''));
         if ($ticketNo === '') return;
 
-        // ¿ya hay algún pago para este ticket?
+        // Â¿ya hay algÃºn pago para este ticket?
         $chk = $pdo->prepare("SELECT 1 FROM payments WHERE ticket_no = :t LIMIT 1");
         $chk->execute([':t' => $ticketNo]);
         if ($chk->fetchColumn()) {
@@ -593,7 +593,7 @@ class ApiController {
         $ins = $pdo->prepare($sql);
         $ins->execute([
             ':ticket_no' => $ticketNo,
-            ':amount'    => 0.00,          // “sin pagos” => 0.00
+            ':amount'    => 0.00,          // â€œsin pagosâ€ => 0.00
             ':method'    => 'pending',     // marca clara de que es un stub
             ':paid_at'   => $paidAt,       // o null si tu columna lo permite
         ]);
@@ -935,7 +935,7 @@ class ApiController {
 
             $resp = $g4s->issuedListRT($filters);
 
-            // Normalización → filas para tabla
+            // NormalizaciÃ³n â†’ filas para tabla
             $rows = [];
             $candidates = [
                 $resp['Response']['Identifier'] ?? null,
@@ -1026,27 +1026,27 @@ class ApiController {
                 echo json_encode(['ok' => false, 'error' => 'ticket_no requerido']); return;
             }
             if ($mode === 'custom' && (!is_finite($customTotal) || $customTotal <= 0)) {
-                echo json_encode(['ok' => false, 'error' => 'custom_total inválido']); return;
+                echo json_encode(['ok' => false, 'error' => 'custom_total invÃ¡lido']); return;
             }
 
-            // 1) Calcula el total según tu lógica (o usa $customTotal si viene)
+            // 1) Calcula el total segÃºn tu lÃ³gica (o usa $customTotal si viene)
             [$hours, $minutes, $total] = $this->resolveTicketAmount($ticketNo, $mode, $customTotal);
 
             // 2) Prepara datos para G4S
             $cfg    = new \Config\Config(__DIR__ . '/../../.env');
             $client = new \App\Services\G4SClient($cfg);
 
-            // IMPORTANTE: pasa el NIT que llegó del frontend
+            // IMPORTANTE: pasa el NIT que llegÃ³ del frontend
             $payload = [
                 'ticket_no'    => $ticketNo,
-                'receptor_nit' => $receptorNit,      // ← AQUÍ
+                'receptor_nit' => $receptorNit,      //  ← AQUÍ
                 'total'        => $total,
                 'hours'        => $hours,
                 'minutes'      => $minutes,
                 'mode'         => $mode,
             ];
 
-            // 3) Llama a la certificación
+            // 3) Llama a la certificaciÃ³n
             $res = $client->submitInvoice($payload);
 
             // Log de salida cruda de G4S
@@ -1084,21 +1084,22 @@ class ApiController {
         );
     }
 
-    /** Devuelve [hours, minutes, total] según tu lógica actual */
+    /** Devuelve [hours, minutes, total] segÃºn tu lÃ³gica actual */
     private function resolveTicketAmount(string $ticketNo, string $mode, ?float $customTotal): array
     {
         if ($mode === 'custom') {
             return [null, null, (float)$customTotal];
         }
-        // Aquí usa tu cálculo que ya corrigimos con “ceil a horas exactas”.
+        // AquÃ­ usa tu cÃ¡lculo que ya corrigimos con â€œceil a horas exactasâ€.
         // Hardcode simple de ejemplo:
         return [2, 0, 60.00];
     }
 
+
     public function getTicketsFromDB() {
         try {
             $pdo = \App\Utils\DB::pdo($this->config);
-            // últimos 200 tickets (ejemplo)
+            // Ãºltimos 200 tickets (ejemplo)
             $st = $pdo->query("SELECT ticket_no, plate, status, entry_at, exit_at FROM tickets ORDER BY created_at DESC LIMIT 200");
             $rows = [];
             while ($r = $st->fetch(\PDO::FETCH_ASSOC)) {
@@ -1429,7 +1430,7 @@ class ApiController {
             if ($uuid === '') throw new \InvalidArgumentException('uuid requerido');
             $g4s  = new \App\Services\G4SClient($this->config);
 
-            // PDF binario como base64 o bytes según proveedor; aquí asumimos base64 en Response.Data
+            // PDF binario como base64 o bytes segÃºn proveedor; aquÃ­ asumimos base64 en Response.Data
             $respStr = $g4s->requestTransaction([
                 'Transaction' => 'GET_DOCUMENT',
                 'Data1'       => $uuid,  // UUID
@@ -1495,7 +1496,7 @@ class ApiController {
         }
 
         if ($exit === null) {
-            $exit = new \DateTimeImmutable('now', $tz); // “ahora” en misma TZ
+            $exit = new \DateTimeImmutable('now', $tz); // â€œahoraâ€ en misma TZ
         }
 
         // Diferencia en segundos (no negativa)
@@ -1503,12 +1504,12 @@ class ApiController {
 
         // === Regla pedida ===
         // - Cobro por hora redondeando hacia arriba (ceil), respecto al tiempo real.
-        // - Mínimo 1 hora si hubo estancia (>0 segundos).
+        // - MÃ­nimo 1 hora si hubo estancia (>0 segundos).
         // Ejemplos que se cumplen:
-        //  5:14 → 6:16  = 1h 02m => ceil(3720/3600)=2h
-        //  5:14 → 7:13  = 1h 59m => ceil(7140/3600)=2h
-        //  5:14 → 7:14  = 2h 00m => ceil(7200/3600)=2h
-        //  5:14 → 7:15  = 2h 01m => ceil(7260/3600)=3h
+        //  5:14 â†’ 6:16  = 1h 02m => ceil(3720/3600)=2h
+        //  5:14 â†’ 7:13  = 1h 59m => ceil(7140/3600)=2h
+        //  5:14 â†’ 7:14  = 2h 00m => ceil(7200/3600)=2h
+        //  5:14 â†’ 7:15  = 2h 01m => ceil(7260/3600)=3h
         $billedHours = 0.0;
         $durationMin = null;
 
@@ -1516,9 +1517,9 @@ class ApiController {
             if ($enforceMinimumHour) {
                 $billedHours = (float) ceil($diffSec / 3600);
                 if ($billedHours < 1.0) $billedHours = 1.0;
-                $durationMin = (int) ($billedHours * 60); // múltiplo exacto de 60
+                $durationMin = (int) ($billedHours * 60); // mÃºltiplo exacto de 60
             } else {
-                // sin forzar hora mínima: solo ceil a minutos
+                // sin forzar hora mÃ­nima: solo ceil a minutos
                 $mins = (int) ceil($diffSec / 60.0);
                 $durationMin = $mins > 0 ? $mins : null;
                 $billedHours = $durationMin !== null ? ($durationMin / 60.0) : 0.0;
@@ -1526,7 +1527,7 @@ class ApiController {
         } else {
             // sin estancia
             if ($enforceMinimumHour) {
-                // si quieres que 0s NO cobren, deja duración en null y horas 0
+                // si quieres que 0s NO cobren, deja duraciÃ³n en null y horas 0
                 $billedHours = 0.0;
                 $durationMin = null;
             } else {

@@ -1489,15 +1489,11 @@ class ApiController {
         $error = $res['error'] ?? null;
 
         // === 4) Persistir en BD e inspeccionar datos de tickets/payments ===
-        $dsn  = $cfg->get('DB_DSN',  'mysql:host=127.0.0.1;dbname=zkt;charset=utf8mb4');
-        $user = $cfg->get('DB_USER', 'root');
-        $pass = $cfg->get('DB_PASS', '');
+        // Sustituye TODO este bloque:
 
-        $pdo = new \PDO($dsn, $user, $pass, [
-            \PDO::ATTR_ERRMODE            => \PDO::ERRMODE_EXCEPTION,
-            \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC,
-        ]);
-
+        // Por esto:
+        $pdo = \App\Utils\DB::pdo($this->config);
+        $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
         $pdo->beginTransaction();
 
         // Leer entry/exit/plate actuales (si existen)

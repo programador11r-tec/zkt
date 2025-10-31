@@ -361,18 +361,18 @@ class ApiController {
         $t0  = microtime(true);
 
         try {
-            Logger::info('park.sync.start', ['cid' => $cid]);
+            //Logger::info('park.sync.start', ['cid' => $cid]);
 
             $baseUrl = rtrim((string) $this->config->get('HAMACHI_PARK_BASE_URL', ''), '/');
             if ($baseUrl === '') {
-                Logger::error('park.sync.no_base_url', ['cid' => $cid]);
+                //Logger::error('park.sync.no_base_url', ['cid' => $cid]);
                 Http::json(['ok' => false, 'error' => 'HAMACHI_PARK_BASE_URL no está configurado.'], 400);
                 return;
             }
 
             $accessToken = (string) ($_GET['access_token'] ?? $this->config->get('HAMACHI_PARK_ACCESS_TOKEN', ''));
             if ($accessToken === '') {
-                Logger::warning('park.sync.no_token', ['cid' => $cid]);
+                //Logger::warning('park.sync.no_token', ['cid' => $cid]);
                 // sigue si tu API no exige token
             }
 
@@ -394,14 +394,14 @@ class ApiController {
             if ($hostHeader !== '') $headers[] = 'Host: ' . $hostHeader;
 
             $verifySsl = strtolower((string) $this->config->get('HAMACHI_PARK_VERIFY_SSL', 'false')) === 'true';
-            Logger::debug('park.sync.req', [
+            /*Logger::debug('park.sync.req', [
                 'cid'        => $cid,
                 'endpoint'   => $endpoint,
                 'headers'    => $headers,
                 'verify_ssl' => $verifySsl,
                 'pageNo'     => $pageNo,
                 'pageSize'   => $pageSize,
-            ]);
+            ]);*/
 
             // cURL request
             $ch = curl_init($endpoint);
@@ -425,7 +425,7 @@ class ApiController {
             $connectTo = trim((string)$this->config->get('HAMACHI_PARK_CONNECT_TO', '')); // ej: "localhost:8098:25.21.54.208:8098"
             if ($connectTo !== '') {
                 curl_setopt($ch, CURLOPT_CONNECT_TO, [$connectTo]);
-                Logger::debug('http.connect_to', ['cid' => $cid, 'connect_to' => $connectTo]);
+                //Logger::debug('http.connect_to', ['cid' => $cid, 'connect_to' => $connectTo]);
             }
 
             $raw = curl_exec($ch);
@@ -434,14 +434,14 @@ class ApiController {
                 $info = curl_getinfo($ch) ?: [];
                 curl_close($ch);
 
-                Logger::error('park.sync.http_failed', [
+               /* Logger::error('park.sync.http_failed', [
                     'cid'               => $cid,
                     'endpoint'          => $endpoint,
                     'error'             => $err,
                     'curl_info'         => $info,
                     'duration_ms'       => $this->msSince($t0),
                     'hint'              => 'Verifica IP/puerto, firewall, y que BASE_URL/CONNECT_TO sean correctos',
-                ]);
+                ]);*/
                 throw new \RuntimeException('Error al contactar API remota: ' . $err);
             }
 
@@ -450,7 +450,7 @@ class ApiController {
             curl_close($ch);
 
             $len = strlen($raw);
-            Logger::info('park.sync.http_ok', [
+            /*Logger::info('park.sync.http_ok', [
                 'cid'               => $cid,
                 'status'            => $status,
                 'resp_bytes'        => $len,
@@ -461,23 +461,23 @@ class ApiController {
                 'total_time'        => $info['total_time'] ?? null,
                 'primary_ip'        => $info['primary_ip'] ?? null,
                 'local_ip'          => $info['local_ip'] ?? null,
-            ]);
+            ]);*/
 
             if ($status < 200 || $status >= 300) {
                 $preview = substr($raw, 0, 500);
-                Logger::error('park.sync.bad_status', ['cid' => $cid, 'status' => $status, 'preview' => $preview]);
+                //Logger::error('park.sync.bad_status', ['cid' => $cid, 'status' => $status, 'preview' => $preview]);
                 throw new \RuntimeException('API remota respondió ' . $status . ': ' . $preview);
             }
 
             $payload = json_decode($raw, true);
             if (!is_array($payload)) {
-                Logger::error('park.sync.non_json', ['cid' => $cid, 'preview' => substr($raw, 0, 300)]);
+                //Logger::error('park.sync.non_json', ['cid' => $cid, 'preview' => substr($raw, 0, 300)]);
                 throw new \RuntimeException('Respuesta remota inválida, no es JSON.');
             }
 
             $records = $this->extractParkRecords($payload);
             if (!$records) {
-                Logger::info('park.sync.no_records', ['cid' => $cid, 'endpoint' => $endpoint]);
+                /*Logger::info('park.sync.no_records', ['cid' => $cid, 'endpoint' => $endpoint]);
                 Http::json([
                     'ok'       => true,
                     'endpoint' => $endpoint,
@@ -485,7 +485,7 @@ class ApiController {
                     'upserted' => 0,
                     'skipped'  => 0,
                     'message'  => 'La API remota no devolvió registros.',
-                ]);
+                ]);*/
                 return;
             }
 
@@ -494,14 +494,14 @@ class ApiController {
 
             $upserted = $this->persistTickets($pdo, $records); // normaliza adentro
 
-            Logger::info('remote.park.sync_success', [
+            /*Logger::info('remote.park.sync_success', [
                 'cid'        => $cid,
                 'endpoint'   => $endpoint,
                 'fetched'    => count($records),
                 'upserted'   => $upserted,
                 'skipped'    => 0,
                 'total_ms'   => $this->msSince($t0),
-            ]);
+            ]);*/
 
             Http::json([
                 'ok'       => true,
@@ -575,9 +575,9 @@ class ApiController {
             $ticketNo = $row['ticket_no'] ?? null;
             $plate    = $row['plate'] ?? null;
 
-            Logger::info('tickets.check.begin', [
+            /*Logger::info('tickets.check.begin', [
                 'cid' => $cid, 'i' => $idx, 'ticket_no' => $ticketNo, 'plate' => $plate
-            ]);
+            ]);*/
 
             // 1) ¿Existe ya?
             $existsStmt->execute([':ticket_no' => $ticketNo]);
@@ -585,12 +585,12 @@ class ApiController {
 
             if ($exists) {
                 // NO insertar / NO actualizar / NO billing: solo saltar
-                Logger::info('tickets.skip.exists', [
+                /*Logger::info('tickets.skip.exists', [
                     'cid' => $cid,
                     'i'   => $idx,
                     'ticket_no' => $ticketNo,
                     'elapsed_ms' => $this->msSince($t0),
-                ]);
+                ]);*/
                 continue;
             }
 
@@ -610,30 +610,30 @@ class ApiController {
                 $params[':updated_at'] = (new \DateTime('now'))->format('Y-m-d H:i:s');
             }
 
-            Logger::info('tickets.insert.begin', [
+           /* Logger::info('tickets.insert.begin', [
                 'cid' => $cid, 'i' => $idx, 'ticket_no' => $ticketNo, 'plate' => $plate
-            ]);
+            ]);*/
 
             $insertStmt->execute($params);
             $inserted++;
 
-            Logger::info('tickets.insert.ok', [
+          /*  Logger::info('tickets.insert.ok', [
                 'cid' => $cid,
                 'i'   => $idx,
                 'ticket_no' => $ticketNo,
                 'elapsed_ms' => $this->msSince($t0),
-            ]);
+            ]);*/
 
             // 3) BILLING: solo para nuevos inserts
             $b0 = microtime(true);
             try {
                 $billingEnabled = strtolower((string)$this->config->get('BILLING_ENABLED','true')) === 'true';
                 if (!$billingEnabled) {
-                    Logger::info('billing.skip.disabled', ['cid' => $cid, 'ticket_no' => $ticketNo]);
+                    //Logger::info('billing.skip.disabled', ['cid' => $cid, 'ticket_no' => $ticketNo]);
                 } else {
-                    Logger::info('billing.ensure.begin', ['cid' => $cid, 'ticket_no' => $ticketNo, 'plate' => $plate]);
+                    //Logger::info('billing.ensure.begin', ['cid' => $cid, 'ticket_no' => $ticketNo, 'plate' => $plate]);
                     $this->ensurePaymentStub($pdo, $row);
-                    Logger::info('billing.ensure.done', ['cid' => $cid, 'ticket_no' => $ticketNo, 'elapsed_ms' => $this->msSince($b0)]);
+                    //Logger::info('billing.ensure.done', ['cid' => $cid, 'ticket_no' => $ticketNo, 'elapsed_ms' => $this->msSince($b0)]);
                 }
             } catch (\Throwable $e) {
                 Logger::error('billing.ensure.failed', [
@@ -644,12 +644,12 @@ class ApiController {
                 ]);
             }
 
-            Logger::info('tickets.process.end', [
+            /*Logger::info('tickets.process.end', [
                 'cid' => $cid,
                 'i'   => $idx,
                 'ticket_no' => $ticketNo,
                 'total_ms'  => $this->msSince($t0),
-            ]);
+            ]);*/
         }
 
         return $inserted; // cantidad realmente insertada
@@ -1343,250 +1343,176 @@ class ApiController {
             Http::json(['ok'=>false,'error'=>$e->getMessage()], 500);
         }
     }
-
-    public function felIssuedRT() {
-        try {
-            $g4s = new \App\Services\G4SClient($this->config);
-            $filters = [
-                'from'      => $_GET['from'] ?? date('Y-m-d'),
-                'to'        => $_GET['to']   ?? date('Y-m-d'),
-                'page'      => (int)($_GET['page'] ?? 1),
-                'page_size' => (int)($_GET['page_size'] ?? 50),
-            ];
-            if (!empty($_GET['nitReceptor'])) $filters['nitReceptor'] = $_GET['nitReceptor'];
-            if (!empty($_GET['uuid']))        $filters['uuid'] = $_GET['uuid'];
-
-            $resp = $g4s->issuedListRT($filters);
-
-            // NormalizaciÃ³n â†’ filas para tabla
-            $rows = [];
-            $candidates = [
-                $resp['Response']['Identifier'] ?? null,
-                $resp['ResponseData']['ResponseDataSet'] ?? null,
-                $resp['items'] ?? null,
-                $resp['data'] ?? null,
-                $resp
-            ];
-            foreach ($candidates as $cand) {
-                if (empty($cand)) continue;
-                $iter = is_array($cand) && (array_keys($cand) !== range(0, count($cand) - 1)) ? [$cand] : (is_array($cand) ? $cand : []);
-                foreach ($iter as $r) {
-                    if (!is_array($r)) continue;
-                    $rows[] = [
-                        'ticket_no'=> $r['InternalID'] ?? $r['ANumber'] ?? null,
-                        'fecha'    => $r['IssuedTimeStamp'] ?? $r['fecha'] ?? $resp['Response']['TimeStamp'] ?? null,
-                        'serie'    => $r['Serial'] ?? $r['serie'] ?? null,
-                        'numero'   => $r['ANumber'] ?? $r['numero'] ?? null,
-                        'uuid'     => $r['DocumentGUID'] ?? $r['UUID'] ?? $r['uuid'] ?? null,
-                        'receptor' => $r['ReceiverTaxID'] ?? $r['nitReceptor'] ?? $r['ReceiverName'] ?? null,
-                        'total'    => $r['TotalAmount'] ?? $r['total'] ?? null,
-                        'estado'   => $resp['Response']['LastResult'] ?? $r['estado'] ?? null,
-                    ];
-                }
-                if ($rows) break;
-            }
-
-            \App\Utils\Http::json(['ok'=>true, 'rows'=>$rows, 'raw'=>$resp]);
-        } catch (\Throwable $e) {
-            \App\Utils\Logger::error('felIssuedRT error', ['e'=>$e->getMessage()]);
-            \App\Utils\Http::json(['ok'=>false,'error'=>$e->getMessage()], 500);
-        }
-    }
-
-    public function getTickets(){
-        try {
-            $g4s = new \App\Services\G4SClient($this->config);
-            $filters = [
-                'from'      => $_GET['from'] ?? date('Y-m-d'),
-                'to'        => $_GET['to']   ?? date('Y-m-d'),
-                'page'      => 1,
-                'page_size' => 50,
-            ];
-            // Puedes mapear lo que venga de G4S a una tabla simple para el dashboard
-            $resp = $g4s->issuedListRT($filters);
-
-            $src  = $resp['Response']['Identifier'] ?? $resp['items'] ?? $resp['data'] ?? $resp;
-            $iter = is_array($src) && (array_keys($src) !== range(0, count($src)-1)) ? [$src] : (is_array($src) ? $src : []);
-            $rows = [];
-            foreach ($iter as $r) {
-                if (!is_array($r)) continue;
-                $rows[] = [
-                    'name'    => $r['ReceiverName'] ?? ($r['ReceiverTaxID'] ?? '—'),
-                    'checkIn' => $r['IssuedTimeStamp'] ?? ($r['fecha'] ?? ''),
-                    'checkOut'=> '',
-                ];
-            }
-            \App\Utils\Http::json(['ok'=>true,'data'=>$rows]);
-        } catch (\Throwable $e) {
-            \App\Utils\Http::json(['ok'=>false,'error'=>$e->getMessage()], 500);
-        }
-    }                   
+    
 
     function is_assoc(array $arr): bool {
         return array_keys($arr) !== range(0, count($arr) - 1);
     }
 
     public function invoiceOne(): void
-{
-    header('Content-Type: application/json; charset=utf-8');
+    {
+        header('Content-Type: application/json; charset=utf-8');
 
-    try {
-        $raw  = file_get_contents('php://input') ?: '{}';
-        $body = json_decode($raw, true) ?: [];
-
-        $ticketNo    = trim((string)($body['ticket_no'] ?? ''));
-        $receptorNit = strtoupper(trim((string)($body['receptor_nit'] ?? 'CF'))); // CF permitido
-        $mode        = (string)($body['mode'] ?? 'hourly'); // hourly | monthly | custom
-        $customTotal = isset($body['custom_total']) ? (float)$body['custom_total'] : null;
-
-        $this->debugLog('fel_invoice_in.txt', ['body' => $body, 'server' => $_SERVER]);
-
-        if ($ticketNo === '') {
-            echo json_encode(['ok' => false, 'error' => 'ticket_no requerido']); return;
-        }
-        if ($mode === 'custom' && (!is_finite($customTotal) || $customTotal <= 0)) {
-            echo json_encode(['ok' => false, 'error' => 'custom_total inválido']); return;
-        }
-        if ($receptorNit !== 'CF' && !ctype_digit($receptorNit)) {
-            echo json_encode(['ok' => false, 'error' => 'NIT inválido (use CF o solo dígitos)']); return;
-        }
-
-        // === 1) Calcular montos ===
-        $calc = $this->resolveTicketAmount($ticketNo, $mode, $customTotal);
-        $hours   = (float)($calc[0] ?? 0);
-        $minutes = (int)  ($calc[1] ?? 0);
-        $total   = (float)($calc[2] ?? 0);
-        $extra   = is_array($calc[3] ?? null) ? $calc[3] : [];
-
-        $durationMin = (int)($hours * 60 + $minutes);
-        $hoursBilled = (int)ceil($durationMin / 60);
-
-        // Si resolveTicketAmount ya te trae un billing calculado úsalo; si no, usa total
-        $billingAmount = isset($extra['billing_amount']) ? (float)$extra['billing_amount'] : $total;
-
-        // === 2) Cliente G4S + payload ===
-        $cfg    = new \Config\Config(__DIR__ . '/../../.env');
-        $client = new \App\Services\G4SClient($cfg);
-
-        $payload = [
-            'ticket_no'    => $ticketNo,
-            'receptor_nit' => $receptorNit,
-            'total'        => $total,
-            'hours'        => $hours,
-            'minutes'      => $minutes,
-            'mode'         => $mode,
-        ];
-
-        // === 3) Certificar con G4S ===
-        $res = $client->submitInvoice($payload);
-        $this->debugLog('fel_invoice_out.txt', [
-            'request_payload' => $payload,
-            'g4s_response'    => $res,
-        ]);
-
-        $ok    = (bool)($res['ok'] ?? false);
-        $uuid  = $res['uuid']  ?? null;
-        $error = $res['error'] ?? null;
-
-        // === 4) Persistir en BD e inspeccionar datos de tickets/payments ===
-        // Sustituye TODO este bloque:
-
-        // Por esto:
-        $pdo = \App\Utils\DB::pdo($this->config);
-        $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
-        $pdo->beginTransaction();
-
-        // Leer entry/exit/plate actuales (si existen)
-        $entryAt = $exitAt = $plate = null;
         try {
-            $q = $pdo->prepare("SELECT entry_at, exit_at, plate FROM tickets WHERE ticket_no = :t LIMIT 1");
-            $q->execute([':t' => $ticketNo]);
-            if ($row = $q->fetch()) {
-                $entryAt = $row['entry_at'] ?? null;
-                $exitAt  = $row['exit_at']  ?? null;
-                $plate   = $row['plate']    ?? null;
+            $raw  = file_get_contents('php://input') ?: '{}';
+            $body = json_decode($raw, true) ?: [];
+
+            $ticketNo    = trim((string)($body['ticket_no'] ?? ''));
+            $receptorNit = strtoupper(trim((string)($body['receptor_nit'] ?? 'CF'))); // CF permitido
+            $mode        = (string)($body['mode'] ?? 'hourly'); // hourly | custom | grace
+            $customTotal = isset($body['custom_total']) ? (float)$body['custom_total'] : null;
+
+            $this->debugLog('fel_invoice_in.txt', ['body' => $body, 'server' => $_SERVER]);
+
+            if ($ticketNo === '') {
+                echo json_encode(['ok' => false, 'error' => 'ticket_no requerido']); return;
             }
-        } catch (\Throwable $e) {
-            // ignorar si no existen las columnas
-        }
-
-        $hourlyRate  = $extra['hourly_rate']  ?? null;
-        $monthlyRate = $extra['monthly_rate'] ?? null;
-
-        // === (NUEVO) Leer payment para obtener billin y recordId (billin_json) ===
-        $payBillin   = 0.0;
-        $payRecordId = '0';
-        $payPlate    = $plate;
-        try {
-            $qp = $pdo->prepare("SELECT billin, billin_json, plate FROM payments WHERE ticket_no = :t LIMIT 1");
-            $qp->execute([':t' => $ticketNo]);
-            if ($pr = $qp->fetch()) {
-                if (isset($pr['billin']) && is_numeric($pr['billin'])) $payBillin = (float)$pr['billin'];
-                if (!empty($pr['billin_json'])) $payRecordId = (string)$pr['billin_json']; // aquí guardamos solo el recordId o "0"
-                if (!empty($pr['plate'])) $payPlate = $pr['plate'];
+            if ($mode === 'custom' && (!is_finite($customTotal) || $customTotal <= 0)) {
+                echo json_encode(['ok' => false, 'error' => 'custom_total inválido']); return;
             }
-        } catch (\Throwable $e) {
-            // continuar con defaults
-        }
+            if ($receptorNit !== 'CF' && !ctype_digit($receptorNit)) {
+                echo json_encode(['ok' => false, 'error' => 'NIT inválido (use CF o solo dígitos)']); return;
+            }
 
-        // Insertar factura
-        $stmt = $pdo->prepare("
-            INSERT INTO invoices
-            (
-                ticket_no, total, uuid, status,
-                request_json, response_json, created_at,
-                receptor_nit, entry_at, exit_at,
-                duration_min, hours_billed, billing_mode,
-                hourly_rate, monthly_rate
-            )
-            VALUES
-            (
-                :ticket_no, :total, :uuid, :status,
-                :request_json, :response_json, NOW(),
-                :receptor_nit, :entry_at, :exit_at,
-                :duration_min, :hours_billed, :billing_mode,
-                :hourly_rate, :monthly_rate
-            )
-        ");
-        $stmt->execute([
-            ':ticket_no'     => $ticketNo,
-            ':total'         => $total,
-            ':uuid'          => $uuid,
-            ':status'        => $ok ? 'CERTIFIED' : 'FAILED',
-            ':request_json'  => json_encode($payload, JSON_UNESCAPED_UNICODE),
-            ':response_json' => json_encode($res,     JSON_UNESCAPED_UNICODE),
-            ':receptor_nit'  => $receptorNit,
-            ':entry_at'      => $entryAt,
-            ':exit_at'       => $exitAt,
-            ':duration_min'  => $durationMin,
-            ':hours_billed'  => $hoursBilled,
-            ':billing_mode'  => $mode,
-            ':hourly_rate'   => $hourlyRate,
-            ':monthly_rate'  => $monthlyRate,
-        ]);
+            $isGrace = ($mode === 'grace');
 
-        // Cerrar ticket (marcar cierre lógico)
-        $up = $pdo->prepare("UPDATE tickets SET status = 'CLOSED', exit_at = NOW() WHERE ticket_no = :t");
-        $up->execute([':t' => $ticketNo]);
+            // 1) Calcular montos: en gracia obtenemos tiempos, pero total forzado 0.00
+            $calc = $this->resolveTicketAmount($ticketNo, $isGrace ? 'hourly' : $mode, $customTotal);
+            $hours   = (float)($calc[0] ?? 0);
+            $minutes = (int)  ($calc[1] ?? 0);
+            $total   = $isGrace ? 0.00 : (float)($calc[2] ?? 0);
+            $extra   = is_array($calc[3] ?? null) ? $calc[3] : [];
 
-        $pdo->commit();
+            $durationMin  = (int) max(0, $hours * 60 + $minutes);
+            $hoursBilled  = (int) ceil($durationMin / 60);
+            $billingAmount= $isGrace ? 0.00 : (isset($extra['billing_amount']) ? (float)$extra['billing_amount'] : $total);
 
-        // === 5) Notificación a /payNotify (apertura automática si todo OK)
-        $manualOpen     = false;
-        $payNotifySent  = false;  // HTTP 2xx
-        $payNotifyAck   = false;  // JSON {code:0}
-        $payNotifyError = null;
-        $payNotifyRaw   = null;
-        $payNotifyType  = null;
+            // 2) Config/DB
+            $cfg = new \Config\Config(__DIR__ . '/../../.env');
+            $pdo = \App\Utils\DB::pdo($this->config);
+            $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
 
-        if ($ok) {
-            // Monto efectivo para decidir: preferimos billin real; si no hay, el billingAmount calculado
+            // Leer info del ticket
+            $entryAt = $exitAt = $plate = null;
+            try {
+                $q = $pdo->prepare("SELECT entry_at, exit_at, plate FROM tickets WHERE ticket_no = :t LIMIT 1");
+                $q->execute([':t' => $ticketNo]);
+                if ($row = $q->fetch()) {
+                    $entryAt = $row['entry_at'] ?? null;
+                    $exitAt  = $row['exit_at']  ?? null;
+                    $plate   = $row['plate']    ?? null;
+                }
+            } catch (\Throwable $e) { /* columnas faltantes: ignorar */ }
+
+            // Rates nunca NULL (por constraints)
+            $hourlyRate   = is_numeric($extra['hourly_rate']  ?? null) ? (float)$extra['hourly_rate']  : 0.00;
+            $monthlyRate  = is_numeric($extra['monthly_rate'] ?? null) ? (float)$extra['monthly_rate'] : 0.00;
+
+            // Para payNotify: leer billing/recordId/plate guardado en payments
+            $payBillin   = 0.0;
+            $payRecordId = '0';
+            $payPlate    = $plate;
+            try {
+                $qp = $pdo->prepare("SELECT billin, billin_json, plate FROM payments WHERE ticket_no = :t LIMIT 1");
+                $qp->execute([':t' => $ticketNo]);
+                if ($pr = $qp->fetch()) {
+                    if (isset($pr['billin']) && is_numeric($pr['billin'])) $payBillin = (float)$pr['billin'];
+                    if (!empty($pr['billin_json'])) $payRecordId = (string)$pr['billin_json']; // recordId o "0"
+                    if (!empty($pr['plate'])) $payPlate = $pr['plate'];
+                }
+            } catch (\Throwable $e) {}
+
+            // 3) G4S solo si NO es gracia
+            $felOk = false;
+            $uuid  = null;
+            $felRes = null;
+            $felErr = null;
+
+            if (!$isGrace) {
+                $client = new \App\Services\G4SClient($cfg);
+                $payloadFel = [
+                    'ticket_no'    => $ticketNo,
+                    'receptor_nit' => $receptorNit,
+                    'total'        => $total,
+                    'hours'        => $hours,
+                    'minutes'      => $minutes,
+                    'mode'         => $mode,
+                ];
+
+                $felRes = $client->submitInvoice($payloadFel);
+                $this->debugLog('fel_invoice_out.txt', [
+                    'request_payload' => $payloadFel,
+                    'g4s_response'    => $felRes,
+                ]);
+
+                $felOk  = (bool)($felRes['ok'] ?? false);
+                $uuid   = $felRes['uuid']  ?? null;
+                $felErr = $felRes['error'] ?? null;
+            }
+
+            // 4) Persistir en BD + cerrar ticket
+            $pdo->beginTransaction();
+            $stmt = $pdo->prepare("
+                INSERT INTO invoices
+                (
+                    ticket_no, total, uuid, status,
+                    request_json, response_json, created_at,
+                    receptor_nit, entry_at, exit_at,
+                    duration_min, hours_billed, billing_mode,
+                    hourly_rate, monthly_rate
+                )
+                VALUES
+                (
+                    :ticket_no, :total, :uuid, :status,
+                    :request_json, :response_json, NOW(),
+                    :receptor_nit, :entry_at, :exit_at,
+                    :duration_min, :hours_billed, :billing_mode,
+                    :hourly_rate, :monthly_rate
+                )
+            ");
+
+            $status = $isGrace ? 'GRATIS' : ($felOk ? 'CERTIFIED' : 'FAILED');
+
+            $stmt->execute([
+                ':ticket_no'     => $ticketNo,
+                ':total'         => $total, // en gracia = 0.00
+                ':uuid'          => $uuid,  // en gracia NULL
+                ':status'        => $status,
+                ':request_json'  => json_encode(
+                    $isGrace
+                        ? ['mode'=>'grace','ticket_no'=>$ticketNo,'receptor_nit'=>$receptorNit,'total'=>0]
+                        : ['mode'=>$mode,'ticket_no'=>$ticketNo,'receptor_nit'=>$receptorNit,'total'=>$total],
+                    JSON_UNESCAPED_UNICODE
+                ),
+                ':response_json' => json_encode($isGrace ? ['ok'=>true,'note'=>'no FEL (grace)'] : $felRes, JSON_UNESCAPED_UNICODE),
+                ':receptor_nit'  => $receptorNit,
+                ':entry_at'      => $entryAt,
+                ':exit_at'       => $exitAt,
+                ':duration_min'  => $durationMin,
+                ':hours_billed'  => $hoursBilled,
+                ':billing_mode'  => $isGrace ? 'grace' : $mode,
+                ':hourly_rate'   => $hourlyRate,
+                ':monthly_rate'  => $monthlyRate,
+            ]);
+
+            // Sellar salida si no existía
+            $up = $pdo->prepare("UPDATE tickets SET status = 'CLOSED', exit_at = COALESCE(exit_at, NOW()) WHERE ticket_no = :t");
+            $up->execute([':t' => $ticketNo]);
+
+            $pdo->commit();
+
+            // 5) payNotify (para gracia SIEMPRE se intenta; para otros solo si FEL ok y billing>0)
+            $manualOpen     = false;
+            $payNotifySent  = false;
+            $payNotifyAck   = false;
+            $payNotifyError = null;
+            $payNotifyRaw   = null;
+            $payNotifyType  = null;
+
             $effectiveBilling = ($payBillin > 0) ? $payBillin : (float)$billingAmount;
+            $shouldNotify     = $isGrace ? true : ($felOk && $effectiveBilling > 0);
 
-            if ($effectiveBilling <= 0) {
-                // Factura certificada pero sin monto de billing → apertura manual
-                $manualOpen = true;
-            } else {
+            if ($shouldNotify) {
                 $cid = $this->newCorrelationId('paynotify');
 
                 $baseUrl = rtrim((string) $this->config->get('HAMACHI_PARK_BASE_URL', ''), '/');
@@ -1595,15 +1521,14 @@ class ApiController {
                     $payNotifyError = 'HAMACHI_PARK_BASE_URL no está configurado.';
                     $manualOpen = true;
                 } else {
-                    // Validaciones previas: recordId viene de billin_json y carNumber debe ser la misma placa usada en billing
                     $carNumber = $payPlate ?: ($plate ?: ($extra['plate'] ?? ''));
-                    $recordId  = $payRecordId; // guardado previamente tras vehicleBilling
+                    $recordId  = $payRecordId;
+
                     if ($recordId === '0' || $recordId === '' || $carNumber === '') {
                         Logger::error('paynotify.missing_data', ['cid'=>$cid, 'carNumber'=>$carNumber, 'recordId'=>$recordId]);
                         $payNotifyError = 'Faltan carNumber/recordId para payNotify';
                         $manualOpen = true;
                     } else {
-                        // /api/v1/parkCost/payNotify?access_token=...
                         $endpoint = $baseUrl . '/api/v1/parkCost/payNotify';
                         $accessToken = (string)($this->config->get('HAMACHI_PARK_ACCESS_TOKEN', ''));
                         if ($accessToken !== '') {
@@ -1617,13 +1542,12 @@ class ApiController {
                         $verifySsl = strtolower((string) $this->config->get('HAMACHI_PARK_VERIFY_SSL', 'false')) === 'true';
                         $connectTo = trim((string) $this->config->get('HAMACHI_PARK_CONNECT_TO', ''));
 
-                        // paymentType configurable (por defecto "cash")
-                        $paymentType = (string)$this->config->get('HAMACHI_PARK_PAYMENT_TYPE', 'cash');
+                        $paymentType = $isGrace ? 'free' : (string)$this->config->get('HAMACHI_PARK_PAYMENT_TYPE', 'cash');
 
                         $notifyPayload = [
-                            'carNumber'   => $carNumber,   // DEBE coincidir con el usado en vehicleBilling
-                            'paymentType' => $paymentType, // requerido por la API
-                            'recordId'    => $recordId,    // exactamente el recordId devuelto por billing
+                            'carNumber'   => $carNumber,
+                            'paymentType' => $paymentType,
+                            'recordId'    => $recordId,
                         ];
 
                         Logger::debug('paynotify.req', [
@@ -1690,11 +1614,9 @@ class ApiController {
                                     if (json_last_error() === JSON_ERROR_NONE) $json = $tmp;
                                 }
 
-                                // Éxito: JSON con code == 0
                                 if ($payNotifySent && is_array($json)) {
                                     $payNotifyAck = (isset($json['code']) && (int)$json['code'] === 0);
                                     if (!$payNotifyAck) {
-                                        // Si vino code != 0, registra mensaje de error de la API
                                         $payNotifyError = isset($json['message']) ? (string)$json['message'] : 'ACK inválido';
                                     }
                                 } else if (!$payNotifySent) {
@@ -1702,7 +1624,7 @@ class ApiController {
                                 }
 
                                 if (!$payNotifySent || !$payNotifyAck) {
-                                    $manualOpen = true; // fallback manual si no hubo confirmación
+                                    $manualOpen = true;
                                     Logger::error('paynotify.nack', [
                                         'cid'=>$cid, 'status'=>$status, 'ack'=>$payNotifyAck,
                                         'body_preview'=>mb_substr($body, 0, 500),
@@ -1729,70 +1651,31 @@ class ApiController {
                         }
                     }
                 }
+            } else {
+                // Gracia pero sin datos suficientes para notificar -> abrir manual
+                $manualOpen = true;
             }
+
+            echo json_encode([
+                'ok'               => $isGrace ? true : $felOk,
+                'uuid'             => $uuid,
+                'message'          => $isGrace ? 'Ticket de gracia registrado (sin FEL)' : ($felOk ? 'Factura certificada' : 'No se pudo certificar (registrada en BD)'),
+                'error'            => $isGrace ? null : $felErr,
+                'billing_amount'   => $isGrace ? 0.00 : ($payBillin > 0 ? $payBillin : (float)$billingAmount),
+                'manual_open'      => $manualOpen,
+                'pay_notify_sent'  => $payNotifySent,
+                'pay_notify_ack'   => $payNotifyAck,
+                'pay_notify_error' => $payNotifyError,
+            ], JSON_UNESCAPED_UNICODE);
+
+        } catch (\Throwable $e) {
+            if (isset($pdo) && $pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            $this->debugLog('fel_invoice_exc.txt', ['exception' => $e->getMessage()]);
+            echo json_encode(['ok' => false, 'error' => $e->getMessage()]);
         }
-
-        echo json_encode([
-            'ok'               => $ok,
-            'uuid'             => $uuid,
-            'message'          => $ok ? 'Factura certificada' : 'No se pudo certificar (registrada en BD)',
-            'error'            => $error,
-            // monto efectivo usado para decidir notificación/apertura
-            'billing_amount'   => ($payBillin > 0 ? $payBillin : (float)$billingAmount),
-            'manual_open'      => $manualOpen,      // abrir manual si billing==0 o payNotify no confirmó
-            'pay_notify_sent'  => $payNotifySent,   // HTTP 2xx
-            'pay_notify_ack'   => $payNotifyAck,    // JSON {code:0}
-            'pay_notify_error' => $payNotifyError,
-        ], JSON_UNESCAPED_UNICODE);
-
-    } catch (\Throwable $e) {
-        if (isset($pdo) && $pdo->inTransaction()) {
-            $pdo->rollBack();
-        }
-        $this->debugLog('fel_invoice_exc.txt', ['exception' => $e->getMessage()]);
-        echo json_encode(['ok' => false, 'error' => $e->getMessage()]);
     }
-}
-  
-
-/**
- * POST JSON y acepta JSON/HTML/texto. Devuelve [statusCode, bodyString]
- * $opts = ['timeout'=>float,'verify_ssl'=>bool,'headers'=>string[]]
- */
-private function postJsonAny(string $url, array $data, array $opts = []): array
-{
-    $ch = curl_init($url);
-    $timeout   = isset($opts['timeout']) ? (float)$opts['timeout'] : 8.0;
-    $verifySsl = array_key_exists('verify_ssl', $opts) ? (bool)$opts['verify_ssl'] : true;
-    $headers   = isset($opts['headers']) && is_array($opts['headers']) ? $opts['headers'] : [];
-
-    $headers[] = 'Content-Type: application/json';
-
-    curl_setopt_array($ch, [
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_POST           => true,
-        CURLOPT_POSTFIELDS     => json_encode($data, JSON_UNESCAPED_UNICODE),
-        CURLOPT_HTTPHEADER     => $headers,
-        CURLOPT_TIMEOUT        => $timeout,
-        CURLOPT_SSL_VERIFYPEER => $verifySsl,
-        CURLOPT_SSL_VERIFYHOST => $verifySsl ? 2 : 0,
-        CURLOPT_HEADER         => true,
-    ]);
-
-    $resp = curl_exec($ch);
-    if ($resp === false) {
-        $err = curl_error($ch);
-        curl_close($ch);
-        throw new \RuntimeException("cURL error: $err");
-    }
-
-    $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $headerSize = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
-    curl_close($ch);
-
-    $body = substr($resp, $headerSize) ?: '';
-    return [$status, $body];
-}
 
 
     /** Helper simple para logging */
@@ -2328,81 +2211,154 @@ private function postJsonAny(string $url, array $data, array $opts = []): array
     {
         header('Content-Type: application/json; charset=utf-8');
 
-        $channelId = '40288048981adc4601981b7cb2660b05';
-        $url = "https://localhost:8098/api/v1/parkBase/openGateChannel?channelId={$channelId}";
+        // === Body: reason + channel_id opcional ===
+        $raw      = file_get_contents('php://input') ?: '{}';
+        $body     = json_decode($raw, true) ?: [];
+        $reason   = trim((string)($body['reason'] ?? ''));
+        $channelId= trim((string)($body['channel_id'] ?? '40288048981adc4601981b7cb2660b05')); // SALIDA por defecto
+
+        if ($reason === '') {
+            echo json_encode(['ok' => false, 'title' => 'Apertura manual', 'message' => 'Debes indicar el motivo de la apertura manual.', 'field' => 'reason']);
+            return;
+        }
+
+        // === Conectividad igual a tickets ===
+        $baseUrl = rtrim((string) $this->config->get('HAMACHI_PARK_BASE_URL', ''), '/');
+        if ($baseUrl === '') {
+            echo json_encode(['ok' => false, 'message' => 'HAMACHI_PARK_BASE_URL no está configurado.']);
+            return;
+        }
+        $endpoint = $baseUrl . '/api/v1/parkBase/openGateChannel?channelId=' . rawurlencode($channelId);
+
+        $headers = ['Accept: application/json'];
+        $hostHeader = trim((string) $this->config->get('HAMACHI_PARK_HOST_HEADER', ''));
+        if ($hostHeader !== '') $headers[] = 'Host: ' . $hostHeader;
+
+        $verifySsl = strtolower((string) $this->config->get('HAMACHI_PARK_VERIFY_SSL', 'false')) === 'true';
+        $connectTo = trim((string)$this->config->get('HAMACHI_PARK_CONNECT_TO', '')); // ej: "localhost:8098:25.21.54.208:8098"
 
         $tzGT = new \DateTimeZone('America/Guatemala');
         $now  = new \DateTime('now', $tzGT);
         $openedAt = $now->format('Y-m-d H:i:s');
+
+        // ---- función interna para hacer request con cURL (POST o GET)
+        $doCurl = function (string $url, string $method) use ($headers, $verifySsl, $connectTo) {
+            $ch = curl_init($url);
+            $h  = $headers;
+
+            $opts = [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_CONNECTTIMEOUT => 15,
+                CURLOPT_TIMEOUT        => 25,
+                CURLOPT_NOSIGNAL       => true,
+                CURLOPT_TCP_KEEPALIVE  => 1,
+                CURLOPT_TCP_KEEPIDLE   => 30,
+                CURLOPT_TCP_KEEPINTVL  => 10,
+                CURLOPT_HTTP_VERSION   => CURL_HTTP_VERSION_1_1,
+                CURLOPT_HTTPHEADER     => $h,
+            ];
+
+            if (!$verifySsl) {
+                $opts[CURLOPT_SSL_VERIFYPEER] = false;
+                $opts[CURLOPT_SSL_VERIFYHOST] = false;
+            }
+            if ($connectTo !== '') {
+                // si tu PHP/cURL soporta CONNECT_TO
+                $opts[CURLOPT_CONNECT_TO] = [$connectTo];
+            }
+
+            if (strtoupper($method) === 'POST') {
+                // Algunos servidores exigen Content-Length>0; mandamos "{}"
+                $h[] = 'Content-Type: application/json; charset=utf-8';
+                $h[] = 'Expect:'; // evita 100-continue
+                $opts[CURLOPT_HTTPHEADER] = $h;
+                $opts[CURLOPT_POST]       = true;
+                $opts[CURLOPT_POSTFIELDS] = '{}';
+            } else {
+                $opts[CURLOPT_HTTPGET] = true;
+            }
+
+            curl_setopt_array($ch, $opts);
+            $raw  = curl_exec($ch);
+            $err  = curl_error($ch);
+            $info = curl_getinfo($ch) ?: [];
+            curl_close($ch);
+
+            return [$raw, $err, $info];
+        };
 
         $ok = false;
         $code = null;
         $message = null;
         $respRaw = null;
         $httpStatus = null;
+        $debug = [];
 
         try {
-            // Llamado HTTP (deshabilita verificación SSL por ser localhost con posible self-signed)
-            $ch = curl_init($url);
-            curl_setopt_array($ch, [
-                CURLOPT_RETURNTRANSFER => true,
-                CURLOPT_POST           => true,
-                CURLOPT_HTTPHEADER     => [
-                    'Content-Type: application/json',
-                    'Accept: application/json',
-                ],
-                CURLOPT_SSL_VERIFYPEER => false,
-                CURLOPT_SSL_VERIFYHOST => 0,
-                CURLOPT_TIMEOUT        => 8,
-            ]);
-            $respRaw = curl_exec($ch);
-            $curlErr = curl_error($ch);
-            $httpStatus = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            curl_close($ch);
+            // 1) Intento POST
+            [$raw1, $err1, $info1] = $doCurl($endpoint, 'POST');
+            $debug['try_post'] = ['err' => $err1, 'info' => $info1, 'preview' => is_string($raw1)? substr($raw1,0,400):null];
 
-            if ($respRaw === false) {
-                throw new \RuntimeException('No se recibió respuesta del servicio local: ' . ($curlErr ?: 'desconocido'));
+            $parsed = null;
+            if ($raw1 !== false) {
+                $parsed = json_decode((string)$raw1, true);
             }
 
-            $resp = json_decode($respRaw, true);
-            if (!is_array($resp)) {
-                throw new \RuntimeException("Respuesta no JSON válida. HTTP={$httpStatus}. Body={$respRaw}");
+            if ($raw1 === false || !is_array($parsed)) {
+                // 2) Fallback: GET (algunos firmwares solo aceptan GET para esta ruta)
+                [$raw2, $err2, $info2] = $doCurl($endpoint, 'GET');
+                $debug['try_get'] = ['err' => $err2, 'info' => $info2, 'preview' => is_string($raw2)? substr($raw2,0,400):null];
+
+                $respRaw    = $raw2;
+                $httpStatus = (int)($info2['http_code'] ?? 0);
+                $parsed     = is_string($raw2) ? json_decode($raw2, true) : null;
+                if (!is_array($parsed) && is_string($raw2)) {
+                    // algunos regresan texto plano "success"
+                    $parsed = ['message' => trim($raw2)];
+                }
+            } else {
+                $respRaw    = $raw1;
+                $httpStatus = (int)($info1['http_code'] ?? 0);
             }
 
-            $code = $resp['code'] ?? null;
-            $message = $resp['message'] ?? null;
-            $ok = ($httpStatus === 200 && (string)$code === '0');
+            if (!is_array($parsed)) {
+                $preview = is_string($respRaw) ? substr($respRaw, 0, 400) : null;
+                throw new \RuntimeException("Respuesta no JSON válida. HTTP={$httpStatus}. Body={$preview}");
+            }
 
+            $code    = $parsed['code']    ?? null;
+            $message = $parsed['message'] ?? ($parsed['msg'] ?? null);
+            // Acepta 200 + code===0 ó mensajes tipo "success"
+            $ok = ($httpStatus === 200 && ((string)$code === '0' || stripos((string)$message, 'success') !== false));
         } catch (\Throwable $e) {
             $message = 'Error: ' . $e->getMessage();
             $ok = false;
         }
 
-        // Registrar en BD
+        // Log en BD
         $insertId = null;
         try {
             $pdo = $this->getPdo();
             $this->ensureManualOpenTable($pdo);
-
             $stmt = $pdo->prepare("
-                INSERT INTO manual_open_logs (channel_id, opened_at, http_status, result_code, result_message, extra_json)
-                VALUES (:channel_id, :opened_at, :http_status, :result_code, :result_message, :extra_json)
+                INSERT INTO manual_open_logs (
+                    channel_id, opened_at, reason, http_status, result_code, result_message, extra_json
+                ) VALUES (
+                    :channel_id, :opened_at, :reason, :http_status, :result_code, :result_message, :extra_json
+                )
             ");
             $stmt->execute([
                 ':channel_id'     => $channelId,
-                ':opened_at'      => $openedAt,                // Hora local GT
+                ':opened_at'      => $openedAt,
+                ':reason'         => $reason,
                 ':http_status'    => $httpStatus,
                 ':result_code'    => $code,
                 ':result_message' => (string)$message,
-                ':extra_json'     => $respRaw ?: null,
+                ':extra_json'     => is_string($respRaw) ? $respRaw : json_encode($respRaw),
             ]);
             $insertId = (string)$pdo->lastInsertId();
         } catch (\Throwable $e) {
-            // No abortamos la respuesta por error de log; solo lo anotamos en debug si tienes logger
-            $this->debugLog('manual_open_err.txt', [
-                'when' => $openedAt,
-                'error' => $e->getMessage(),
-            ]);
+            $this->debugLog('manual_open_err.txt', ['when'=>$openedAt,'reason'=>$reason,'error'=>$e->getMessage()]);
         }
 
         echo json_encode([
@@ -2413,6 +2369,8 @@ private function postJsonAny(string $url, array $data, array $opts = []): array
             'code'        => $code,
             'logged_id'   => $insertId,
             'opened_at'   => $openedAt,
+            'channel_id'  => $channelId,
+            'debug'       => $debug,  // ← ayuda a ver por qué falló (se puede quitar luego)
         ]);
     }
 
@@ -2421,21 +2379,25 @@ private function postJsonAny(string $url, array $data, array $opts = []): array
         // Compatible con MySQL y SQLite
         $driver = strtolower((string)$pdo->getAttribute(PDO::ATTR_DRIVER_NAME));
 
-        // Crea tabla si no existe
         if ($driver === 'sqlite') {
+            // Crear tabla si no existe
             $pdo->exec("
                 CREATE TABLE IF NOT EXISTS manual_open_logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     channel_id TEXT NOT NULL,
                     opened_at TEXT NOT NULL,
+                    reason TEXT NULL,
                     http_status INTEGER,
                     result_code TEXT,
                     result_message TEXT,
                     extra_json TEXT
                 )
             ");
-            // Índices útiles
             $pdo->exec("CREATE INDEX IF NOT EXISTS idx_manual_open_logs_opened_at ON manual_open_logs(opened_at)");
+
+            // Intentar agregar columna reason si la tabla ya existía sin ella
+            try { $pdo->exec("ALTER TABLE manual_open_logs ADD COLUMN reason TEXT NULL"); } catch (\Throwable $e) { /* ya existe */ }
+
         } else {
             // MySQL / MariaDB
             $pdo->exec("
@@ -2443,6 +2405,7 @@ private function postJsonAny(string $url, array $data, array $opts = []): array
                     id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
                     channel_id VARCHAR(64) NOT NULL,
                     opened_at DATETIME NOT NULL,
+                    reason VARCHAR(255) NULL,
                     http_status INT NULL,
                     result_code VARCHAR(16) NULL,
                     result_message VARCHAR(255) NULL,
@@ -2450,8 +2413,224 @@ private function postJsonAny(string $url, array $data, array $opts = []): array
                     KEY idx_manual_open_logs_opened_at (opened_at)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
             ");
+
+            // Intentar agregar columna reason si la tabla ya existía sin ella
+            try { $pdo->exec("ALTER TABLE manual_open_logs ADD COLUMN reason VARCHAR(255) NULL AFTER opened_at"); } catch (\Throwable $e) { /* ya existe */ }
         }
     }
+
+    public function manualInvoiceCreate(): void
+{
+    header('Content-Type: application/json; charset=utf-8');
+
+    try {
+        $raw  = file_get_contents('php://input') ?: '{}';
+        $body = json_decode($raw, true) ?: [];
+
+        $reason       = trim((string)($body['reason'] ?? ''));                 // motivo OBLIGATORIO
+        $receptorNit  = strtoupper(trim((string)($body['receptor_nit'] ?? 'CF'))); // CF permitido
+        $receptorName = trim((string)($body['receptor_name'] ?? ''));          // opcional (lookup)
+        $mode         = (string)($body['mode'] ?? 'custom');                   // custom | monthly | grace
+        $amountIn     = isset($body['amount']) ? (float)$body['amount'] : null;
+
+        $this->debugLog('fel_manual_invoice_in.txt', ['body' => $body, 'server' => $_SERVER]);
+
+        if ($reason === '') {
+            echo json_encode(['ok' => false, 'error' => 'reason requerido']); return;
+        }
+        if ($receptorNit !== 'CF' && !ctype_digit($receptorNit)) {
+            echo json_encode(['ok' => false, 'error' => 'NIT inválido (use CF o solo dígitos)']); return;
+        }
+
+        $isGrace = ($mode === 'grace');
+
+        // === Config / DB
+        $cfg  = new \Config\Config(__DIR__ . '/../../.env');
+        $dsn  = $cfg->get('DB_DSN',  'mysql:host=127.0.0.1;dbname=zkt;charset=utf8mb4');
+        $user = $cfg->get('DB_USER', 'root');
+        $pass = $cfg->get('DB_PASS', '');
+
+        $pdo = new \PDO($dsn, $user, $pass, [
+            \PDO::ATTR_ERRMODE            => \PDO::ERRMODE_EXCEPTION,
+            \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC,
+        ]);
+
+        // === AUTOFIX estructura solo para manual_invoices (no toca invoices)
+        try {
+            $pdo->exec("
+                CREATE TABLE IF NOT EXISTS manual_invoices (
+                  id             INT AUTO_INCREMENT PRIMARY KEY,
+                  created_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  reason         VARCHAR(255) NOT NULL,
+                  receptor_nit   VARCHAR(32)  NOT NULL,
+                  receptor_name  VARCHAR(255) NULL,
+                  amount         DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+                  used_monthly   TINYINT(1) NOT NULL DEFAULT 0,
+                  send_to_fel    TINYINT(1) NOT NULL DEFAULT 1,
+                  fel_uuid       VARCHAR(64)  NULL,
+                  fel_status     VARCHAR(32)  NULL,
+                  fel_message    VARCHAR(255) NULL,
+                  fel_pdf_base64 MEDIUMTEXT   NULL
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+            ");
+            // Asegurar columnas si tabla existía previamente
+            $cols = [];
+            $q = $pdo->query("SHOW COLUMNS FROM manual_invoices");
+            while ($r = $q->fetch(\PDO::FETCH_ASSOC)) { $cols[$r['Field']] = true; }
+            if (!isset($cols['receptor_name'])) {
+                $pdo->exec("ALTER TABLE manual_invoices ADD COLUMN receptor_name VARCHAR(255) NULL AFTER receptor_nit;");
+            }
+            if (!isset($cols['fel_pdf_base64'])) {
+                $pdo->exec("ALTER TABLE manual_invoices ADD COLUMN fel_pdf_base64 MEDIUMTEXT NULL AFTER fel_message;");
+            }
+        } catch (\Throwable $e) {
+            $this->debugLog('fel_manual_invoice_autofix.txt', ['error' => $e->getMessage()]);
+        }
+
+        // === Cargar settings para monthly_rate
+        $settings = [];
+        try { $settings = \App\Utils\Schema::loadAppSettings(); } catch (\Throwable $e) {}
+        $monthlyRateCfg = isset($settings['billing']['monthly_rate']) ? (float)$settings['billing']['monthly_rate'] : null;
+        $monthlyRateNN  = is_numeric($monthlyRateCfg) ? (float)$monthlyRateCfg : 0.00;
+
+        // === Resolver total
+        if ($isGrace) {
+            $total = 0.00;
+        } elseif ($mode === 'monthly') {
+            if (!is_finite($monthlyRateNN) || $monthlyRateNN <= 0) {
+                echo json_encode(['ok' => false, 'error' => 'monthly_rate no configurado o inválido']); return;
+            }
+            $total = $monthlyRateNN;
+        } else { // custom
+            if (!is_finite($amountIn) || $amountIn <= 0) {
+                echo json_encode(['ok' => false, 'error' => 'amount inválido (> 0)']); return;
+            }
+            $total = (float)$amountIn;
+        }
+
+        // === FEL (usar la NUEVA función con PDF)
+        $felOk = false; $uuid = null; $felRes = null; $felErr = null; $pdfB64 = null; $pdfSavedPath = null;
+
+        if (!$isGrace) {
+            $client = new \App\Services\G4SClient($cfg);
+            $payloadFel = [
+                'ticket_no'    => null, // manual
+                'receptor_nit' => $receptorNit,
+                'total'        => $total,
+                'descripcion'  => mb_substr($reason, 0, 120), // se envía la descripción
+            ];
+
+            $this->debugLog('fel_manual_invoice_out.txt', ['request_payload' => $payloadFel]);
+
+            try {
+                // NUEVO: pedir PDF con POST_DOCUMENT_SAT_PDF
+                $felRes  = $client->submitInvoiceWithPdf($payloadFel);
+                $felOk   = (bool)($felRes['ok'] ?? false);
+                $uuid    = $felRes['uuid']        ?? null;
+                $pdfB64  = $felRes['pdf_base64']  ?? null;
+                $felErr  = $felRes['error']       ?? null;
+
+                // Guardar PDF como archivo si vino
+                if ($felOk && $pdfB64) {
+                    $tzGT = new \DateTimeZone('America/Guatemala');
+                    $now  = new \DateTime('now', $tzGT);
+                    $dir  = sprintf('%s/fel/%s/%s',
+                        rtrim((string)$cfg->get('STORAGE_PATH', __DIR__.'/../../storage'), '/'),
+                        $now->format('Y'),
+                        $now->format('m')
+                    );
+                    if (!is_dir($dir)) @mkdir($dir, 0775, true);
+
+                    $fname = ($uuid ?: 'DTE-'.$now->format('Ymd-His')).'.pdf';
+                    $pdfSavedPath = $dir.'/'.$fname;
+                    @file_put_contents($pdfSavedPath, base64_decode($pdfB64));
+                }
+            } catch (\Throwable $e) {
+                $felOk  = false;
+                $felErr = $e->getMessage();
+                $felRes = ['ok'=>false,'error'=>$felErr];
+            }
+        }
+
+        // === Persistir SOLO en manual_invoices
+        $pdo->beginTransaction();
+        $stmtM = $pdo->prepare("
+            INSERT INTO manual_invoices
+                (reason, receptor_nit, receptor_name, amount, used_monthly, send_to_fel, fel_uuid, fel_status, fel_message, fel_pdf_base64, created_at)
+            VALUES
+                (:r, :nit, :name, :amt, :um, :send, :uuid, :st, :msg, :pdf, NOW())
+        ");
+        $stmtM->execute([
+            ':r'    => $reason,
+            ':nit'  => $receptorNit,
+            ':name' => ($receptorName !== '' ? $receptorName : null),
+            ':amt'  => $total,
+            ':um'   => ($mode === 'monthly') ? 1 : 0,
+            ':send' => $isGrace ? 0 : 1,
+            ':uuid' => $uuid,
+            ':st'   => $isGrace ? 'SKIPPED' : ($felOk ? 'OK' : 'ERROR'),
+            ':msg'  => $isGrace ? 'no FEL (grace)' : ($felOk ? 'Emitida correctamente' : ($felErr ?: 'Error FEL')),
+            ':pdf'  => ($felOk && $pdfB64) ? $pdfB64 : null, // guarda base64 (opcional)
+        ]);
+        $manualId = (int)$pdo->lastInsertId();
+        $pdo->commit();
+
+        echo json_encode([
+            'ok'               => $isGrace ? true : $felOk,
+            'uuid'             => $uuid,
+            'message'          => $isGrace ? 'Factura de gracia registrada (sin FEL)' : ($felOk ? 'Factura manual certificada' : 'No se pudo certificar (registrada en BD)'),
+            'error'            => $isGrace ? null : $felErr,
+            'billing_amount'   => (float)$total,
+            'manual_id'        => $manualId,
+            'pdf_base64'       => $pdfB64,                 // PDF para descargar en UI
+            'pdf_saved_path'   => $pdfSavedPath,           // ruta guardada (si aplica)
+            'manual_open'      => false,
+            'pay_notify_sent'  => false,
+            'pay_notify_ack'   => false,
+            'pay_notify_error' => null,
+        ], JSON_UNESCAPED_UNICODE);
+
+    } catch (\Throwable $e) {
+        if (isset($pdo) && $pdo->inTransaction()) $pdo->rollBack();
+        $this->debugLog('fel_manual_invoice_exc.txt', ['exception' => $e->getMessage()]);
+        echo json_encode(['ok' => false, 'error' => $e->getMessage()]);
+    }
+}
+
+
+    public function manualInvoiceList(): void
+{
+    header('Content-Type: application/json; charset=utf-8');
+
+    try {
+        // Usa la misma fuente de verdad que manualInvoiceCreate()
+        $cfg  = new \Config\Config(__DIR__ . '/../../.env');
+        $dsn  = $cfg->get('DB_DSN',  'mysql:host=127.0.0.1;dbname=zkt;charset=utf8mb4');
+        $user = $cfg->get('DB_USER', 'root');
+        $pass = $cfg->get('DB_PASS', '');
+
+        $pdo = new \PDO($dsn, $user, $pass, [
+            \PDO::ATTR_ERRMODE            => \PDO::ERRMODE_EXCEPTION,
+            \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC,
+        ]);
+
+        $stmt = $pdo->query("
+            SELECT
+              id, created_at, reason, receptor_nit, receptor_name, amount,
+              used_monthly, send_to_fel, fel_uuid, fel_status, fel_message
+            FROM manual_invoices
+            ORDER BY id DESC
+            LIMIT 100
+        ");
+        $rows = $stmt->fetchAll();
+
+        echo json_encode(['ok' => true, 'data' => $rows], JSON_UNESCAPED_UNICODE);
+    } catch (\Throwable $e) {
+        echo json_encode(['ok' => false, 'error' => 'manualInvoiceList: '.$e->getMessage()]);
+    }
+}
+
+
 
 }
 

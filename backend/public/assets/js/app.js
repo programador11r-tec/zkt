@@ -28,17 +28,73 @@
       link.classList.add('active');
     }
   }
+// --- parche global ---
+// --- parche global ---
+// Manda cookies siempre y redirige al login en 401,
+// excepto si YA estás en /login.html para evitar bucle.
+(function patchFetch(){
+  const origFetch = window.fetch.bind(window);
+  const isOnLogin = () => location.pathname.endsWith('/login.html');
+  window.fetch = async (input, init = {}) => {
+    init.credentials = init.credentials || 'include';
+    init.headers = Object.assign({ Accept: 'application/json' }, init.headers || {});
+    const res = await origFetch(input, init);
+    if (res.status === 401 && !isOnLogin()) {
+      window.location.href = '/login.html';
+      throw new Error('No autenticado');
+    }
+    return res;
+  };
+})();
 
- async function fetchJSON(url, opts) {
-  const res = await fetch(url, opts);
-  const text = await res.text();
-  try {
-    return JSON.parse(text);
-  } catch {
-    // Muestra qué devolvió el backend
-    throw new Error(`Respuesta no JSON (${res.status}): ${text.slice(0, 800)}`);
-  }
+// Fallback lector de JSON
+async function safeJson(res){
+  const ct = (res.headers.get('content-type') || '').toLowerCase();
+  if (ct.includes('application/json')) return await res.json();
+  const txt = await res.text();
+  return { ok:false, error: txt || res.statusText };
 }
+
+// Wrapper cómodo para tus peticiones
+async function fetchJSON(url, opts = {}) {
+  const res = await fetch(url, {
+    ...opts,
+    credentials: 'include',                      // cookie de sesión
+    headers: { 'Accept': 'application/json', ...(opts.headers || {}) },
+  });
+  if (res.status === 401 && !location.pathname.endsWith('/login.html')) {
+    window.location.href = '/login.html';
+    throw new Error('No autenticado');
+  }
+  return safeJson(res);
+}
+
+
+// Wrapper global que envía cookies y redirige al login si hay 401
+async function fetchJSON(url, opts = {}) {
+  const res = await fetch(url, {
+    credentials: 'include',                      // <-- ENVÍA LA COOKIE DE SESIÓN
+    headers: { 'Accept': 'application/json', ...(opts.headers || {}) },
+    ...opts,
+  });
+
+  if (res.status === 401) {
+    // No autenticado -> manda al login
+    window.location.href = '/login.html';
+    throw new Error('No autenticado');
+  }
+
+  // Intenta parsear JSON
+  let data = null;
+  try { data = await res.json(); } catch { data = null; }
+
+  if (!res.ok) {
+    const msg = (data && (data.error || data.message)) || res.statusText;
+    throw new Error(msg);
+  }
+  return data;
+}
+
 
 
   const settingsState = { cache: null, promise: null };
@@ -333,305 +389,591 @@
     });
   }
 
-  // ===== Dashboard =====
-  async function renderDashboard() {
-    try {
-      const [ticketsResp, settings] = await Promise.all([
-        fetchJSON(api('tickets')),
-        loadSettings(),
-      ]);
+/* ============================
+   Bootstrap de red y helpers
+   ============================ */
 
-      const data = Array.isArray(ticketsResp?.data) ? ticketsResp.data : [];
-      const state = { search: '', page: 1 };
-      const pageSize = 20;
+// --- parche global ---
+// Manda cookies siempre y redirige al login en 401,
+// excepto si YA estás en /login.html para evitar bucle.
+(function patchFetch(){
+  const origFetch = window.fetch.bind(window);
+  const isOnLogin = () => location.pathname.endsWith('/login.html');
+  window.fetch = async (input, init = {}) => {
+    init.credentials = init.credentials || 'include';
+    init.headers = Object.assign({ Accept: 'application/json' }, init.headers || {});
+    const res = await origFetch(input, init);
+    if (res.status === 401 && !isOnLogin()) {
+      window.location.href = '/login.html';
+      throw new Error('No autenticado');
+    }
+    return res;
+  };
+})();
 
-      const metrics = settings?.database?.metrics ?? {};
-      const pending = Number(metrics.pending_invoices ?? 0);
-      const summaryCards = [
-        {
-          title: 'Asistencias de hoy',
-          badge: 'En vivo',
-          value: formatNumber(data.length),
-          detail: 'Lecturas registradas en el día',
-          accent: 'primary',
-        },
-        {
-          title: 'Tickets en base de datos',
-          badge: 'Histórico',
-          value: formatNumber(metrics.tickets_total),
-          detail: metrics.tickets_last_sync ? `Último registro ${formatRelativeTime(metrics.tickets_last_sync)}` : 'Sin registros almacenados',
-          accent: 'info',
-        },
-        {
-          title: 'Facturas emitidas',
-          badge: 'FEL',
-          value: formatNumber(metrics.invoices_total),
-          detail: metrics.invoices_last_sync ? `Última emisión ${formatRelativeTime(metrics.invoices_last_sync)}` : 'Sin facturas emitidas',
-          accent: 'success',
-        },
-        {
-          title: 'Pendientes por facturar',
-          badge: pending > 0 ? 'Atención' : 'Al día',
-          value: formatNumber(pending),
-          detail: pending > 0 ? 'Genera FEL desde Facturación' : 'Sin pendientes',
-          accent: pending > 0 ? 'warning' : 'neutral',
-        },
-      ];
+// Fallback lector de JSON (evita "Unexpected end of JSON input")
+async function safeJson(res){
+  const ct = (res.headers.get('content-type') || '').toLowerCase();
+  if (ct.includes('application/json')) return await res.json();
+  const txt = await res.text();
+  return { ok:false, error: txt || res.statusText };
+}
 
-      const summaryHtml = summaryCards.map((card) => `
-        <div class="col-xxl-3 col-sm-6">
-          <div class="stat-card" data-accent="${card.accent}">
-            <div class="stat-badge">${escapeHtml(card.badge)}</div>
-            <div class="stat-title">${escapeHtml(card.title)}</div>
-            <div class="stat-value">${escapeHtml(card.value)}</div>
-            <div class="stat-foot">${escapeHtml(card.detail)}</div>
+// Wrapper cómodo para tus peticiones (con cookies + 401 controlado)
+async function fetchJSON(url, opts = {}) {
+  const res = await fetch(url, {
+    ...opts,
+    credentials: 'include',
+    headers: { 'Accept': 'application/json', ...(opts.headers || {}) },
+  });
+  if (res.status === 401 && !location.pathname.endsWith('/login.html')) {
+    window.location.href = '/login.html';
+    throw new Error('No autenticado');
+  }
+  return safeJson(res);
+}
+
+// Helper api(path) (ajústalo si ya tienes uno)
+function api(path=''){
+  path = String(path || '').replace(/^\/+/, '');
+  return `/api/${path}`;
+}
+
+
+
+/* ===================================
+   Settings tolerante (caseta/admin)
+   =================================== */
+
+async function loadSettings(quiet = false) {
+  try {
+    const res = await fetch(api('settings'), { headers: { Accept: 'application/json' } });
+    if (res.status === 401) throw new Error('No autenticado');
+    if (!res.ok) {
+      if (!quiet) console.warn('[settings] HTTP', res.status, '→ usando defaults');
+      return { ok: false, database: { metrics: {} }, activity: [] };
+    }
+    const js = await safeJson(res);
+    return js || { ok: false, database: { metrics: {} }, activity: [] };
+  } catch (err) {
+    if (!quiet) console.warn('[settings] error:', err);
+    return { ok: false, database: { metrics: {} }, activity: [] };
+  }
+}
+
+/* ===================================
+   Tickets safe + normalización
+   =================================== */
+
+async function getTicketsSafe() {
+  try {
+    const res = await fetch(api('tickets'), { headers: { Accept:'application/json' }});
+    if (!res.ok) throw new Error('tickets http '+res.status);
+    return await safeJson(res);
+  } catch (e) {
+    console.warn('[tickets] error:', e);
+    return { data: [] };
+  }
+}
+
+function normalizeTickets(resp) {
+  const arr = Array.isArray(resp?.data)
+    ? resp.data
+    : Array.isArray(resp?.rows)
+    ? resp.rows
+    : Array.isArray(resp)
+    ? resp
+    : [];
+
+  return arr.map(r => ({
+    // muestra algo útil aunque no haya nombre
+    name:  r.name || r.person_name || r.plate || r.ticket_no || '(sin nombre)',
+    checkIn:  r.checkIn || r.check_in || r.entry_at || r.in_time || r.fecha_entrada || null,
+    checkOut: r.checkOut || r.check_out || r.exit_at  || r.out_time || r.fecha_salida  || null,
+  }));
+}
+
+// Si tienes un buildTimeline propio, úsalo; si no, deja un fallback
+function buildTimeline(activity) {
+  const items = Array.isArray(activity) ? activity : [];
+  if (!items.length) return '';
+  return `
+    <div class="list-group list-group-flush">
+      ${items.slice(0,15).map(it => `
+        <div class="list-group-item d-flex align-items-start gap-2">
+          <div class="flex-grow-1">
+            <div class="small">${escapeHtml(it.title || it.event || 'Evento')}</div>
+            <div class="text-muted small">${escapeHtml(it.detail || '')}</div>
+          </div>
+          <div class="text-nowrap text-muted small">${escapeHtml(formatRelativeTime(it.when || it.date || it.at || new Date()))}</div>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+/* ============================
+   DASHBOARD (Bootstrap)
+   ============================ */
+
+async function renderDashboard() {
+  try {
+    // ¡No usar Promise.all con fetchJSON(settings), porque caseta no puede!
+    const [ticketsResp, settings] = await Promise.all([
+      getTicketsSafe(),
+      loadSettings(),
+    ]);
+
+    const data = normalizeTickets(ticketsResp);
+    const state = { search: '', page: 1 };
+    const pageSize = 20;
+
+    const metrics = settings?.database?.metrics ?? {};
+    const pending = Number(metrics.pending_invoices ?? 0);
+
+    const summaryCards = [
+      {
+        title: 'Asistencias de hoy',
+        badge: { text: 'En vivo', variant: 'primary' },
+        value: formatNumber(data.length),
+        detail: 'Lecturas registradas en el día',
+        accent: 'primary',
+        icon: 'bi-people-fill',
+      },
+      {
+        title: 'Tickets en base de datos',
+        badge: { text: 'Histórico', variant: 'info' },
+        value: formatNumber(metrics.tickets_total),
+        detail: metrics.tickets_last_sync
+          ? `Último registro ${formatRelativeTime(metrics.tickets_last_sync)}`
+          : 'Sin registros almacenados',
+        accent: 'info',
+        icon: 'bi-database-fill',
+      },
+      {
+        title: 'Facturas emitidas',
+        badge: { text: 'FEL', variant: 'success' },
+        value: formatNumber(metrics.invoices_total),
+        detail: metrics.invoices_last_sync
+          ? `Última emisión ${formatRelativeTime(metrics.invoices_last_sync)}`
+          : 'Sin facturas emitidas',
+        accent: 'success',
+        icon: 'bi-receipt-cutoff',
+      },
+      {
+        title: 'Pendientes por facturar',
+        badge: { text: pending > 0 ? 'Atención' : 'Al día', variant: pending > 0 ? 'warning' : 'secondary' },
+        value: formatNumber(pending),
+        detail: pending > 0 ? 'Genera FEL desde Facturación' : 'Sin pendientes',
+        accent: pending > 0 ? 'warning' : 'secondary',
+        icon: pending > 0 ? 'bi-exclamation-triangle-fill' : 'bi-check-circle-fill',
+      },
+    ];
+
+    const summaryHtml = summaryCards
+      .map((c) => `
+        <div class="col">
+          <div class="card h-100 border-0 shadow-sm">
+            <div class="card-body d-flex flex-column">
+              <div class="d-flex align-items-start justify-content-between">
+                <span class="badge bg-${c.badge.variant}">${escapeHtml(c.badge.text)}</span>
+                <i class="bi ${c.icon} fs-4 text-${c.accent}"></i>
+              </div>
+              <h6 class="mt-2 mb-1 text-muted">${escapeHtml(c.title)}</h6>
+              <div class="fs-3 fw-semibold mb-1 text-${c.accent}">${escapeHtml(c.value)}</div>
+              <div class="text-muted small">${escapeHtml(c.detail)}</div>
+            </div>
           </div>
         </div>
       `).join('');
 
-      app.innerHTML = `
-        <div class="dashboard-view">
-          <div class="row g-4 dashboard-summary">
-            ${summaryHtml}
-          </div>
-          <div class="row g-4 align-items-stretch">
-            <div class="col-xl-8">
-              <div class="card shadow-sm h-100">
-                <div class="card-body d-flex flex-column gap-3 h-100">
-                  <div class="d-flex flex-wrap gap-2 align-items-start justify-content-between">
-                    <div>
-                      <h5 class="card-title mb-1">Asistencias registradas</h5>
-                      <p class="text-muted small mb-0">Información consolidada desde la base de datos.</p>
-                    </div>
-                    <div class="ms-auto" style="max-width: 260px;">
-                      <input type="search" id="dashSearch" class="form-control form-control-sm" placeholder="Buscar ticket, placa o nombre..." aria-label="Buscar asistencia" />
-                    </div>
+    // Layout principal (solo Bootstrap)
+    const app = document.getElementById('app') || document.body;
+    app.innerHTML = `
+      <div class="container-fluid px-0">
+        <!-- Resumen -->
+        <div class="row row-cols-1 row-cols-sm-2 row-cols-xxl-4 g-3 mb-4">
+          ${summaryHtml}
+        </div>
+
+        <div class="row g-4 align-items-stretch">
+          <!-- Tabla -->
+          <div class="col-xl-8">
+            <div class="card h-100 shadow-sm">
+              <div class="card-body d-flex flex-column gap-3 h-100">
+                <div class="d-flex flex-wrap gap-2 align-items-start justify-content-between">
+                  <div>
+                    <h5 class="card-title mb-1">Asistencias registradas</h5>
+                    <p class="text-muted small mb-0">Información consolidada desde la base de datos.</p>
                   </div>
-                  <div class="table-responsive flex-grow-1">
-                    <table class="table table-sm align-middle mb-0">
-                      <thead><tr><th>#</th><th>Nombre</th><th>Entrada</th><th>Salida</th></tr></thead>
-                      <tbody id="dashBody"></tbody>
-                    </table>
+                  <div class="ms-auto" style="max-width: 260px;">
+                    <input type="search" id="dashSearch" class="form-control form-control-sm"
+                          placeholder="Buscar ticket, placa o nombre..." aria-label="Buscar asistencia">
                   </div>
-                  <div class="d-flex flex-wrap gap-2 align-items-center justify-content-between">
-                    <small class="text-muted" id="dashMeta"></small>
-                    <div class="btn-group btn-group-sm" role="group" aria-label="Paginación de asistencias">
-                      <button type="button" class="btn btn-outline-secondary" id="dashPrev">Anterior</button>
-                      <button type="button" class="btn btn-outline-secondary" id="dashNext">Siguiente</button>
-                    </div>
+                </div>
+
+                <div class="table-responsive flex-grow-1">
+                  <table class="table table-sm table-hover align-middle mb-0">
+                    <thead class="table-light">
+                      <tr>
+                        <th style="width:72px">#</th>
+                        <th>Nombre</th>
+                        <th>Entrada</th>
+                        <th>Salida</th>
+                      </tr>
+                    </thead>
+                    <tbody id="dashBody">
+                      <tr>
+                        <td colspan="4" class="text-center text-muted py-4">
+                          Cargando registros…
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                <div class="d-flex flex-wrap gap-2 align-items-center justify-content-between pt-2">
+                  <small class="text-muted" id="dashMeta"></small>
+                  <div class="btn-group btn-group-sm" role="group" aria-label="Paginación de asistencias">
+                    <button type="button" class="btn btn-outline-secondary" id="dashPrev">
+                      <i class="bi bi-chevron-left"></i> Anterior
+                    </button>
+                    <button type="button" class="btn btn-outline-secondary" id="dashNext">
+                      Siguiente <i class="bi bi-chevron-right"></i>
+                    </button>
                   </div>
                 </div>
               </div>
             </div>
-            <div class="col-xl-4">
-              <div class="card shadow-sm h-100">
-                <div class="card-body d-flex flex-column gap-3">
-                  <div class="d-flex align-items-start justify-content-between gap-2">
-                    <div>
-                      <h5 class="card-title mb-1">Actividad reciente</h5>
-                      <p class="text-muted small mb-0">Últimos eventos sincronizados.</p>
-                    </div>
-                    <button class="btn btn-link btn-sm p-0" id="timelineRefresh">Actualizar</button>
+          </div>
+
+          <!-- Actividad -->
+          <div class="col-xl-4">
+            <div class="card h-100 shadow-sm">
+              <div class="card-body d-flex flex-column gap-3">
+                <div class="d-flex align-items-start justify-content-between gap-2">
+                  <div>
+                    <h5 class="card-title mb-1">Actividad reciente</h5>
+                    <p class="text-muted small mb-0">Últimos eventos sincronizados.</p>
                   </div>
-                  <div class="timeline" id="activityTimeline"></div>
+                  <button class="btn btn-link btn-sm p-0" id="timelineRefresh">
+                    <i class="bi bi-arrow-clockwise"></i> Actualizar
+                  </button>
+                </div>
+
+                <div id="activityTimeline">
+                  <div class="text-muted small">Cargando actividad…</div>
                 </div>
               </div>
             </div>
           </div>
-        </div>`;
+        </div>
+      </div>`;
 
-      const timelineContainer = document.getElementById('activityTimeline');
-      if (timelineContainer) {
-        timelineContainer.innerHTML = buildTimeline(settings?.activity);
-      }
+    // Timeline
+    const timelineContainer = document.getElementById('activityTimeline');
+    if (timelineContainer) {
+      const tl = buildTimeline(settings?.activity);
+      timelineContainer.innerHTML = tl || `<div class="text-muted small">Sin actividad reciente.</div>`;
+    }
 
-      const timelineRefresh = document.getElementById('timelineRefresh');
-      if (timelineRefresh) {
-        timelineRefresh.addEventListener('click', async () => {
-          const originalText = timelineRefresh.textContent;
-          timelineRefresh.disabled = true;
-          timelineRefresh.textContent = 'Actualizando…';
-          let hadError = false;
-          try {
-            await loadSettings(true);
-            await renderDashboard();
-          } catch (err) {
-            hadError = true;
-            console.error(err);
-            timelineRefresh.disabled = false;
-            timelineRefresh.textContent = 'Reintentar';
-          } finally {
-            if (!hadError && timelineRefresh.isConnected) {
-              timelineRefresh.textContent = originalText;
-            }
+    // Botón de refresco de actividad
+    const timelineRefresh = document.getElementById('timelineRefresh');
+    if (timelineRefresh) {
+      timelineRefresh.addEventListener('click', async () => {
+        const original = timelineRefresh.innerHTML;
+        timelineRefresh.disabled = true;
+        timelineRefresh.innerHTML = `<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span> Actualizando…`;
+        let hadError = false;
+        try {
+          await loadSettings(true);
+          await renderDashboard();
+        } catch (err) {
+          hadError = true;
+          console.error(err);
+          timelineRefresh.disabled = false;
+          timelineRefresh.innerHTML = `<i class="bi bi-exclamation-triangle me-1"></i> Reintentar`;
+        } finally {
+          if (!hadError && timelineRefresh.isConnected) {
+            timelineRefresh.innerHTML = original;
           }
-        });
-      }
-
-      const tbody = document.getElementById('dashBody');
-      const meta = document.getElementById('dashMeta');
-      const searchInput = document.getElementById('dashSearch');
-      const prevBtn = document.getElementById('dashPrev');
-      const nextBtn = document.getElementById('dashNext');
-
-      function filterData() {
-        if (!state.search) return data;
-        const term = state.search.toLowerCase();
-        return data.filter((row) =>
-          Object.values(row).some((value) => String(value ?? '').toLowerCase().includes(term))
-        );
-      }
-
-      function renderTable() {
-        const filtered = filterData();
-        const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
-        if (state.page > totalPages) {
-          state.page = totalPages;
         }
-        const start = (state.page - 1) * pageSize;
-        const pageItems = filtered.slice(start, start + pageSize);
+      });
+    }
 
-        if (pageItems.length) {
-          tbody.innerHTML = pageItems
-            .map((row, index) => `
-              <tr>
-                <td>${escapeHtml(start + index + 1)}</td>
-                <td>${escapeHtml(row.name)}</td>
-                <td>${escapeHtml(row.checkIn || '-')}</td>
-                <td>${escapeHtml(row.checkOut || '-')}</td>
-              </tr>
-            `)
-            .join('');
-        } else {
-          const message = data.length && !filtered.length
-            ? 'No se encontraron resultados'
-            : 'Sin registros disponibles';
-          tbody.innerHTML = `
+    // Tabla + paginación
+    const tbody = document.getElementById('dashBody');
+    const meta = document.getElementById('dashMeta');
+    const searchInput = document.getElementById('dashSearch');
+    const prevBtn = document.getElementById('dashPrev');
+    const nextBtn = document.getElementById('dashNext');
+
+    function filterData() {
+      if (!state.search) return data;
+      const term = state.search.toLowerCase();
+      return data.filter((row) =>
+        Object.values(row).some((value) => String(value ?? '').toLowerCase().includes(term))
+      );
+    }
+
+    function renderTable() {
+      const filtered = filterData();
+      const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+      if (state.page > totalPages) state.page = totalPages;
+
+      const start = (state.page - 1) * pageSize;
+      const pageItems = filtered.slice(start, start + pageSize);
+
+      if (pageItems.length) {
+        tbody.innerHTML = pageItems
+          .map((row, index) => `
             <tr>
-              <td colspan="4" class="text-center text-muted">${escapeHtml(message)}</td>
+              <td>${escapeHtml(start + index + 1)}</td>
+              <td>${escapeHtml(row.name)}</td>
+              <td>${escapeHtml(row.checkIn || '-')}</td>
+              <td>${escapeHtml(row.checkOut || '-')}</td>
             </tr>
-          `;
-        }
-
-        if (filtered.length) {
-          meta.textContent = `Mostrando ${start + 1} - ${Math.min(start + pageItems.length, filtered.length)} de ${filtered.length} registros`;
-        } else if (data.length) {
-          meta.textContent = 'No se encontraron resultados para la búsqueda actual';
-        } else {
-          meta.textContent = 'Sin registros para mostrar';
-        }
-
-        prevBtn.disabled = state.page <= 1 || !filtered.length;
-        nextBtn.disabled = state.page >= totalPages || !filtered.length;
+          `)
+          .join('');
+      } else {
+        const message =
+          data.length && !filtered.length ? 'No se encontraron resultados' : 'Sin registros disponibles';
+        tbody.innerHTML = `
+          <tr>
+            <td colspan="4" class="text-center text-muted py-4">
+              ${escapeHtml(message)}
+            </td>
+          </tr>
+        `;
       }
 
-      if (searchInput) {
-        searchInput.addEventListener('input', (event) => {
-          state.search = event.target.value.trim();
-          state.page = 1;
-          renderTable();
-        });
+      if (filtered.length) {
+        meta.textContent = `Mostrando ${start + 1} - ${Math.min(start + pageItems.length, filtered.length)} de ${filtered.length} registros`;
+      } else if (data.length) {
+        meta.textContent = 'No se encontraron resultados para la búsqueda actual';
+      } else {
+        meta.textContent = 'Sin registros para mostrar';
       }
 
-      if (prevBtn) {
-        prevBtn.addEventListener('click', () => {
-          if (state.page > 1) {
-            state.page -= 1;
-            renderTable();
-          }
-        });
-      }
-
-      if (nextBtn) {
-        nextBtn.addEventListener('click', () => {
-          const totalPages = Math.max(1, Math.ceil(filterData().length / pageSize));
-          if (state.page < totalPages) {
-            state.page += 1;
-            renderTable();
-          }
-        });
-      }
-
-      renderTable();
-    } catch (e) {
-      app.innerHTML = `
-        <div class="card shadow-sm">
-          <div class="card-body">
-            <h5 class="card-title text-danger">No se pudo cargar el dashboard</h5>
-            <p class="text-muted">Intenta nuevamente en unos segundos. Si el problema persiste revisa la conexión con la base de datos y las credenciales de las integraciones.</p>
-            <pre class="small mb-0">${escapeHtml(String(e))}</pre>
-          </div>
-        </div>`;
+      prevBtn.disabled = state.page <= 1 || !filtered.length;
+      nextBtn.disabled = state.page >= totalPages || !filtered.length;
     }
-    async function loadList() {
-      tbody.innerHTML = `<tr><td colspan="5" class="text-muted">Consultando BD…</td></tr>`;
-      meta.textContent = '';
-      try {
-        const js = await fetchJSON(api('facturacion/list'));
-        if (!js.ok && js.error) throw new Error(js.error);
-        allRows = js.rows || [];
+
+    if (searchInput) {
+      searchInput.addEventListener('input', (event) => {
+        state.search = event.target.value.trim();
         state.page = 1;
-        renderPage();
-      } catch (e) {
-        tbody.innerHTML = `<tr><td colspan="5" class="text-danger">Error: ${e.message}</td></tr>`;
-        meta.textContent = '';
-      }
+        renderTable();
+      });
     }
 
-    loadList();
-  }
+    if (prevBtn) {
+      prevBtn.addEventListener('click', () => {
+        if (state.page > 1) {
+          state.page -= 1;
+          renderTable();
+        }
+      });
+    }
 
-  // ===== Facturación (tabla + Facturar) =====
+    if (nextBtn) {
+      nextBtn.addEventListener('click', () => {
+        const totalPages = Math.max(1, Math.ceil(filterData().length / pageSize));
+        if (state.page < totalPages) {
+          state.page += 1;
+          renderTable();
+        }
+      });
+    }
+
+    renderTable();
+  } catch (e) {
+    const app = document.getElementById('app') || document.body;
+    app.innerHTML = `
+      <div class="card shadow-sm">
+        <div class="card-body">
+          <h5 class="card-title text-danger mb-2">No se pudo cargar el dashboard</h5>
+          <p class="text-muted">Intenta nuevamente en unos segundos. Si el problema persiste, revisa la conexión con la base de datos y las credenciales.</p>
+          <pre class="small mb-0">${escapeHtml(String(e))}</pre>
+        </div>
+      </div>`;
+  }
+}
+
+/* ============================
+   Boot de la SPA
+   ============================ */
+
+(async () => {
+  // Chequeo de sesión: si no hay, login
+  const r = await fetch(api('auth/me')); // el parche global ya manda cookies
+  if (r.status === 401) {
+    if (!location.pathname.endsWith('/login.html')) location.href = '/login.html';
+    return;
+  }
+  // Carga dashboard
+  await renderDashboard();
+})();
+
+  // ===== Facturación (tabla + Facturar) — Bootstrap =====
   async function renderInvoices() {
     const settings = await loadSettings();
     const hourlyRateSetting = settings?.billing?.hourly_rate ?? null;
-    const monthlyRateSetting = settings?.billing?.monthly_rate ?? null;
+
+    // ——— helpers (mínimos) ———
+    const debounce = (fn, ms = 500) => {
+      let t; return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+    };
+    
+    async function lookupNit(nitRaw) {
+      // Acepta dígitos o "CF"
+      const nit = (nitRaw ?? '').toString().trim().toUpperCase();
+      const q = nit === 'CF' ? 'CF' : nit.replace(/\D+/g, ''); // solo dígitos si no es CF
+      const url = api(`g4s/lookup-nit?nit=${encodeURIComponent(q)}`);
+
+      return await fetchJSON(url, { method: 'GET' });
+    }
+
 
     app.innerHTML = `
-      <div class='card p-3'>
-        <div class="d-flex flex-wrap align-items-start gap-3 mb-3">
-          <div class="flex-grow-1">
-            <h5 class="mb-1">Facturación (BD → G4S)</h5>
-            <p class="text-muted small mb-1">Lista tickets <strong>CLOSED</strong> con pagos (o monto) y <strong>sin factura</strong>.</p>
-            <div class="text-muted small" id="invoiceHourlyRateHint"></div>
+      <div class="card shadow-sm">
+        <div class="card-body">
+          <div class="d-flex flex-wrap align-items-start gap-3 mb-3">
+            <div class="flex-grow-1">
+              <h5 class="card-title mb-1">Facturación (BD → G4S)</h5>
+              <p class="text-muted small mb-1">Lista tickets <strong>CLOSED</strong> con pagos (o monto) y <strong>sin factura</strong>.</p>
+              <div class="text-muted small" id="invoiceHourlyRateHint"></div>
+            </div>
+
+            <div class="ms-auto d-flex flex-wrap align-items-center gap-2" style="max-width: 520px;">
+              <input type="search" id="invSearch" class="form-control form-control-sm" placeholder="Buscar ticket..." aria-label="Buscar ticket pendiente" />
+              <div class="btn-group btn-group-sm" role="group" aria-label="Aperturas manuales">
+                <button type="button" class="btn btn-outline-warning" id="btnManualOpen" title="Abrir barrera de SALIDA (Apertura manual)">
+                  <i class="bi bi-box-arrow-right me-1"></i> Salida
+                </button>
+                <button type="button" class="btn btn-outline-primary" id="btnManualOpenIn" title="Abrir barrera de ENTRADA (Apertura manual)">
+                  <i class="bi bi-box-arrow-in-left me-1"></i> Entrada
+                </button>
+              </div>
+            </div>
           </div>
-          <div class="ms-auto d-flex flex-wrap align-items-left gap-2" style="max-width: 420px;">
-            <input type="search" id="invSearch" class="form-control form-control-sm" placeholder="Buscar ticket..." aria-label="Buscar ticket pendiente" />
-            <button type="button" id="btnManualOpen" title="Abrir barrera (Apertura manual)">
-              <svg viewBox="0 0 24 24" fill="none">
-                <path d="M7 11V7a5 5 0 0 1 10 0" />
-                <rect x="3" y="11" width="18" height="10" rx="2" ry="2" />
-              </svg>
-              <span>Apertura manual</span>
-            </button>
+
+          <div class="table-responsive">
+            <table class="table table-sm table-hover align-middle mb-0">
+              <thead class="table-light">
+                <tr>
+                  <th>Ticket / Placa</th>
+                  <th>Fecha</th>
+                  <th class="text-end">Total</th>
+                  <th>UUID</th>
+                  <th class="text-center">Acción</th>
+                </tr>
+              </thead>
+              <tbody id="invRows">
+                <tr>
+                  <td colspan="5" class="text-muted text-center py-4">
+                    <div class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></div>
+                    Cargando…
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="d-flex flex-wrap gap-2 align-items-center justify-content-between mt-3">
+            <small class="text-muted" id="invMeta"></small>
+            <div class="btn-group btn-group-sm" role="group" aria-label="Paginación de facturas">
+              <button type="button" class="btn btn-outline-secondary" id="invPrev"><i class="bi bi-chevron-left"></i> Anterior</button>
+              <button type="button" class="btn btn-outline-secondary" id="invNext">Siguiente <i class="bi bi-chevron-right"></i></button>
+            </div>
           </div>
         </div>
-        <div class="table-responsive">
-          <table class="table table-sm align-middle mb-0">
-            <thead class="table-light">
-              <tr>
-                <th>Ticket</th>
-                <th>Fecha</th>
-                <th class="text-end">Total</th>
-                <th>UUID</th>
-                <th class="text-center">Acción</th>
-              </tr>
-            </thead>
-            <tbody id="invRows">
-              <tr><td colspan="5" class="text-muted">Cargando…</td></tr>
-            </tbody>
-          </table>
-        </div>
-        <div class="d-flex flex-wrap gap-2 align-items-center justify-content-between mt-3">
-          <small class="text-muted" id="invMeta"></small>
-          <div class="btn-group btn-group-sm" role="group" aria-label="Paginación de facturas">
-            <button type="button" class="btn btn-outline-secondary" id="invPrev">Anterior</button>
-            <button type="button" class="btn btn-outline-secondary" id="invNext">Siguiente</button>
-          </div>
+      </div>
+
+      <!-- Modal de confirmación (Bootstrap-styled, controlado por JS) -->
+      <div class="modal fade" id="invoiceConfirmModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+          <form class="modal-content" id="invoiceConfirmForm">
+            <div class="modal-header">
+              <h5 class="modal-title">Confirmar cobro</h5>
+              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar" data-action="cancel"></button>
+            </div>
+            <div class="modal-body">
+              <div class="border rounded p-2 mb-3 bg-light">
+                <div class="d-flex justify-content-between small mb-1">
+                  <span class="text-muted">Ticket</span><span id="mSumTicket">—</span>
+                </div>
+                <div class="d-flex justify-content-between small mb-1">
+                  <span class="text-muted">Fecha</span><span id="mSumFecha">—</span>
+                </div>
+                <div class="d-flex justify-content-between small mb-1">
+                  <span class="text-muted">Horas registradas</span><span id="mSumHoras">—</span>
+                </div>
+                <div class="d-flex justify-content-between small">
+                  <span class="text-muted">Total en BD</span><span id="mSumTotalDb">—</span>
+                </div>
+                <div class="d-flex justify-content-between small mt-1" id="mSumTotalHourlyRow" hidden>
+                  <span class="text-muted">Total por hora</span><span id="mSumTotalHourly">—</span>
+                </div>
+              </div>
+
+              <div class="form-check">
+                <input class="form-check-input" type="radio" name="billingMode" id="mModeHourly" value="hourly">
+                <label class="form-check-label" for="mModeHourly">
+                  Cobro por hora <strong class="ms-1" id="mHourlyLabel"></strong>
+                </label>
+                <div class="form-text" id="mHourlyHelp">Define una tarifa por hora en Ajustes para habilitar esta opción.</div>
+              </div>
+
+              <div class="form-check mt-2">
+                <input class="form-check-input" type="radio" name="billingMode" id="mModeGrace" value="grace">
+                <label class="form-check-label" for="mModeGrace">
+                  Ticket de gracia <strong class="ms-1">Q0.00</strong>
+                </label>
+                <div class="form-text">No se cobra, no se envía a FEL; se registra en BD y se notifica a PayNotify.</div>
+              </div>
+
+              <div class="form-check mt-2">
+                <input class="form-check-input" type="radio" name="billingMode" id="mModeCustom" value="custom">
+                <label class="form-check-label" for="mModeCustom">
+                  Cobro personalizado
+                </label>
+                <div class="form-text">Indica el total que deseas facturar manualmente.</div>
+              </div>
+
+              <div class="input-group input-group-sm mt-2">
+                <span class="input-group-text">Q</span>
+                <input type="number" step="0.01" min="0" class="form-control" id="mCustomInput" placeholder="0.00" disabled>
+              </div>
+
+              <div class="mt-3">
+                <label for="mNit" class="form-label mb-1">NIT del cliente</label>
+                <input
+                  type="text"
+                  id="mNit"
+                  class="form-control"
+                  placeholder='Escribe el NIT o "CF"'
+                  value="CF"
+                  autocomplete="off"
+                  inputmode="numeric"
+                  aria-describedby="mNitHelp mNitStatus"
+                >
+                <div class="form-text" id="mNitHelp">Escribe el NIT o “CF” (consumidor final). Si ingresas NIT, se consultará en SAT (G4S).</div>
+                <div class="small mt-1 text-muted" id="mNitStatus" aria-live="polite"></div>
+              </div>
+
+              <div class="text-danger small mt-2" id="mError" hidden></div>
+            </div>
+            <div class="modal-footer">
+              <button type="button" class="btn btn-outline-secondary btn-sm" data-action="cancel">Cancelar</button>
+              <button type="submit" class="btn btn-primary btn-sm">Confirmar</button>
+            </div>
+          </form>
         </div>
       </div>
     `;
 
+    // --------- refs
     const tbody = document.getElementById('invRows');
     const searchInput = document.getElementById('invSearch');
     const meta = document.getElementById('invMeta');
@@ -643,75 +985,98 @@
     const pageSize = 20;
     let allRows = [];
 
-    const manualOpenBtn = document.getElementById('btnManualOpen');
+    // --------- Botones apertura manual (Bootstrap buttons, mismo backend)
+    const manualOpenBtn   = document.getElementById('btnManualOpen');    // Salida
+    const manualOpenInBtn = document.getElementById('btnManualOpenIn'); // Entrada
+    const CHANNEL_SALIDA  = '40288048981adc4601981b7cb2660b05';
+    const CHANNEL_ENTRADA = '40288048981adc4601981b7c2d010aff';
 
-    if (manualOpenBtn) {
-      manualOpenBtn.addEventListener('click', async () => {
-        // Confirmación simple para evitar toques accidentales
-        const sure = await Dialog.confirm?.('¿Deseas realizar una APERTURA MANUAL de la barrera?', 'Confirmar apertura');
-        if (sure === false) return;
+    function wireManualOpen(buttonEl, { title, channelId }) {
+      if (!buttonEl || buttonEl.dataset.bound === '1') return;
+      buttonEl.dataset.bound = '1';
+      let busy = false;
 
-        manualOpenBtn.disabled = true;
-        const original = manualOpenBtn.textContent;
-        manualOpenBtn.textContent = 'Aperturando…';
+      buttonEl.addEventListener('click', async () => {
+        if (busy) return;
+        const proceed = await (Dialog?.confirm?.(
+          `¿Deseas realizar una APERTURA MANUAL de la barrera (${title})?`,
+          'Confirmar apertura'
+        ) ?? Promise.resolve(window.confirm(`¿Aperturar barrera manual (${title})?`)));
+        if (!proceed) return;
 
-        // Loader bonito (si ya usas Dialog.loading)
-        const m = Dialog.loading?.({ title: 'Apertura manual', message: 'Contactando servicio local…' });
+        let reason =
+          (await (Dialog?.prompt?.({
+            title: `Motivo de apertura (${title})`,
+            label: 'Describe brevemente el motivo (mín. 5 caracteres):',
+            placeholder: 'Ej. Emergencia, fallo del lector, visita autorizada, etc.',
+            confirmText: 'Continuar',
+            cancelText: 'Cancelar'
+          }) ?? Promise.resolve(window.prompt(`Motivo de apertura (${title}):`)))) || '';
+
+        reason = (reason || '').trim();
+        if (reason.length < 5) { (Dialog?.ok?.('El motivo debe tener al menos 5 caracteres.', 'Motivo inválido')) || alert('Motivo muy corto.'); return; }
+        if (reason.length > 255) { (Dialog?.ok?.('El motivo no debe superar 255 caracteres.', 'Motivo demasiado largo')) || alert('Motivo muy largo.'); return; }
+
+        busy = true;
+        buttonEl.disabled = true;
+        const original = buttonEl.innerHTML;
+        buttonEl.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span> Aperturando…`;
+        const m = Dialog?.loading?.({ title: `Apertura manual (${title})`, message: 'Contactando servicio…' });
 
         try {
           const res = await fetchJSON(api('gate/manual-open'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ reason, channel_id: channelId })
           });
 
           if (!res.ok) {
-            throw new Error(res.message || 'No se pudo aperturar');
+            if (res.debug) console.warn('gate/manual-open debug:', res.debug);
+            throw new Error(res.message || (res.field === 'reason' ? 'Motivo inválido.' : 'No se pudo aperturar'));
           }
 
-          // Mensaje de éxito
-          Dialog.ok(
+          (Dialog?.ok?.(
             [
-              'Apertura manual ejecutada.',
+              `Apertura manual (${title}) ejecutada.`,
               res.opened_at ? `\nHora: ${res.opened_at}` : '',
               res.code !== undefined ? `\nCódigo: ${res.code}` : '',
               res.message ? `\nMensaje: ${res.message}` : '',
+              `\nMotivo registrado: ${reason}`
             ].join(''),
-            'Apertura manual'
-          );
+            `Apertura manual (${title})`
+          )) || alert(`Apertura manual (${title}) ejecutada.`);
         } catch (e) {
-          Dialog.err(e, 'Error en apertura manual');
+          Dialog?.err?.(e, `Error en apertura manual (${title})`) || alert(`Error: ${e.message}`);
         } finally {
           if (m && typeof m.close === 'function') m.close();
-          manualOpenBtn.disabled = false;
-          manualOpenBtn.textContent = original;
+          buttonEl.disabled = false;
+          buttonEl.innerHTML = original;
+          busy = false;
         }
       });
     }
 
+    wireManualOpen(manualOpenBtn,   { title: 'Salida',  channelId: CHANNEL_SALIDA });
+    wireManualOpen(manualOpenInBtn, { title: 'Entrada', channelId: CHANNEL_ENTRADA });
+
+    // --------- util
     const formatCurrency = (value) => {
       if (value === null || value === undefined || value === '') return '—';
       const num = Number(value);
       if (!Number.isFinite(num)) return '—';
       try {
         return num.toLocaleString('es-GT', { style: 'currency', currency: 'GTQ' });
-      } catch (_) {
+      } catch {
         return `Q${num.toFixed(2)}`;
       }
     };
 
     if (hourlyRateHint) {
       const hourlyNumber = Number(hourlyRateSetting);
-      const monthlyNumber = Number(monthlyRateSetting);
-      const parts = [];
-      if (Number.isFinite(hourlyNumber) && hourlyNumber > 0) {
-        parts.push(`Tarifa por hora ${formatCurrency(hourlyNumber)}`);
-      }
-      if (Number.isFinite(monthlyNumber) && monthlyNumber > 0) {
-        parts.push(`Tarifa mensual ${formatCurrency(monthlyNumber)}`);
-      }
-      hourlyRateHint.textContent = parts.length
-        ? `${parts.join('. ')}.`
-        : 'Configura una tarifa por hora o mensual en Ajustes para habilitar los cálculos automáticos.';
+      hourlyRateHint.textContent =
+        Number.isFinite(hourlyNumber) && hourlyNumber > 0
+          ? `Tarifa por hora ${formatCurrency(hourlyNumber)}.`
+          : 'Configura una tarifa por hora en Ajustes para habilitar los cálculos automáticos.';
     }
 
     function filterRows() {
@@ -736,409 +1101,270 @@
       exit_at: row.exit_at ?? null,
     });
 
+    // --------- Modal de confirmación (con validación NIT y búsqueda automática)
     function openInvoiceConfirmation(ticket, billingConfig = {}) {
       return new Promise((resolve) => {
-        const hoursValue = typeof ticket.hours === 'number' ? ticket.hours : Number(ticket.hours);
-        const hours = Number.isFinite(hoursValue) && hoursValue > 0 ? Number(hoursValue.toFixed(2)) : null;
+        // cálculos
+        const hoursValue   = typeof ticket.hours === 'number' ? ticket.hours : Number(ticket.hours);
+        const hours        = Number.isFinite(hoursValue) && hoursValue > 0 ? Number(hoursValue.toFixed(2)) : null;
         const minutesValue = typeof ticket.duration_minutes === 'number' ? ticket.duration_minutes : Number(ticket.duration_minutes);
-        const minutes = Number.isFinite(minutesValue) && minutesValue > 0 ? Math.round(minutesValue) : null;
+        const minutes      = Number.isFinite(minutesValue) && minutesValue > 0 ? Math.round(minutesValue) : null;
+
         const hourlyRateNumber = Number(billingConfig?.hourly_rate ?? null);
         const hourlyRate = Number.isFinite(hourlyRateNumber) && hourlyRateNumber > 0 ? hourlyRateNumber : null;
-        const monthlyRateNumber = Number(billingConfig?.monthly_rate ?? null);
-        const monthlyRate = Number.isFinite(monthlyRateNumber) && monthlyRateNumber > 0 ? monthlyRateNumber : null;
-        const canHourly = hourlyRate !== null && hours !== null;
+
+        const canHourly   = hourlyRate !== null && hours !== null;
         const hourlyTotal = canHourly ? Math.round(hours * hourlyRate * 100) / 100 : null;
-        const totalFromDb = ticket.total !== null && ticket.total !== undefined && ticket.total !== ''
-          ? Number(ticket.total)
-          : null;
+
+        const totalFromDb = ticket.total != null && ticket.total !== '' ? Number(ticket.total) : null;
         const normalizedDbTotal = Number.isFinite(totalFromDb) ? Number(totalFromDb.toFixed(2)) : null;
-        const customDefault = hourlyTotal ?? (monthlyRate !== null ? monthlyRate : normalizedDbTotal);
-        const customValue = customDefault !== null ? customDefault.toFixed(2) : '';
-        const selectedMode = canHourly ? 'hourly' : (monthlyRate !== null ? 'monthly' : 'custom');
-        const rateLabel = hourlyRate !== null ? formatCurrency(hourlyRate) : null;
-        const hourlyLabel = hourlyTotal !== null ? formatCurrency(hourlyTotal) : null;
-        const monthlyLabel = monthlyRate !== null ? formatCurrency(monthlyRate) : null;
-        const defaultLabel = normalizedDbTotal !== null ? formatCurrency(normalizedDbTotal) : '—';
+
+        const customDefault = hourlyTotal ?? normalizedDbTotal;
+        const customValue = customDefault != null ? customDefault.toFixed(2) : '';
         const dateCandidate = ticket.exit_at || ticket.entry_at || ticket.fecha || null;
-        const dateLabel = dateCandidate ? formatDateTime(dateCandidate) : '—';
-        const relative = dateCandidate ? formatRelativeTime(dateCandidate) : '';
-        const hoursLabel = hours !== null ? `${hours.toFixed(2)} h${minutes && minutes % 60 ? ` (${minutes} min)` : ''}` : '—';
-        const hourlyRadioAttr = canHourly ? (selectedMode === 'hourly' ? 'checked' : '') : 'disabled';
-        const monthlyRadioAttr = monthlyRate !== null ? (selectedMode === 'monthly' ? 'checked' : '') : 'disabled';
 
-        const backdrop = document.createElement('div');
-        backdrop.className = 'app-modal-backdrop';
-        const hourlyHelp = hourlyLabel
-          ? `Tarifa ${rateLabel ?? '—'} × ${hours !== null ? `${hours.toFixed(2)} h` : '—'}.`
-          : 'Define una tarifa por hora en Ajustes para habilitar esta opción.';
-        const monthlyHelp = monthlyLabel
-          ? 'Se usará la tarifa mensual configurada en Ajustes.'
-          : 'Define una tarifa mensual en Ajustes para habilitar esta opción.';
+        // refs modal
+        const modalEl  = document.getElementById('invoiceConfirmModal');
+        const form     = document.getElementById('invoiceConfirmForm');
+        const mErr     = document.getElementById('mError');
+        const mCustom  = document.getElementById('mCustomInput');
+        const mHourly  = document.getElementById('mModeHourly');
+        const mGrace   = document.getElementById('mModeGrace');
+        const mCustomR = document.getElementById('mModeCustom');
+        const mNit     = document.getElementById('mNit');
+        const mNitHelp = document.getElementById('mNitHelp');
+        const mNitStatus = document.getElementById('mNitStatus');
+        const mHourlyLabel = document.getElementById('mHourlyLabel');
+        const mHourlyHelp  = document.getElementById('mHourlyHelp');
 
-        backdrop.innerHTML = `
-          <form class="app-modal-card" id="invoiceConfirmForm" role="dialog" aria-modal="true">
-            <div class="app-modal-header">
-              <h5 class="mb-1">Confirmar factura</h5>
-              <p class="text-muted small mb-0">Selecciona el tipo de cobro para el ticket ${escapeHtml(ticket.ticket_no ?? '')}.</p>
-            </div>
-            <div class="app-modal-body">
-              <div class="app-modal-summary">
-                <div class="app-modal-summary-row"><span>Ticket</span><span>${escapeHtml(ticket.ticket_no ?? '')}</span></div>
-                <div class="app-modal-summary-row"><span>Fecha</span><span>${escapeHtml(relative ? `${dateLabel} (${relative})` : dateLabel)}</span></div>
-                <div class="app-modal-summary-row"><span>Horas registradas</span><span>${escapeHtml(hoursLabel)}</span></div>
-                <div class="app-modal-summary-row"><span>Total en BD</span><span>${escapeHtml(defaultLabel)}</span></div>
-                ${hourlyLabel ? `<div class="app-modal-summary-row"><span>Total por hora</span><span>${escapeHtml(hourlyLabel)}</span></div>` : ''}
-                ${monthlyLabel ? `<div class="app-modal-summary-row"><span>Tarifa mensual</span><span>${escapeHtml(monthlyLabel)}</span></div>` : ''}
-              </div>
-              <div class="app-modal-options">
-                <label class="form-check">
-                  <input class="form-check-input" type="radio" name="billingMode" value="hourly" ${hourlyRadioAttr} />
-                  <span class="form-check-label">
-                    Cobro por hora ${hourlyLabel ? `<strong class="ms-1">${escapeHtml(hourlyLabel)}</strong>` : ''}
-                    <small class="form-text">${escapeHtml(hourlyHelp)}</small>
-                  </span>
-                </label>
-                ${monthlyRate !== null ? `
-                <label class="form-check mt-3">
-                  <input class="form-check-input" type="radio" name="billingMode" value="monthly" ${monthlyRadioAttr} />
-                  <span class="form-check-label">
-                    Cobro mensual ${monthlyLabel ? `<strong class="ms-1">${escapeHtml(monthlyLabel)}</strong>` : ''}
-                    <small class="form-text">${escapeHtml(monthlyHelp)}</small>
-                  </span>
-                </label>` : ''}
-                <label class="form-check mt-3">
-                  <input class="form-check-input" type="radio" name="billingMode" value="custom" ${selectedMode === 'custom' ? 'checked' : ''} />
-                  <span class="form-check-label">
-                    Cobro personalizado
-                    <small class="form-text">Indica el total que deseas facturar manualmente.</small>
-                  </span>
-                </label>
-                <div class="form-group mt-3">
-                  <label for="receptor_nit" class="form-label">NIT del cliente</label>
-                  <input
-  type="text"
-  id="receptor_nit"
-  class="form-control"
-  placeholder='Escribe el NIT o "CF"'
-  value="CF"
-  autocomplete="off"
-/>
-<small class="form-text text-muted" id="nitStatus">
-  Escribe el NIT o “CF” (consumidor final). Si ingresas NIT, se consultará en SAT (G4S).
-</small>
+        // resumen
+        document.getElementById('mSumTicket').textContent   = String(ticket.ticket_no ?? '');
+        document.getElementById('mSumFecha').textContent    = dateCandidate ? `${formatDateTime(dateCandidate)} (${formatRelativeTime(dateCandidate)})` : '—';
+        document.getElementById('mSumHoras').textContent    = hours != null ? `${hours.toFixed(2)} h${minutes && minutes % 60 ? ` (${minutes} min)` : ''}` : '—';
+        document.getElementById('mSumTotalDb').textContent  = normalizedDbTotal != null ? formatCurrency(normalizedDbTotal) : '—';
 
-                </div>
-                <div class="input-group input-group-sm mt-2" data-role="customWrapper">
-                  <span class="input-group-text">Q</span>
-                  <input type="number" step="0.01" min="0" class="form-control" data-role="customInput" value="${customValue}" ${selectedMode === 'custom' ? '' : 'disabled'} placeholder="0.00" />
-                </div>
-              </div>
-              <div class="app-modal-error text-danger small" data-role="error" hidden></div>
-            </div>
-            <div class="app-modal-footer">
-              <button type="button" class="btn btn-outline-secondary btn-sm" data-action="cancel">Cancelar</button>
-              <button type="submit" class="btn btn-primary btn-sm">Confirmar factura</button>
-            </div>
-          </form>
-        `;
+        const totalHourlyRow = document.getElementById('mSumTotalHourlyRow');
+        if (hourlyTotal != null) {
+          totalHourlyRow.hidden = false;
+          document.getElementById('mSumTotalHourly').textContent = formatCurrency(hourlyTotal);
+          mHourlyLabel.textContent = formatCurrency(hourlyTotal);
+          mHourlyHelp.textContent  = `Tarifa ${hourlyRate != null ? formatCurrency(hourlyRate) : '—'} × ${hours != null ? `${hours.toFixed(2)} h` : '—'}.`;
+        } else {
+          totalHourlyRow.hidden = true;
+          mHourlyLabel.textContent = '';
+          mHourlyHelp.textContent  = 'Define una tarifa por hora en Ajustes para habilitar esta opción.';
+        }
 
-        document.body.appendChild(backdrop);
-        document.body.classList.add('modal-open');
+        // estado inicial radios
+        mHourly.disabled = !canHourly;
+        if (canHourly) { mHourly.checked = true; mCustom.disabled = true; }
+        else           { mGrace.checked = true; mCustom.disabled = true; }
+        mCustom.value = customValue;
+        mNit.value = 'CF';
+        mErr.hidden = true; mErr.textContent = '';
+        mNitStatus.className = 'small mt-1 text-muted'; mNitStatus.textContent = 'Consumidor final (CF).';
 
-        const form = backdrop.querySelector('#invoiceConfirmForm');
-        const cancelBtn = form.querySelector('[data-action="cancel"]');
-        const customInput = form.querySelector('[data-role="customInput"]');
-        const customWrapper = form.querySelector('[data-role="customWrapper"]');
-        const errorBox = form.querySelector('[data-role="error"]');
-        const radios = Array.from(form.querySelectorAll('input[name="billingMode"]'));
-        // 🔽 Coloca este bloque aquí, después de que ya se haya insertado el HTML del modal:
-          const nitInput = form.querySelector('#receptor_nit');
-          const nitStatus = form.querySelector('#nitStatus');
+        // ——— NIT: sanitizar + lookup automático ———
+        const normalizeNit = (v) => {
+          v = (v || '').toUpperCase().trim();
+          if (v === 'CF' || v === 'C') return v.length === 1 ? 'C' : 'CF';
+          return v.replace(/\D+/g, ''); // solo dígitos
+        };
+        const setNitStatus = (text, cls = 'text-muted') => {
+          mNitStatus.className = `small mt-1 ${cls}`;
+          mNitStatus.textContent = text || '';
+        };
 
-          // Sanitiza a dígitos solamente (para NIT)
-const onlyDigits = (s) => (s || '').replace(/\D+/g, '');
-
-// Debounce básico
-let nitTimer = null;
-const debounce = (fn, ms = 400) => (...args) => {
-  clearTimeout(nitTimer);
-  nitTimer = setTimeout(() => fn(...args), ms);
-};
-
-nitInput.addEventListener('input', debounce(() => {
-  const raw = nitInput.value.trim();
-  if (raw.toUpperCase() === 'CF') {
-    nitStatus.textContent = '✓ Consumidor final (CF)';
-    nitStatus.classList.remove('text-danger');
-    nitStatus.classList.add('text-success');
-    return;
-  }
-  if (raw === '') {
-    nitStatus.textContent = 'Escribe el NIT o “CF”.';
-    nitStatus.classList.remove('text-danger', 'text-success');
-    return;
-  }
-  const digits = onlyDigits(raw);
-  if (digits !== raw) {
-    nitInput.value = digits; // fuerza solo números para NIT (no afecta “CF”)
-  }
-  if (digits.length >= 4) {
-    lookupNit(digits); // tu función existente para consultar SAT vía backend
-  } else {
-    nitStatus.textContent = 'Ingresa al menos 4 dígitos para consultar.';
-    nitStatus.classList.remove('text-danger', 'text-success');
-  }
-}, 500));
-
-
-          // Llamada al backend
-          async function lookupNit(nit) {
-            try {
-              nitStatus.textContent = 'Consultando NIT…';
-              nitStatus.classList.remove('text-danger');
-              nitStatus.classList.remove('text-success');
-              const res = await fetchJSON(api(`g4s/lookup-nit?nit=${encodeURIComponent(nit)}`));
-              if (!res.ok) {
-                nitStatus.textContent = res.error || 'No fue posible consultar el NIT';
-                nitStatus.classList.add('text-danger');
-                return;
-              }
-              if (res.ok && res.nombre) {
-                nitStatus.textContent = `✓ ${res.nombre} (NIT ${res.nit})`;
-                nitStatus.classList.add('text-success');
-              } else if (res.ok && !res.nombre) {
-                nitStatus.textContent = `NIT válido, sin nombre devuelto`;
-                nitStatus.classList.add('text-success');
-              } else {
-                nitStatus.textContent = res.error || 'NIT no encontrado';
-                nitStatus.classList.add('text-danger');
-              }
-            } catch (err) {
-              nitStatus.textContent = `Error consultando NIT: ${err.message}`;
-              nitStatus.classList.add('text-danger');
-            }
-          }
-
-          // Evento de entrada: solo dígitos, consulta cuando tenga algo
-          nitInput.addEventListener('input', debounce(() => {
-            const raw = nitInput.value.trim();
-            if (raw.toUpperCase() === 'CF' || raw === '') {
-              nitStatus.textContent = 'Escribe el NIT para consultar en SAT (G4S).';
-              nitStatus.classList.remove('text-danger', 'text-success');
-              return;
-            }
-            const digits = onlyDigits(raw);
-            if (digits !== raw) {
-              nitInput.value = digits; // fuerza solo números
-            }
-            if (digits.length >= 4) {
-              lookupNit(digits);
-            } else {
-              nitStatus.textContent = 'Ingresa al menos 4 dígitos para consultar.';
-              nitStatus.classList.remove('text-danger', 'text-success');
-            }
-          }, 500));
-
-
-        let resolved = false;
-        form.addEventListener('submit', (event) => {
-          event.preventDefault();
-          const selected = form.querySelector('input[name="billingMode"]:checked')?.value;
-          if (!selected) {
-            errorBox.textContent = 'Selecciona el tipo de cobro.';
-            errorBox.hidden = false;
+        const doLookup = debounce(async () => {
+          const v = mNit.value; // <-- sin toUpper aquí; normaliza lookupNit()
+          if (!v || v.toUpperCase() === 'CF') {
+            setNitStatus('Consumidor final (CF).', 'text-muted');
             return;
           }
+          if (!/\d{6,}/.test(v.replace(/\D+/g,''))) {
+            setNitStatus('Ingresa al menos 6 dígitos para consultar.', 'text-muted');
+            return;
+          }
+          try {
+            setNitStatus('Buscando en SAT…', 'text-info');
+            const res = await lookupNit(v);
+            if (res?.ok) {
+              const nombre = (res.nombre || res.name || '').trim();
+              const dir = (res.direccion || res.address || '').trim();
+              setNitStatus(`Encontrado: ${nombre || '(sin nombre)'}${dir ? ' — ' + dir : ''}`, 'text-success');
+            } else {
+              setNitStatus(res?.error ? `No encontrado: ${res.error}` : 'NIT no encontrado.', 'text-warning');
+            }
+          } catch (err) {
+            setNitStatus(`Error al consultar: ${err.message || err}`, 'text-danger');
+          }
+        }, 500);
 
-          // NIT desde el textbox
-          const rawNit = nitInput.value.trim();
-          const receptorNit = (rawNit.toUpperCase() === 'CF' || rawNit === '')
-            ? 'CF'
-            : onlyDigits(rawNit);
+        mNit.addEventListener('input', (e) => {
+          const cur = e.target.value;
+          const norm = normalizeNit(cur);
+          if (norm !== cur) {
+            e.target.value = norm;
+            e.target.setSelectionRange(norm.length, norm.length);
+          }
+          doLookup();
+        });
+        mNit.addEventListener('keydown', (e) => {
+          const k = e.key;
+          const ctrl = e.ctrlKey || e.metaKey;
+          if (ctrl || ['Backspace','Delete','ArrowLeft','ArrowRight','Tab','Home','End'].includes(k)) return;
+          if (/^[a-zA-Z]$/.test(k)) { if (!['c','f','C','F'].includes(k)) e.preventDefault(); return; }
+          if (/^\d$/.test(k)) return;
+          e.preventDefault();
+        });
+
+        // activar/desactivar input custom
+        function updateCustomState() {
+          const isCustom = document.getElementById('mModeCustom').checked;
+          mCustom.disabled = !isCustom;
+          if (isCustom && !mCustom.value) mCustom.value = customValue;
+          mErr.hidden = true; mErr.textContent = '';
+        }
+        mHourly.addEventListener('change', updateCustomState);
+        mGrace.addEventListener('change', updateCustomState);
+        mCustomR.addEventListener('change', updateCustomState);
+
+        // cerrar
+        function closeModal(retVal = null) {
+          modalEl.classList.remove('show');
+          modalEl.style.display = 'none';
+          const oldBackdrop = document.querySelector('.modal-backdrop');
+          if (oldBackdrop) oldBackdrop.remove();
+          document.body.classList.remove('modal-open');
+          document.body.style.removeProperty('padding-right');
+          resolve(retVal);
+        }
+        form.querySelectorAll('[data-action="cancel"]').forEach((b) => {
+          b.addEventListener('click', () => closeModal(null), { once: true });
+        });
+        modalEl.addEventListener('click', (ev) => { if (ev.target === modalEl) closeModal(null); });
+        function onEsc(ev) { if (ev.key === 'Escape') { ev.preventDefault(); closeModal(null); document.removeEventListener('keydown', onEsc); } }
+        document.addEventListener('keydown', onEsc, { once: true });
+
+        // submit
+        form.onsubmit = (e) => {
+          e.preventDefault();
+          mErr.hidden = true; mErr.textContent = '';
+          const selected = form.querySelector('input[name="billingMode"]:checked')?.value;
+          if (!selected) { mErr.textContent = 'Selecciona el tipo de cobro.'; mErr.hidden = false; return; }
+
+          const rawNit = mNit.value.trim().toUpperCase();
+          const receptorNit = (rawNit === 'CF' || rawNit === '') ? 'CF' : rawNit.replace(/\D+/g, '');
+          if (receptorNit !== 'CF' && !/^\d{6,}$/.test(receptorNit)) {
+            mErr.textContent = 'NIT inválido. Debe ser CF o solo dígitos (mín. 6).';
+            mErr.hidden = false; return;
+          }
 
           if (selected === 'hourly') {
-            if (!canHourly || hourlyTotal === null) {
-              errorBox.textContent = 'Configura una tarifa por hora válida en Ajustes para usar esta opción.';
-              errorBox.hidden = false;
-              return;
-            }
-            cleanup({
-              mode: 'hourly',
-              total: hourlyTotal, // ← devolvemos total también
-              label: `Cobro por hora ${hourlyLabel ?? ''}`.trim(),
-              description: '',
-              receptor_nit: receptorNit,
-            });
+            if (!canHourly || hourlyTotal == null) { mErr.textContent = 'Configura una tarifa por hora válida en Ajustes para usar esta opción.'; mErr.hidden = false; return; }
+            closeModal({ mode: 'hourly', total: hourlyTotal, label: `Cobro por hora ${formatCurrency(hourlyTotal)}`, receptor_nit: receptorNit });
             return;
           }
-
-          if (selected === 'monthly') {
-            if (monthlyRate === null) {
-              errorBox.textContent = 'Configura una tarifa mensual válida en Ajustes para usar esta opción.';
-              errorBox.hidden = false;
-              return;
-            }
-            cleanup({
-              mode: 'monthly',
-              total: monthlyRate, // ← devolvemos total también
-              label: `Cobro mensual ${monthlyLabel ?? ''}`.trim(),
-              description: '',
-              receptor_nit: receptorNit,
-            });
+          if (selected === 'grace') {
+            closeModal({ mode: 'grace', total: 0, label: 'Ticket de gracia (Q0.00, sin FEL)', receptor_nit: receptorNit });
             return;
           }
-
-          // custom
-          const customVal = parseFloat(customInput.value);
-          if (!Number.isFinite(customVal) || customVal <= 0) {
-            errorBox.textContent = 'Ingresa un total personalizado mayor a cero.';
-            errorBox.hidden = false;
-            return;
-          }
+          const customVal = parseFloat(mCustom.value);
+          if (!Number.isFinite(customVal) || customVal <= 0) { mErr.textContent = 'Ingresa un total personalizado mayor a cero.'; mErr.hidden = false; return; }
           const normalized = Math.round(customVal * 100) / 100;
-          cleanup({
-            mode: 'custom',
-            total: normalized, // ← importantísimo
-            label: `Cobro personalizado ${formatCurrency(normalized)}`,
-            description: '',
-            receptor_nit: receptorNit,
-          });
-        });
-
-        const cleanup = (result) => {
-          if (resolved) return;
-          resolved = true;
-          document.body.classList.remove('modal-open');
-          document.removeEventListener('keydown', onKeyDown);
-          backdrop.remove();
-          resolve(result);
+          closeModal({ mode: 'custom', total: normalized, label: `Cobro personalizado ${formatCurrency(normalized)}`, receptor_nit: receptorNit });
         };
 
-        const updateState = () => {
-          const selected = form.querySelector('input[name="billingMode"]:checked')?.value;
-          const isCustom = selected === 'custom';
-          customInput.disabled = !isCustom;
-          customWrapper.classList.toggle('is-disabled', !isCustom);
-          errorBox.hidden = true;
-        };
-
-        const onKeyDown = (event) => {
-          if (event.key === 'Escape') {
-            event.preventDefault();
-            cleanup(null);
-          }
-        };
-
-        radios.forEach((radio) => radio.addEventListener('change', updateState));
-        cancelBtn.addEventListener('click', () => cleanup(null));
-        backdrop.addEventListener('click', (event) => {
-          if (event.target === backdrop) {
-            cleanup(null);
-          }
-        });
-        document.addEventListener('keydown', onKeyDown);
-        updateState();
+        // mostrar modal con backdrop estilo Bootstrap
+        modalEl.style.display = 'block';
+        setTimeout(() => modalEl.classList.add('show'), 10);
+        const backdrop = document.createElement('div');
+        backdrop.className = 'modal-backdrop fade show';
+        document.body.appendChild(backdrop);
+        document.body.classList.add('modal-open');
       });
     }
 
-   function attachInvoiceHandlers() {
-  tbody.querySelectorAll('[data-action="invoice"]').forEach((btn) => {
-    btn.addEventListener('click', async () => {
-      const payload = JSON.parse(decodeURIComponent(btn.getAttribute('data-payload')));
-      btn.disabled = true;
-      const originalText = btn.textContent;
-      btn.textContent = 'Confirmando…';
-      try {
-        const settingsSnapshot = await loadSettings();
-        const confirmation = await openInvoiceConfirmation(payload, settingsSnapshot?.billing ?? {});
-        if (!confirmation) {
-          btn.disabled = false;
-          btn.textContent = originalText;
-          return;
-        }
+    // --------- handlers de la tabla (igual que tu versión)
+    function attachInvoiceHandlers() {
+      tbody.querySelectorAll('[data-action="invoice"]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const payload = JSON.parse(decodeURIComponent(btn.getAttribute('data-payload')));
+          btn.disabled = true;
+          const originalHTML = btn.innerHTML;
+          btn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span> Confirmando…`;
+          try {
+            const settingsSnapshot = await loadSettings();
+            const confirmation = await openInvoiceConfirmation(payload, settingsSnapshot?.billing ?? {});
+            if (!confirmation) { btn.disabled = false; btn.innerHTML = originalHTML; return; }
 
-        btn.textContent = 'Enviando…';
+            btn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span> Enviando…`;
 
-        const receptorNit = confirmation.receptor_nit || payload.receptor_nit || 'CF';
+            const receptorNit = confirmation.receptor_nit || payload.receptor_nit || 'CF';
+            const requestPayload = {
+              ticket_no: payload.ticket_no,
+              plate: payload.plate,
+              receptor_nit: receptorNit,
+              serie: payload.serie || 'A',
+              numero: payload.numero || null,
+              mode: confirmation.mode,
+              total: Number(confirmation.total) || 0,
+            };
+            if (confirmation.mode === 'custom') requestPayload.custom_total = Number(confirmation.total);
 
-        const requestPayload = {
-          ticket_no: payload.ticket_no,
-          plate: payload.plate,
-          receptor_nit: receptorNit,
-          serie: payload.serie || 'A',
-          numero: payload.numero || null,
-          mode: confirmation.mode,
-          // SIEMPRE incluye total para el backend
-          total: Number(confirmation.total) || 0,
-        };
+            const js = await fetchJSON(api('fel/invoice'), {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(requestPayload),
+            });
 
-        if (confirmation.mode === 'custom') {
-          requestPayload.custom_total = Number(confirmation.total);
-        }
+            if (!js.ok) throw new Error(js.error || 'No se pudo certificar.');
 
-        // Opcional: inspecciona qué se envía
-        // console.log('POST /api/fel/invoice =>', requestPayload);
-        //console.log('POST /api/fel/invoice =>', requestPayload);
+            const uuidTxt = js.uuid ? `UUID ${js.uuid}` : 'Sin UUID (revise respuesta)';
+            const reason =
+              Number(js.billing_amount) <= 0
+                ? 'Dato de billing = 0.'
+                : (js.pay_notify_ack === false
+                    ? (js.pay_notify_error ? `PayNotify sin confirmación (${js.pay_notify_error}).` : 'PayNotify sin confirmación.')
+                    : null);
 
-        const js = await fetchJSON(api('fel/invoice'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(requestPayload),
+            if (js.manual_open) {
+              (Dialog?.ok?.(
+                [
+                  'Pago registrado (apertura manual requerida).',
+                  uuidTxt,
+                  reason ? `Motivo: ${reason}` : null,
+                  '',
+                  'La barrera debe aperturarse manualmente.'
+                ].filter(Boolean).join('\n'),
+                'Apertura manual'
+              )) || alert(`Pago registrado. ${uuidTxt}`);
+            } else {
+              (Dialog?.ok?.(
+                [
+                  `Factura enviada (${confirmation.label}).`,
+                  uuidTxt,
+                  js.pay_notify_ack ? 'Notificación a ZKBio confirmada.' : null
+                ].filter(Boolean).join(' '),
+                'FEL enviado'
+              )) || alert(`Factura enviada. ${uuidTxt}`);
+            }
+
+            await loadList();
+          } catch (e) {
+            Dialog?.err?.(e, 'Error al facturar') || alert(`Error: ${e.message}`);
+          } finally {
+            btn.disabled = false;
+            btn.innerHTML = originalHTML;
+          }
         });
-
-        if (!js.ok) {
-          throw new Error(js.error || 'No se pudo certificar.');
-        }
-
-        const uuidTxt = js.uuid ? `UUID ${js.uuid}` : 'Sin UUID (revise respuesta)';
-        const reason =
-          Number(js.billing_amount) <= 0
-            ? 'Dato de billing = 0.'
-            : (js.pay_notify_ack === false
-                ? (js.pay_notify_error ? `PayNotify sin confirmación (${js.pay_notify_error}).` : 'PayNotify sin confirmación.')
-                : null);
-
-        if (js.manual_open) {
-          // ✅ Usar Dialog.ok para mantener compatibilidad
-          Dialog.ok(
-            [
-              'Pago registrado (apertura manual requerida).',
-              uuidTxt,
-              reason ? `Motivo: ${reason}` : null,
-              '',
-              'La barrera debe aperturarse manualmente.'
-            ].filter(Boolean).join('\n'),
-            'Apertura manual'
-          );
-        } else {
-          Dialog.ok(
-            [
-              `Factura enviada (${confirmation.label}).`,
-              uuidTxt,
-              js.pay_notify_ack ? 'Notificación a ZKBio confirmada.' : null
-            ].filter(Boolean).join(' '),
-            'FEL enviado'
-          );
-        }
-
-        await loadList();
-
-      } catch (e) {
-        Dialog.err(e, 'Error al facturar');
-      } finally {
-        btn.disabled = false;
-        btn.textContent = originalText;
-      }
-    });
-  });
+      });
     }
 
     function renderPage() {
       const filtered = filterRows();
       const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
-      if (state.page > totalPages) {
-        state.page = totalPages;
-      }
+      if (state.page > totalPages) state.page = totalPages;
 
       const start = (state.page - 1) * pageSize;
       const pageRows = filtered.slice(start, start + pageSize);
@@ -1147,21 +1373,25 @@ nitInput.addEventListener('input', debounce(() => {
         const message = allRows.length && !filtered.length
           ? 'No se encontraron resultados'
           : 'No hay pendientes por facturar.';
-        tbody.innerHTML = `<tr><td colspan="5" class="text-muted">${message}</td></tr>`;
+        tbody.innerHTML = `
+          <tr>
+            <td colspan="5" class="text-muted text-center py-4">${escapeHtml(message)}</td>
+          </tr>`;
       } else {
         tbody.innerHTML = pageRows.map((d) => {
           const totalFmt = formatCurrency(d.total);
           const payload = encodeURIComponent(JSON.stringify(buildPayload(d)));
           const disabled = d.uuid ? 'disabled' : '';
+          const ticketText = d.ticket_no ? `${d.ticket_no}${d.plate ? ' · ' + d.plate : ''}` : (d.plate ?? '(sin placa)');
           return `
             <tr>
-              <td>${escapeHtml(d.plate ?? '(sin placa)')}</td>
+              <td>${escapeHtml(ticketText)}</td>
               <td>${escapeHtml(d.fecha ?? '')}</td>
               <td class="text-end">${totalFmt}</td>
-              <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(d.uuid ?? '')}</td>
+              <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(d.uuid ?? '')}</td>
               <td class="text-center">
                 <button class="btn btn-sm btn-outline-success" data-action="invoice" data-payload="${payload}" ${disabled}>
-                  Facturar
+                  <i class="bi bi-receipt me-1"></i> Facturar
                 </button>
               </td>
             </tr>`;
@@ -1181,29 +1411,27 @@ nitInput.addEventListener('input', debounce(() => {
       nextBtn.disabled = state.page >= totalPages || !filtered.length;
     }
 
+    // --------- eventos de búsqueda y paginación
     searchInput.addEventListener('input', (event) => {
       state.search = event.target.value.trim();
       state.page = 1;
       renderPage();
     });
-
-    prevBtn.addEventListener('click', () => {
-      if (state.page > 1) {
-        state.page -= 1;
-        renderPage();
-      }
-    });
-
+    prevBtn.addEventListener('click', () => { if (state.page > 1) { state.page -= 1; renderPage(); } });
     nextBtn.addEventListener('click', () => {
       const totalPages = Math.max(1, Math.ceil(filterRows().length / pageSize));
-      if (state.page < totalPages) {
-        state.page += 1;
-        renderPage();
-      }
+      if (state.page < totalPages) { state.page += 1; renderPage(); }
     });
 
+    // --------- carga inicial
     async function loadList() {
-      tbody.innerHTML = `<tr><td colspan="5" class="text-muted">Consultando BD…</td></tr>`;
+      tbody.innerHTML = `
+        <tr>
+          <td colspan="5" class="text-muted text-center py-4">
+            <div class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></div>
+            Consultando BD…
+          </td>
+        </tr>`;
       meta.textContent = '';
       try {
         const js = await fetchJSON(api('facturacion/list'));
@@ -1212,12 +1440,11 @@ nitInput.addEventListener('input', debounce(() => {
         state.page = 1;
         renderPage();
       } catch (e) {
-        tbody.innerHTML = `<tr><td colspan="5" class="text-danger">Error: ${e.message}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="5" class="text-danger text-center">Error: ${escapeHtml(e.message)}</td></tr>`;
         meta.textContent = '';
       }
     }
-
-    loadList();
+    await loadList();
   }
 
   // ===== Reportes =====
@@ -1350,6 +1577,25 @@ nitInput.addEventListener('input', debounce(() => {
       URL.revokeObjectURL(url);
     };
 
+    // ==== Reportes HTML con Bootstrap ====
+
+    const BOOTSTRAP_HEAD = `
+      <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+      <style>
+        body { color: #0f172a; }
+        .chip { display: inline-block; padding: .25rem .5rem; border-radius: 50rem; font-size: .8rem; }
+        .chip-info { background: #e7f1ff; color: #0a58ca; }
+        .chip-muted { background: #e9ecef; color: #6c757d; }
+        @media print {
+          .no-print { display: none !important; }
+          body { margin: 6mm; }
+        }
+        /* Ajuste de tabla en impresión */
+        table { font-size: .86rem; }
+        th { white-space: nowrap; }
+      </style>
+    `;
+
     const buildTicketReportHtml = (printable = false) => {
       const summary = ticketState.summary;
       const rows = ticketState.rows;
@@ -1368,32 +1614,48 @@ nitInput.addEventListener('input', debounce(() => {
 
       const filterItems = Object.entries(filters)
         .filter(([, value]) => value && value !== 'ANY')
-        .map(([key, value]) => `<li><strong>${filterLabels[key] ?? key}:</strong> ${escapeHtml(value)}</li>`)
-        .join('') || '<li>Sin filtros aplicados</li>';
+        .map(([key, value]) => `<span class="badge text-bg-light me-2 mb-2"><strong class="me-1">${filterLabels[key] ?? key}:</strong> ${escapeHtml(value)}</span>`)
+        .join('') || '<span class="text-muted">Sin filtros aplicados</span>';
 
       const summaryCards = summary ? `
-        <div class="summary-grid">
-          <div class="summary-card">
-            <strong>${escapeHtml(summary.total_tickets ?? 0)}</strong>
-            <span>Tickets encontrados</span>
+        <div class="row g-3 my-3">
+          <div class="col-sm-6 col-lg-3">
+            <div class="card border-0 bg-body-tertiary h-100">
+              <div class="card-body py-3">
+                <div class="text-muted small">Tickets encontrados</div>
+                <div class="fs-5 fw-semibold">${escapeHtml(summary.total_tickets ?? 0)}</div>
+              </div>
+            </div>
           </div>
-          <div class="summary-card">
-            <strong>${escapeHtml(formatCurrency(summary.total_amount ?? 0))}</strong>
-            <span>Monto total</span>
+          <div class="col-sm-6 col-lg-3">
+            <div class="card border-0 bg-body-tertiary h-100">
+              <div class="card-body py-3">
+                <div class="text-muted small">Monto total</div>
+                <div class="fs-5 fw-semibold">${escapeHtml(formatCurrency(summary.total_amount ?? 0))}</div>
+              </div>
+            </div>
           </div>
-          <div class="summary-card">
-            <strong>${escapeHtml(`${summary.with_payments ?? 0} / ${summary.total_tickets ?? 0}`)}</strong>
-            <span>Con pagos</span>
+          <div class="col-sm-6 col-lg-3">
+            <div class="card border-0 bg-body-tertiary h-100">
+              <div class="card-body py-3">
+                <div class="text-muted small">Con pagos</div>
+                <div class="fs-5 fw-semibold">${escapeHtml(`${summary.with_payments ?? 0} / ${summary.total_tickets ?? 0}`)}</div>
+              </div>
+            </div>
           </div>
-          <div class="summary-card">
-            <strong>${escapeHtml(summary.average_minutes !== null && summary.average_minutes !== undefined ? formatDuration(summary.average_minutes) : '—')}</strong>
-            <span>Estadía promedio</span>
+          <div class="col-sm-6 col-lg-3">
+            <div class="card border-0 bg-body-tertiary h-100">
+              <div class="card-body py-3">
+                <div class="text-muted small">Estadía promedio</div>
+                <div class="fs-5 fw-semibold">${escapeHtml(summary.average_minutes !== null && summary.average_minutes !== undefined ? formatDuration(summary.average_minutes) : '—')}</div>
+              </div>
+            </div>
           </div>
         </div>
       ` : '';
 
       const statusBreakdown = summary && summary.status_breakdown
-        ? Object.entries(summary.status_breakdown).map(([k, v]) => `<span class="chip">${escapeHtml(formatTicketStatus(k))}: ${escapeHtml(v)}</span>`).join('')
+        ? Object.entries(summary.status_breakdown).map(([k, v]) => `<span class="badge rounded-pill text-bg-info me-2 mb-2">${escapeHtml(formatTicketStatus(k))}: ${escapeHtml(v)}</span>`).join('')
         : '';
 
       const tableRows = rows.length ? rows.map((row) => `
@@ -1404,16 +1666,20 @@ nitInput.addEventListener('input', debounce(() => {
           <td>${escapeHtml(formatDateValue(row.entry_at))}</td>
           <td>${escapeHtml(formatDateValue(row.exit_at))}</td>
           <td>${escapeHtml(formatDuration(row.duration_min))}</td>
-          <td>${escapeHtml(formatCurrency(row.total))}</td>
-          <td class="payments">
+          <td class="text-end">${escapeHtml(formatCurrency(row.total))}</td>
+          <td>
             ${(row.payments || []).length ? row.payments.map((p) => `
-              <div>${escapeHtml(formatCurrency(p.amount))} · ${escapeHtml(p.method || 'Método no indicado')}<br><span>${escapeHtml(formatDateValue(p.paid_at))}</span></div>
-            `).join('') : '<span class="chip chip-muted">Sin pagos</span>'}
+              <div class="small mb-1">
+                <strong>${escapeHtml(formatCurrency(p.amount))}</strong>
+                <div class="text-muted">${escapeHtml(p.method || 'Método no indicado')}</div>
+                <div class="text-muted">${escapeHtml(formatDateValue(p.paid_at))}</div>
+              </div>
+            `).join('') : '<span class="badge text-bg-light">Sin pagos</span>'}
           </td>
         </tr>
       `).join('') : `
         <tr>
-          <td colspan="8" class="empty-row">No hay datos para mostrar.</td>
+          <td colspan="8" class="text-center text-muted py-4">No hay datos para mostrar.</td>
         </tr>
       `;
 
@@ -1422,59 +1688,44 @@ nitInput.addEventListener('input', debounce(() => {
       <head>
         <meta charset="utf-8" />
         <title>Reporte de tickets</title>
-        <style>
-          body { font-family: 'Inter', Arial, sans-serif; margin: 24px; color: #0f172a; }
-          h1 { margin-bottom: 4px; }
-          h2 { margin-bottom: 8px; color: #0369a1; }
-          .subtitle { color: #64748b; margin-bottom: 18px; }
-          .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin: 16px 0; }
-          .summary-card { border: 1px solid #dbeafe; border-radius: 12px; padding: 12px; background: #eff6ff; }
-          .summary-card strong { font-size: 1.3rem; display: block; }
-          .summary-card span { color: #0369a1; font-size: 0.85rem; }
-          .filters { list-style: none; padding: 0; display: flex; flex-wrap: wrap; gap: 12px; margin: 0 0 16px; }
-          .filters li { background: #f1f5f9; border-radius: 999px; padding: 6px 12px; font-size: 0.85rem; }
-          .status-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
-          .chip { display: inline-block; padding: 4px 10px; border-radius: 999px; background: #e0f2fe; color: #0369a1; font-size: 0.75rem; }
-          .chip-muted { background: #e2e8f0; color: #475569; }
-          table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-          th, td { border: 1px solid #e2e8f0; padding: 8px 10px; text-align: left; vertical-align: top; }
-          th { background: #f1f5f9; text-transform: uppercase; letter-spacing: .02em; font-size: 0.72rem; }
-          td.payments div { margin-bottom: 6px; }
-          .empty-row { text-align: center; color: #64748b; padding: 18px; }
-          footer { margin-top: 28px; font-size: 0.8rem; color: #64748b; }
-          @media print { body { margin: 12px; } }
-        </style>
+        ${BOOTSTRAP_HEAD}
       </head>
-      <body>
-        <header>
-          <h1>Reporte de tickets</h1>
-          <p class="subtitle">Integración ZKTeco → FEL G4S · Generado ${escapeHtml(generated)}</p>
+      <body class="p-4">
+        <header class="mb-3">
+          <h1 class="h3 mb-1">Reporte de tickets</h1>
+          <p class="text-muted mb-0">Integración ZKTeco → FEL G4S · Generado ${escapeHtml(generated)}</p>
         </header>
-        <section>
-          <h2>Filtros aplicados</h2>
-          <ul class="filters">${filterItems}</ul>
+
+        <section class="mb-3">
+          <h2 class="h5">Filtros aplicados</h2>
+          <div>${filterItems}</div>
         </section>
+
         ${summaryCards}
-        ${statusBreakdown ? `<div class="status-chips">${statusBreakdown}</div>` : ''}
+        ${statusBreakdown ? `<div class="mb-3">${statusBreakdown}</div>` : ''}
+
         <section>
-          <h2>Detalle</h2>
-          <table>
-            <thead>
-              <tr>
-                <th>Ticket</th>
-                <th>Receptor</th>
-                <th>Estado</th>
-                <th>Entrada</th>
-                <th>Salida</th>
-                <th>Estadía</th>
-                <th>Total</th>
-                <th>Pagos</th>
-              </tr>
-            </thead>
-            <tbody>${tableRows}</tbody>
-          </table>
+          <h2 class="h5">Detalle</h2>
+          <div class="table-responsive">
+            <table class="table table-sm table-bordered align-middle">
+              <thead class="table-light">
+                <tr>
+                  <th>Ticket</th>
+                  <th>Receptor</th>
+                  <th>Estado</th>
+                  <th>Entrada</th>
+                  <th>Salida</th>
+                  <th>Estadía</th>
+                  <th class="text-end">Total</th>
+                  <th>Pagos</th>
+                </tr>
+              </thead>
+              <tbody>${tableRows}</tbody>
+            </table>
+          </div>
         </section>
-        <footer>Reporte generado automáticamente. Fuente: Base de datos interna.</footer>
+
+        <footer class="mt-4 text-muted small">Reporte generado automáticamente. Fuente: Base de datos interna.</footer>
         ${printable ? '<script>window.addEventListener("load",()=>{setTimeout(()=>window.print(),300);});</script>' : ''}
       </body>
       </html>`;
@@ -1496,26 +1747,42 @@ nitInput.addEventListener('input', debounce(() => {
 
       const filterItems = Object.entries(filters)
         .filter(([, value]) => value && value !== 'ANY')
-        .map(([key, value]) => `<li><strong>${filterLabels[key] ?? key}:</strong> ${escapeHtml(value)}</li>`)
-        .join('') || '<li>Sin filtros aplicados</li>';
+        .map(([key, value]) => `<span class="badge text-bg-light me-2 mb-2"><strong class="me-1">${filterLabels[key] ?? key}:</strong> ${escapeHtml(value)}</span>`)
+        .join('') || '<span class="text-muted">Sin filtros aplicados</span>';
 
       const summaryCards = summary ? `
-        <div class="summary-grid">
-          <div class="summary-card">
-            <strong>${escapeHtml(summary.total ?? 0)}</strong>
-            <span>Facturas encontradas</span>
+        <div class="row g-3 my-3">
+          <div class="col-sm-6 col-lg-3">
+            <div class="card border-0 bg-body-tertiary h-100">
+              <div class="card-body py-3">
+                <div class="text-muted small">Facturas encontradas</div>
+                <div class="fs-5 fw-semibold">${escapeHtml(summary.total ?? 0)}</div>
+              </div>
+            </div>
           </div>
-          <div class="summary-card">
-            <strong>${escapeHtml(formatCurrency(summary.total_amount ?? 0))}</strong>
-            <span>Monto total</span>
+          <div class="col-sm-6 col-lg-3">
+            <div class="card border-0 bg-body-tertiary h-100">
+              <div class="card-body py-3">
+                <div class="text-muted small">Monto total</div>
+                <div class="fs-5 fw-semibold">${escapeHtml(formatCurrency(summary.total_amount ?? 0))}</div>
+              </div>
+            </div>
           </div>
-          <div class="summary-card">
-            <strong>${escapeHtml(summary.ok ?? 0)}</strong>
-            <span>Certificadas (OK)</span>
+          <div class="col-sm-6 col-lg-3">
+            <div class="card border-0 bg-body-tertiary h-100">
+              <div class="card-body py-3">
+                <div class="text-muted small">Certificadas (OK)</div>
+                <div class="fs-5 fw-semibold">${escapeHtml(summary.ok ?? 0)}</div>
+              </div>
+            </div>
           </div>
-          <div class="summary-card">
-            <strong>${escapeHtml(summary.average_amount ? formatCurrency(summary.average_amount) : '—')}</strong>
-            <span>Promedio por factura</span>
+          <div class="col-sm-6 col-lg-3">
+            <div class="card border-0 bg-body-tertiary h-100">
+              <div class="card-body py-3">
+                <div class="text-muted small">Promedio por factura</div>
+                <div class="fs-5 fw-semibold">${escapeHtml(summary.average_amount ? formatCurrency(summary.average_amount) : '—')}</div>
+              </div>
+            </div>
           </div>
         </div>
       ` : '';
@@ -1524,20 +1791,22 @@ nitInput.addEventListener('input', debounce(() => {
         ['OK', summary.ok ?? 0],
         ['PENDING', summary.pending ?? 0],
         ['ERROR', summary.error ?? 0],
-      ].filter(([, value]) => value > 0).map(([key, value]) => `<span class="chip">${escapeHtml(formatInvoiceStatus(key))}: ${escapeHtml(value)}</span>`).join('') : '';
+      ].filter(([, value]) => value > 0).map(([key, value]) =>
+        `<span class="badge rounded-pill ${key==='OK'?'text-bg-success':key==='PENDING'?'text-bg-warning':'text-bg-danger'} me-2 mb-2">${escapeHtml(formatInvoiceStatus(key))}: ${escapeHtml(value)}</span>`
+      ).join('') : '';
 
       const tableRows = rows.length ? rows.map((row) => `
         <tr>
           <td>${escapeHtml(row.ticket_no)}</td>
           <td>${escapeHtml(formatDateValue(row.fecha))}</td>
-          <td>${escapeHtml(formatCurrency(row.total))}</td>
+          <td class="text-end">${escapeHtml(formatCurrency(row.total))}</td>
           <td>${escapeHtml(row.receptor ?? 'CF')}</td>
-          <td>${escapeHtml(row.uuid ?? '—')}</td>
+          <td class="text-truncate" style="max-width: 260px;">${escapeHtml(row.uuid ?? '—')}</td>
           <td>${escapeHtml(formatInvoiceStatus(row.status))}</td>
         </tr>
       `).join('') : `
         <tr>
-          <td colspan="6" class="empty-row">No hay facturas con los filtros dados.</td>
+          <td colspan="6" class="text-center text-muted py-4">No hay facturas con los filtros dados.</td>
         </tr>
       `;
 
@@ -1546,60 +1815,48 @@ nitInput.addEventListener('input', debounce(() => {
       <head>
         <meta charset="utf-8" />
         <title>Reporte de facturas emitidas</title>
-        <style>
-          body { font-family: 'Inter', Arial, sans-serif; margin: 24px; color: #0f172a; }
-          h1 { margin-bottom: 4px; }
-          h2 { margin-bottom: 8px; color: #0f766e; }
-          .subtitle { color: #475569; margin-bottom: 18px; }
-          .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin: 16px 0; }
-          .summary-card { border: 1px solid #99f6e4; border-radius: 12px; padding: 12px; background: #ecfeff; }
-          .summary-card strong { font-size: 1.3rem; display: block; }
-          .summary-card span { color: #0f766e; font-size: 0.85rem; }
-          .filters { list-style: none; padding: 0; display: flex; flex-wrap: wrap; gap: 12px; margin: 0 0 16px; }
-          .filters li { background: #f1f5f9; border-radius: 999px; padding: 6px 12px; font-size: 0.85rem; }
-          .status-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
-          .chip { display: inline-block; padding: 4px 10px; border-radius: 999px; background: #ccfbf1; color: #0f766e; font-size: 0.75rem; }
-          table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-          th, td { border: 1px solid #e2e8f0; padding: 8px 10px; text-align: left; }
-          th { background: #f1f5f9; text-transform: uppercase; letter-spacing: .02em; font-size: 0.72rem; }
-          .empty-row { text-align: center; color: #64748b; padding: 18px; }
-          footer { margin-top: 28px; font-size: 0.8rem; color: #64748b; }
-          @media print { body { margin: 12px; } }
-        </style>
+        ${BOOTSTRAP_HEAD}
       </head>
-      <body>
-        <header>
-          <h1>Reporte de facturas emitidas</h1>
-          <p class="subtitle">Integración ZKTeco → FEL G4S · Generado ${escapeHtml(generated)}</p>
+      <body class="p-4">
+        <header class="mb-3">
+          <h1 class="h3 mb-1">Reporte de facturas emitidas</h1>
+          <p class="text-muted mb-0">Integración ZKTeco → FEL G4S · Generado ${escapeHtml(generated)}</p>
         </header>
-        <section>
-          <h2>Filtros aplicados</h2>
-          <ul class="filters">${filterItems}</ul>
+
+        <section class="mb-3">
+          <h2 class="h5">Filtros aplicados</h2>
+          <div>${filterItems}</div>
         </section>
+
         ${summaryCards}
-        ${statusBreakdown ? `<div class="status-chips">${statusBreakdown}</div>` : ''}
+        ${statusBreakdown ? `<div class="mb-3">${statusBreakdown}</div>` : ''}
+
         <section>
-          <h2>Detalle</h2>
-          <table>
-            <thead>
-              <tr>
-                <th>Ticket</th>
-                <th>Fecha</th>
-                <th>Total</th>
-                <th>Receptor</th>
-                <th>UUID</th>
-                <th>Estado</th>
-              </tr>
-            </thead>
-            <tbody>${tableRows}</tbody>
-          </table>
+          <h2 class="h5">Detalle</h2>
+          <div class="table-responsive">
+            <table class="table table-sm table-bordered align-middle">
+              <thead class="table-light">
+                <tr>
+                  <th>Ticket</th>
+                  <th>Fecha</th>
+                  <th class="text-end">Total</th>
+                  <th>Receptor</th>
+                  <th>UUID</th>
+                  <th>Estado</th>
+                </tr>
+              </thead>
+              <tbody>${tableRows}</tbody>
+            </table>
+          </div>
         </section>
-        <footer>Reporte generado automáticamente. Fuente: tabla de facturas (invoices).</footer>
+
+        <footer class="mt-4 text-muted small">Reporte generado automáticamente. Fuente: tabla de facturas (invoices).</footer>
         ${printable ? '<script>window.addEventListener("load",()=>{setTimeout(()=>window.print(),300);});</script>' : ''}
       </body>
       </html>`;
     };
 
+    // ====== UI principal (ajustes mínimos a Bootstrap puro) ======
     app.innerHTML = `
       <div class="d-flex flex-column gap-4">
         <section class="card shadow-sm">
@@ -1609,7 +1866,7 @@ nitInput.addEventListener('input', debounce(() => {
                 <h5 class="card-title mb-1">Reporte de tickets</h5>
                 <p class="text-muted small mb-0">Analiza tickets cerrados, montos recaudados y tiempos de permanencia.</p>
               </div>
-              <span class="badge badge-soft">Tickets</span>
+              <span class="badge text-bg-info">Tickets</span>
             </div>
             <form id="ticketFilters" class="row g-3 mt-3">
               <div class="col-md-3">
@@ -1635,8 +1892,8 @@ nitInput.addEventListener('input', debounce(() => {
               <div class="col-md-3">
                 <label class="form-label small" for="ticketNit">NIT receptor</label>
                 <input type="text" id="ticketNit" class="form-control form-control-sm" placeholder="Solo números"
-       value="${escapeHtml(ticketState.filters.nit || '')}"
-       inputmode="numeric" pattern="\\d*" maxlength="15"/>
+                  value="${escapeHtml(ticketState.filters.nit || '')}"
+                  inputmode="numeric" pattern="\\d*" maxlength="15"/>
               </div>
               <div class="col-md-3">
                 <label class="form-label small" for="ticketMin">Monto mínimo</label>
@@ -1689,7 +1946,7 @@ nitInput.addEventListener('input', debounce(() => {
                 <h5 class="card-title mb-1">Reporte de facturas emitidas</h5>
                 <p class="text-muted small mb-0">Consulta documentos certificados, descárgalos y obtén estadísticas por estado.</p>
               </div>
-              <span class="badge badge-soft">Facturación</span>
+              <span class="badge text-bg-success">Facturación</span>
             </div>
             <form id="invoiceFilters" class="row g-3 mt-3">
               <div class="col-md-3">
@@ -1753,15 +2010,16 @@ nitInput.addEventListener('input', debounce(() => {
         </section>
       </div>
     `;
+
     const nitInput = document.getElementById('ticketNit');
-if (nitInput) {
-  nitInput.addEventListener('input', () => {
-    nitInput.value = nitInput.value.replace(/\D+/g, '');
-  });
-}
+    if (nitInput) {
+      nitInput.addEventListener('input', () => {
+        nitInput.value = nitInput.value.replace(/\D+/g, '');
+      });
+    }
 
     // Solo números: elimina cualquier carácter no numérico
-    nitInput.addEventListener('input', () => {
+    nitInput && nitInput.addEventListener('input', () => {
       nitInput.value = nitInput.value.replace(/\D+/g, '');
     });
 
@@ -1847,7 +2105,7 @@ if (nitInput) {
       }
       ticketSummaryEl.innerHTML = `
         <div class="col-sm-6 col-lg-3">
-          <div class="card shadow-sm border-0 bg-surface">
+          <div class="card shadow-sm border-0 bg-body-tertiary">
             <div class="card-body py-3">
               <div class="text-muted small">Tickets</div>
               <div class="fs-5 fw-semibold">${summary.total_tickets}</div>
@@ -1856,7 +2114,7 @@ if (nitInput) {
           </div>
         </div>
         <div class="col-sm-6 col-lg-3">
-          <div class="card shadow-sm border-0 bg-surface">
+          <div class="card shadow-sm border-0 bg-body-tertiary">
             <div class="card-body py-3">
               <div class="text-muted small">Monto total</div>
               <div class="fs-5 fw-semibold">${formatCurrency(summary.total_amount ?? 0)}</div>
@@ -1865,7 +2123,7 @@ if (nitInput) {
           </div>
         </div>
         <div class="col-sm-6 col-lg-3">
-          <div class="card shadow-sm border-0 bg-surface">
+          <div class="card shadow-sm border-0 bg-body-tertiary">
             <div class="card-body py-3">
               <div class="text-muted small">Tickets con pagos</div>
               <div class="fs-5 fw-semibold">${summary.with_payments}/${summary.total_tickets}</div>
@@ -1874,7 +2132,7 @@ if (nitInput) {
           </div>
         </div>
         <div class="col-sm-6 col-lg-3">
-          <div class="card shadow-sm border-0 bg-surface">
+          <div class="card shadow-sm border-0 bg-body-tertiary">
             <div class="card-body py-3">
               <div class="text-muted small">Estadía promedio</div>
               <div class="fs-5 fw-semibold">${summary.average_minutes !== null && summary.average_minutes !== undefined ? formatDuration(summary.average_minutes) : '—'}</div>
@@ -1916,7 +2174,7 @@ if (nitInput) {
             <td>${escapeHtml(formatDateValue(row.exit_at))}</td>
             <td>${escapeHtml(formatDuration(row.duration_min))}</td>
             <td class="text-end fw-semibold">${escapeHtml(formatCurrency(row.total))}</td>
-            <td>${payments || '<span class="badge bg-light text-muted border">Sin pagos</span>'}</td>
+            <td>${payments || '<span class="badge text-bg-light border">Sin pagos</span>'}</td>
           </tr>
         `;
       }).join('');
@@ -1938,7 +2196,7 @@ if (nitInput) {
       }
       invoiceSummaryEl.innerHTML = `
         <div class="col-sm-6 col-lg-3">
-          <div class="card shadow-sm border-0 bg-surface">
+          <div class="card shadow-sm border-0 bg-body-tertiary">
             <div class="card-body py-3">
               <div class="text-muted small">Facturas</div>
               <div class="fs-5 fw-semibold">${summary.total}</div>
@@ -1947,7 +2205,7 @@ if (nitInput) {
           </div>
         </div>
         <div class="col-sm-6 col-lg-3">
-          <div class="card shadow-sm border-0 bg-surface">
+          <div class="card shadow-sm border-0 bg-body-tertiary">
             <div class="card-body py-3">
               <div class="text-muted small">Monto total</div>
               <div class="fs-5 fw-semibold">${formatCurrency(summary.total_amount ?? 0)}</div>
@@ -1956,7 +2214,7 @@ if (nitInput) {
           </div>
         </div>
         <div class="col-sm-6 col-lg-3">
-          <div class="card shadow-sm border-0 bg-surface">
+          <div class="card shadow-sm border-0 bg-body-tertiary">
             <div class="card-body py-3">
               <div class="text-muted small">Certificadas</div>
               <div class="fs-5 fw-semibold">${summary.ok}</div>
@@ -1965,7 +2223,7 @@ if (nitInput) {
           </div>
         </div>
         <div class="col-sm-6 col-lg-3">
-          <div class="card shadow-sm border-0 bg-surface">
+          <div class="card shadow-sm border-0 bg-body-tertiary">
             <div class="card-body py-3">
               <div class="text-muted small">Promedio</div>
               <div class="fs-5 fw-semibold">${summary.average_amount !== null && summary.average_amount !== undefined ? formatCurrency(summary.average_amount) : '—'}</div>
@@ -1990,14 +2248,14 @@ if (nitInput) {
       }
       invoiceRowsEl.innerHTML = invoiceState.rows.map((row) => {
         const status = String(row.status || '').toUpperCase();
-        let statusClass = 'bg-secondary-subtle text-secondary';
-        if (status === 'OK') statusClass = 'bg-success-subtle text-success';
-        else if (status === 'PENDING') statusClass = 'bg-warning-subtle text-warning';
-        else if (status === 'ERROR') statusClass = 'bg-danger-subtle text-danger';
+        let statusClass = 'text-bg-secondary';
+        if (status === 'OK') statusClass = 'text-bg-success';
+        else if (status === 'PENDING') statusClass = 'text-bg-warning';
+        else if (status === 'ERROR') statusClass = 'text-bg-danger';
         const actions = row.uuid ? `
           <a class="btn btn-sm btn-outline-primary me-1" href="${api('fel/pdf')}?uuid=${encodeURIComponent(row.uuid)}" target="_blank" rel="noopener">PDF</a>
           <a class="btn btn-sm btn-outline-secondary" href="${api('fel/xml')}?uuid=${encodeURIComponent(row.uuid)}" target="_blank" rel="noopener">XML</a>
-        ` : '<span class="badge bg-light text-muted border">Sin UUID</span>';
+        ` : '<span class="badge text-bg-light border">Sin UUID</span>';
         return `
           <tr>
             <td><span class="fw-semibold">${escapeHtml(row.ticket_no)}</span></td>
@@ -2515,6 +2773,348 @@ if (nitInput) {
     }
   }
 
+  // ===== facturacion manual ======
+async function renderManualInvoiceModule() {
+  const settings = await loadSettings();
+  const monthlyRate = settings?.billing?.monthly_rate ?? null;
+
+  app.innerHTML = `
+    <div class="card p-3">
+      <div class="d-flex flex-wrap align-items-start gap-3 mb-3">
+        <div class="flex-grow-1">
+          <h5 class="mb-1">Factura manual</h5>
+          <p class="text-muted small mb-1">
+            Genera una factura manual indicando <strong>motivo</strong>, <strong>NIT</strong> y <strong>monto</strong>,
+            o usa la <strong>tarifa mensual</strong>. También permite factura de <strong>gracia</strong> (Q 0.00, sin FEL).
+          </p>
+          <div class="text-muted small">${monthlyRate != null ? `Tarifa mensual actual: Q ${Number(monthlyRate).toFixed(2)}` : 'No hay tarifa mensual configurada.'}</div>
+        </div>
+        <div class="ms-auto d-flex flex-wrap align-items-center gap-2">
+          <button type="button" class="btn btn-sm btn-primary" id="btnNewManualInv">
+            Nueva factura manual
+          </button>
+          <button type="button" class="btn btn-sm btn-outline-secondary" id="btnRefreshManualInv">
+            Actualizar
+          </button>
+        </div>
+      </div>
+
+      <div class="table-responsive">
+        <table class="table table-sm mb-0" id="tblManualInvoices">
+          <thead>
+            <tr>
+              <th>#</th><th>Fecha</th><th>Motivo</th><th>NIT</th><th>Monto</th>
+              <th>Usó mensual</th><th>Env. FEL</th><th>Estado FEL</th><th>UUID</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td colspan="9" class="text-center py-4">
+                <div class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></div>
+                <span class="ms-2">Cargando…</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Modal -->
+    <div class="modal fade" id="manualInvModal" tabindex="-1" aria-labelledby="manualInvLabel" aria-hidden="true">
+      <div class="modal-dialog">
+        <form class="modal-content" id="manualInvForm">
+          <div class="modal-header">
+            <h5 class="modal-title" id="manualInvLabel">Nueva factura manual</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+          </div>
+          <div class="modal-body">
+            <div class="mb-2">
+              <label class="form-label">Motivo</label>
+              <input type="text" class="form-control" name="reason" placeholder="Ej.: Mensualidad Noviembre" required>
+            </div>
+
+            <div class="mb-2">
+              <label class="form-label">NIT del cliente</label>
+              <div class="input-group">
+                <input type="text" class="form-control" name="receptor_nit" id="nitField" placeholder="CF o NIT" required>
+                <button class="btn btn-outline-secondary" type="button" id="btnCheckNit" title="Buscar NIT">
+                  <i class="bi bi-search"></i>
+                </button>
+              </div>
+              <div class="form-text" id="nitHelp">Escribe el NIT (o CF). Se buscará el nombre automáticamente.</div>
+              <input type="hidden" name="receptor_name" id="receptorNameHidden" />
+            </div>
+
+            <div class="mb-2">
+              <label class="form-label">Modo</label>
+              <select class="form-select" name="mode" id="modeSel">
+                <option value="custom" selected>Personalizado</option>
+                <option value="monthly">Usar tarifa mensual</option>
+                <option value="grace">Gracia (Q 0.00, sin FEL)</option>
+              </select>
+            </div>
+
+            <div class="mb-2" id="amountWrap">
+              <label class="form-label">Monto (Q)</label>
+              <input type="number" step="0.01" min="0" class="form-control" name="amount" id="amountField" placeholder="0.00">
+              <div class="form-text" id="monthlyHint"></div>
+            </div>
+
+            <div class="alert alert-warning small d-none" id="warnMonthly">
+              Se usará la tarifa mensual configurada. El campo Monto será ignorado.
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button type="submit" class="btn btn-success" id="btnSubmitManualInv">Generar</button>
+            <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancelar</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  `;
+
+  async function refreshManualInvoicesTable() {
+    const tbody = document.querySelector('#tblManualInvoices tbody');
+    if (!tbody) return;
+
+    tbody.innerHTML = `
+      <tr>
+        <td colspan="9" class="text-center py-4">
+          <div class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></div>
+          <span class="ms-2">Actualizando…</span>
+        </td>
+      </tr>`;
+
+    try {
+      const js = await fetchJSON(api('fel/manual-invoice'));
+      const rows = Array.isArray(js?.data) ? js.data : (Array.isArray(js) ? js : []);
+
+      if (!rows.length) {
+        tbody.innerHTML = `
+          <tr>
+            <td colspan="9" class="text-center text-muted py-4">
+              No hay facturas manuales registradas todavía.
+            </td>
+          </tr>`;
+        return;
+      }
+
+      tbody.innerHTML = rows.map(r => `
+        <tr title="${r.receptor_name ? 'Nombre: ' + String(r.receptor_name).replace(/"/g,'&quot;') : ''}">
+          <td>${r.id ?? ''}</td>
+          <td>${r.created_at ?? ''}</td>
+          <td>${r.reason ? escapeHtml(r.reason) : ''}</td>
+          <td>${r.receptor_nit ?? ''}</td>
+          <td>Q ${Number(r.amount ?? 0).toFixed(2)}</td>
+          <td>${r.used_monthly ? 'Sí' : 'No'}</td>
+          <td>${r.send_to_fel ? 'Sí' : 'No'}</td>
+          <td>${r.fel_status ? escapeHtml(r.fel_status) : ''}</td>
+          <td>${r.fel_uuid ? escapeHtml(r.fel_uuid) : ''}</td>
+        </tr>
+      `).join('');
+    } catch (e) {
+      console.error(e);
+      tbody.innerHTML = `
+        <tr>
+          <td colspan="9" class="text-center py-4">
+            <div class="text-danger">Error al cargar la tabla.</div>
+            <div class="small text-muted">${escapeHtml(String(e))}</div>
+          </td>
+        </tr>`;
+    }
+  }
+
+  document.getElementById('btnRefreshManualInv')?.addEventListener('click', refreshManualInvoicesTable);
+  await refreshManualInvoicesTable();
+
+  // Abrir modal
+  document.getElementById('btnNewManualInv')?.addEventListener('click', () => {
+    const modalEl = document.getElementById('manualInvModal');
+    const modal = bootstrap.Modal.getOrCreateInstance(modalEl, { backdrop: true, keyboard: true });
+
+    // limpiar posibles restos si algo se quedó antes
+    modalEl.addEventListener('hidden.bs.modal', () => {
+      document.body.classList.remove('modal-open');
+      document.body.style.removeProperty('padding-right');
+      document.querySelectorAll('.modal-backdrop').forEach(b => b.remove());
+    }, { once: true });
+
+    // Hints
+    const hint = document.getElementById('monthlyHint');
+    hint.textContent = (monthlyRate != null) ? `Tarifa mensual actual: Q ${Number(monthlyRate).toFixed(2)}` : 'Sin tarifa mensual configurada';
+    const modeSel = document.getElementById('modeSel');
+    const amountWrap = document.getElementById('amountWrap');
+    const amountField = document.getElementById('amountField');
+    const warnMonthly = document.getElementById('warnMonthly');
+
+    function syncMode() {
+      const mode = modeSel.value;
+      if (mode === 'monthly') {
+        warnMonthly.classList.remove('d-none');
+        amountWrap.classList.remove('d-none');
+        if (monthlyRate != null) amountField.value = Number(monthlyRate).toFixed(2);
+        amountField.readOnly = true;
+      } else if (mode === 'grace') {
+        warnMonthly.classList.add('d-none');
+        amountWrap.classList.add('d-none');
+        amountField.value = '';
+        amountField.readOnly = false;
+      } else {
+        warnMonthly.classList.add('d-none');
+        amountWrap.classList.remove('d-none');
+        amountField.readOnly = false;
+        if (!amountField.value && monthlyRate != null) amountField.placeholder = Number(monthlyRate).toFixed(2);
+      }
+    }
+    modeSel.onchange = syncMode;
+    syncMode();
+
+    // Lookup NIT
+    const nitField = document.getElementById('nitField');
+    const nitHelp = document.getElementById('nitHelp');
+    const receptorNameHidden = document.getElementById('receptorNameHidden');
+    const btnCheckNit = document.getElementById('btnCheckNit');
+    let nitLookupTimer = null;
+    let lastNitQueried = '';
+
+    function normalizeNit(raw) {
+      const s = String(raw || '').trim().toUpperCase();
+      if (s === 'C/F' || s === 'CF') return 'CF';
+      return s.replace(/\s+/g, '');
+    }
+
+    async function doNitLookup(force = false) {
+      const raw = nitField.value;
+      const nit = normalizeNit(raw);
+      receptorNameHidden.value = '';
+
+      if (!nit) {
+        nitHelp.textContent = 'Escribe el NIT (o CF). Se buscará el nombre automáticamente.';
+        return;
+      }
+      if (nit === 'CF') {
+        nitHelp.textContent = 'Consumidor Final';
+        return;
+      }
+      if (!force && nit === lastNitQueried) return;
+      lastNitQueried = nit;
+
+      nitHelp.innerHTML = 'Buscando NIT… <span class="spinner-border spinner-border-sm align-middle" role="status" aria-hidden="true"></span>';
+
+      try {
+        const url = api('g4s/lookup-nit') + '?nit=' + encodeURIComponent(nit);
+        const js = await fetchJSON(url);
+        if (js?.ok) {
+          const nombre = js.nombre || '';
+          receptorNameHidden.value = nombre;
+          nitHelp.innerHTML = nombre
+            ? `Nombre: <strong>${escapeHtml(nombre)}</strong>`
+            : 'NIT válido. No se encontró nombre.';
+        } else {
+          receptorNameHidden.value = '';
+          nitHelp.textContent = js?.error ? `No encontrado: ${js.error}` : 'No se encontró el NIT.';
+        }
+      } catch (err) {
+        receptorNameHidden.value = '';
+        nitHelp.textContent = 'Error al consultar el NIT.';
+        console.error(err);
+      }
+    }
+
+    function debounceLookup() {
+      if (nitLookupTimer) clearTimeout(nitLookupTimer);
+      nitLookupTimer = setTimeout(() => doNitLookup(false), 450);
+    }
+
+    nitField.addEventListener('input', debounceLookup);
+    nitField.addEventListener('blur', () => doNitLookup(false));
+    btnCheckNit?.addEventListener('click', () => doNitLookup(true));
+
+    // Submit — ENLAZAR SOLO UNA VEZ
+    const form = document.getElementById('manualInvForm');
+    if (!form.dataset.bound) {
+      form.dataset.bound = '1';
+      let submitting = false;
+
+      form.addEventListener('submit', async (ev) => {
+        ev.preventDefault();
+        if (submitting) return;        // ← evita submit doble
+        submitting = true;
+
+        const btnSubmit = document.getElementById('btnSubmitManualInv');
+        btnSubmit?.setAttribute('disabled', 'disabled');
+
+        const fd = new FormData(form);
+        const payload = {
+          reason: (fd.get('reason') || '').toString().trim(),
+          receptor_nit: (fd.get('receptor_nit') || 'CF').toString().trim().toUpperCase(),
+          mode: (fd.get('mode') || 'custom').toString(),
+        };
+        const receptorName = (fd.get('receptor_name') || '').toString().trim();
+        if (receptorName) payload.receptor_name = receptorName;
+        if (payload.mode === 'custom') payload.amount = Number(fd.get('amount') || 0);
+        if (payload.mode === 'monthly' && monthlyRate != null) payload.amount = Number(monthlyRate);
+
+        const m = Dialog.loading({ title: 'Generando', message: 'Creando factura…' });
+        try {
+          const res = await fetchJSON(api('fel/manual-invoice'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+
+          if (!res?.ok) {
+            m.close();
+            Dialog.alert({ title: 'Error', message: res?.error || 'No se pudo generar la factura' });
+            return;
+          }
+
+          const msg = [
+            `<b>Factura manual</b>`,
+            `Motivo: ${escapeHtml(payload.reason)}`,
+            `NIT: ${escapeHtml(payload.receptor_nit)}${payload.receptor_name ? ' — ' + escapeHtml(payload.receptor_name) : ''}`,
+            `Monto: Q ${Number(res.billing_amount ?? 0).toFixed(2)}`,
+            res.uuid ? `UUID: ${escapeHtml(res.uuid)}` : ''
+          ].filter(Boolean).join('<br>');
+
+          m.close();
+          Dialog.alert({ title: 'Listo', html: msg });
+
+          await refreshManualInvoicesTable();
+
+          const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+          modal.hide();
+
+          // Limpieza total por si Bootstrap dejó restos
+          setTimeout(() => {
+            document.body.classList.remove('modal-open');
+            document.body.style.removeProperty('padding-right');
+            document.querySelectorAll('.modal-backdrop').forEach(b => b.remove());
+          }, 150);
+        } catch (err) {
+          m.close();
+          Dialog.alert({ title: 'Error', message: String(err) });
+        } finally {
+          submitting = false;
+          btnSubmit?.removeAttribute('disabled');
+        }
+      });
+    }
+
+    modal.show();
+  });
+
+  function escapeHtml(value) {
+    return String(value ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+}
+
+
   const PAGE_STORAGE_KEY = 'zkt:lastPage';
 
   function rememberPage(page) {
@@ -2535,7 +3135,121 @@ if (nitInput) {
     }
   }
 
-  const renderers = { dashboard: renderDashboard, invoices: renderInvoices, reports: renderReports, settings: renderSettings };
+  // ===== Router simple para sidebar/offcanvas =====
+
+  // 1) Mapa de renderizadores (asegúrate de que existan esas funciones)
+  const renderers = {
+    dashboard: typeof renderDashboard === 'function' ? renderDashboard : async () => notImpl('Dashboard'),
+    invoices:  typeof renderInvoices  === 'function' ? renderInvoices  : async () => notImpl('Facturación'),
+    reports:   typeof renderReports   === 'function' ? renderReports   : async () => notImpl('Reportes'),
+    settings:  typeof renderSettings  === 'function' ? renderSettings  : async () => notImpl('Ajustes'),
+    ManualInvoice: typeof renderManualInvoiceModule === 'function' ? renderManualInvoiceModule : async () => notImpl('Factura manual'),
+  };
+
+  // (opcional) placeholder si falta algún módulo
+  async function notImpl(name){
+    const el = document.getElementById('app');
+    if (!el) return;
+    el.innerHTML = `
+      <div class="card shadow-sm">
+        <div class="card-body">
+          <h5 class="card-title mb-2">${name}</h5>
+          <p class="text-muted mb-0">Este módulo aún no está implementado.</p>
+        </div>
+      </div>`;
+  }
+
+  // 2) Helpers para activar el item seleccionado en ambos menús
+  function setActiveNav(page){
+    // Desktop
+    document.querySelectorAll('#sidebarCollapse .nav-link').forEach(a=>{
+      if (a.dataset.page === page) a.classList.add('active');
+      else a.classList.remove('active');
+    });
+    // Offcanvas móvil
+    document.querySelectorAll('#sidebarOffcanvas .nav-link').forEach(a=>{
+      if (a.dataset.page === page) a.classList.add('active');
+      else a.classList.remove('active');
+    });
+  }
+
+  // 3) Navegar/renderizar
+  async function renderPage(page){
+    const fn = renderers[page];
+    if (!fn){
+      // Fallback si el hash es raro
+      location.hash = '#/dashboard';
+      return;
+    }
+    setActiveNav(page);
+    try {
+      await fn();
+    } catch (e){
+      const el = document.getElementById('app');
+      if (el){
+        el.innerHTML = `
+          <div class="card shadow-sm">
+            <div class="card-body">
+              <h5 class="card-title text-danger">Error al cargar ${page}</h5>
+              <pre class="small mb-0">${(e && e.message) ? e.message : String(e)}</pre>
+            </div>
+          </div>`;
+      }
+      console.error(e);
+    }
+  }
+
+  function parseHash(){
+    // soporta #/invoices, #invoices, o vacío
+    const h = (location.hash || '').replace(/^#\/?/, '').trim();
+    return h || 'dashboard';
+  }
+
+  async function navigate(page, {push=true} = {}){
+    if (push) location.hash = `#/${page}`;
+    await renderPage(page);
+  }
+
+  // 4) Eventos de click en ambos menús (delegación)
+  function bindNavClicks(){
+    // Desktop
+    const side = document.getElementById('sidebarCollapse');
+    if (side){
+      side.addEventListener('click', (ev)=>{
+        const a = ev.target.closest('a.nav-link[data-page]');
+        if (!a) return;
+        ev.preventDefault();
+        const page = a.dataset.page;
+        navigate(page);
+      });
+    }
+    // Offcanvas móvil
+    const off = document.getElementById('sidebarOffcanvas');
+    if (off){
+      off.addEventListener('click', (ev)=>{
+        const a = ev.target.closest('a.nav-link[data-page]');
+        if (!a) return;
+        ev.preventDefault();
+        const page = a.dataset.page;
+        navigate(page);
+        // El offcanvas se cierra solo por data-bs-dismiss en el <a>, pero por si acaso:
+        const bsOff = bootstrap.Offcanvas.getInstance(off);
+        if (bsOff) bsOff.hide();
+      });
+    }
+  }
+
+  // 5) Soporte de navegación por hash (back/forward del navegador)
+  window.addEventListener('hashchange', () => {
+    const page = parseHash();
+    renderPage(page);
+  });
+
+  // 6) Arranque
+  document.addEventListener('DOMContentLoaded', () => {
+    bindNavClicks();
+    renderPage(parseHash());
+  });
 
   async function goToPage(page, { force = false } = {}) {
     const target = renderers[page] ? page : 'dashboard';

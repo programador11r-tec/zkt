@@ -697,124 +697,147 @@ private function fixUno(string $s): string
         @file_put_contents($dir . '/' . $file, '['.date('c')."]\n".$content."\n\n", FILE_APPEND);
     }
 
-    public function submitInvoiceWithPdf(array $payload): array
-    {
-        $logFile = __DIR__ . '/../../storage/fel_submit_invoice_pdf.log';
-        \App\Utils\Logger::log("=== [SUBMIT INVOICE (PDF) START] ===", $logFile);
-        \App\Utils\Logger::log("Payload recibido: " . json_encode($payload, JSON_UNESCAPED_UNICODE), $logFile);
+public function submitInvoiceWithPdf(array $payload): array
+{
+    $logFile = __DIR__ . '/../../storage/fel_submit_invoice_pdf.log';
+    \App\Utils\Logger::log("=== [SUBMIT INVOICE (PDF) START] ===", $logFile);
+    \App\Utils\Logger::log("Payload recibido: " . json_encode($payload, JSON_UNESCAPED_UNICODE), $logFile);
 
-        // 1) Validaciones mínimas
-        $total = isset($payload['total']) ? (float)$payload['total'] : 0.0;
-        if ($total <= 0) {
-            $msg = "❌ Total debe ser > 0 para construir DTE (valor={$total})";
-            \App\Utils\Logger::log($msg, $logFile);
-            throw new \RuntimeException($msg);
-        }
+    // 1) Validaciones mínimas
+    $total = isset($payload['total']) ? (float)$payload['total'] : 0.0;
+    if ($total <= 0) {
+        $msg = "❌ Total debe ser > 0 para construir DTE (valor={$total})";
+        \App\Utils\Logger::log($msg, $logFile);
+        throw new \RuntimeException($msg);
+    }
 
-        // 2) Normaliza/consulta NIT
-        $nit = strtoupper(trim($payload['receptor_nit'] ?? 'CF'));
-        if ($nit !== 'CF') {
-            try {
-                $q = $this->g4sLookupNit($nit);
-                \App\Utils\Logger::log("[NIT LOOKUP] " . json_encode($q, JSON_UNESCAPED_UNICODE), $logFile);
-                if (!empty($q['ok']) && !empty($q['nombre'])) {
-                    $payload['receptor_nombre'] = $q['nombre'];
-                }
-            } catch (\Throwable $e) {
-                \App\Utils\Logger::log("[NIT LOOKUP] Error: " . $e->getMessage(), $logFile);
+    // 2) Normaliza/consulta NIT
+    $nit = strtoupper(trim($payload['receptor_nit'] ?? 'CF'));
+    if ($nit !== 'CF') {
+        try {
+            $q = $this->g4sLookupNit($nit);
+            \App\Utils\Logger::log("[NIT LOOKUP] " . json_encode($q, JSON_UNESCAPED_UNICODE), $logFile);
+            if (!empty($q['ok']) && !empty($q['nombre'])) {
+                $payload['receptor_nombre'] = $q['nombre'];
             }
-        }
-        $payload['receptor_nit'] = $nit;
-
-        // 3) Construir DTE (reconoce 'descripcion')
-        try {
-            $xmlDte = $this->buildGuatemalaDTE([
-                'emisor' => [
-                    'nit'             => $this->config->get('FEL_G4S_ENTITY', '81491514'),
-                    'nombre'          => $this->config->get('EMISOR_NOMBRE', 'PARQUEO OBELISCO REFORMA'),
-                    'comercial'       => $this->config->get('EMISOR_COMERCIAL', 'PARQUEO OBELISCO REFORMA'),
-                    'establecimiento' => $this->config->get('FEL_G4S_ESTABLECIMIENTO', '4'),
-                    'direccion'       => [
-                        'direccion'    => $this->config->get('EMISOR_DIR', 'Ciudad'),
-                        'postal'       => $this->config->get('EMISOR_POSTAL', '01001'),
-                        'municipio'    => $this->config->get('EMISOR_MUNI', 'Guatemala'),
-                        'departamento' => $this->config->get('EMISOR_DEPTO', 'Guatemala'),
-                        'pais'         => 'GT',
-                    ],
-                ],
-                'receptor' => [
-                    'nit'    => $nit,
-                    'nombre' => $nit === 'CF' ? 'Consumidor Final' : ($payload['receptor_nombre'] ?? 'Receptor'),
-                    'direccion' => [
-                        'direccion'    => 'CIUDAD',
-                        'postal'       => '01005',
-                        'municipio'    => '.',
-                        'departamento' => '.',
-                        'pais'         => 'GT',
-                    ],
-                ],
-                'documento' => [
-                    'moneda' => 'GTQ',
-                    'total'  => $total,
-                    'items'  => [
-                        ['descripcion' => $payload['descripcion'] ?? 'Servicio de parqueo'],
-                    ],
-                ],
-            ]);
         } catch (\Throwable $e) {
-            \App\Utils\Logger::log("❌ Error generando XML DTE: " . $e->getMessage(), $logFile);
-            throw $e;
+            \App\Utils\Logger::log("[NIT LOOKUP] Error: " . $e->getMessage(), $logFile);
         }
+    }
+    $payload['receptor_nit'] = $nit;
 
-        // 4) Guarda XML para inspección
-        $xmlPath = __DIR__ . '/../../storage/last_dte_pdf.xml';
-        @file_put_contents($xmlPath, $xmlDte);
-        \App\Utils\Logger::log("XML generado guardado en: {$xmlPath}", $logFile);
+    // 3) Construir DTE (reconoce 'descripcion')
+    try {
+        $xmlDte = $this->buildGuatemalaDTE([
+            'emisor' => [
+                'nit'             => $this->config->get('FEL_G4S_ENTITY', '81491514'),
+                'nombre'          => $this->config->get('EMISOR_NOMBRE', 'PARQUEO OBELISCO REFORMA'),
+                'comercial'       => $this->config->get('EMISOR_COMERCIAL', 'PARQUEO OBELISCO REFORMA'),
+                'establecimiento' => $this->config->get('FEL_G4S_ESTABLECIMIENTO', '4'),
+                'direccion'       => [
+                    'direccion'    => $this->config->get('EMISOR_DIR', 'Ciudad'),
+                    'postal'       => $this->config->get('EMISOR_POSTAL', '01001'),
+                    'municipio'    => $this->config->get('EMISOR_MUNI', 'Guatemala'),
+                    'departamento' => $this->config->get('EMISOR_DEPTO', 'Guatemala'),
+                    'pais'         => 'GT',
+                ],
+            ],
+            'receptor' => [
+                'nit'    => $nit,
+                'nombre' => $nit === 'CF' ? 'Consumidor Final' : ($payload['receptor_nombre'] ?? 'Receptor'),
+                'direccion' => [
+                    'direccion'    => 'CIUDAD',
+                    'postal'       => '01005',
+                    'municipio'    => '.',
+                    'departamento' => '.',
+                    'pais'         => 'GT',
+                ],
+            ],
+            'documento' => [
+                'moneda' => 'GTQ',
+                'total'  => $total,
+                'items'  => [
+                    ['descripcion' => $payload['descripcion'] ?? 'Servicio de parqueo'],
+                ],
+            ],
+        ]);
+    } catch (\Throwable $e) {
+        \App\Utils\Logger::log("❌ Error generando XML DTE: " . $e->getMessage(), $logFile);
+        throw $e;
+    }
 
-        // 5) SYSTEM_REQUEST con POST_DOCUMENT_SAT_PDF (devuelve PDF base64)
-        $reference = (string)($payload['ticket_no'] ?? ('FACT'.date('YmdHis')));
+    // 4) Guarda XML para inspección
+    $xmlPath = __DIR__ . '/../../storage/last_dte_pdf.xml';
+    @file_put_contents($xmlPath, $xmlDte);
+    \App\Utils\Logger::log("XML generado guardado en: {$xmlPath}", $logFile);
 
-        $xmlNoBom = preg_replace('/^\xEF\xBB\xBF/', '', $xmlDte);
-        $dataB64  = str_replace(["\r", "\n"], '', base64_encode($xmlNoBom));
+    // 5) SYSTEM_REQUEST con POST_DOCUMENT_SAT_PDF
+    $reference = (string)($payload['ticket_no'] ?? ('FACT'.date('YmdHis')));
 
-        $params = [
-            'Transaction' => 'SYSTEM_REQUEST',
-            'Data1'       => 'POST_DOCUMENT_SAT_PDF', // si tu backend no lo soporta, lo cubre el fallback por GUID
-            'Data2'       => $dataB64,                // XML en Base64
-            'Data3'       => $reference,              // referencia opcional
-        ];
+    $xmlNoBom = preg_replace('/^\xEF\xBB\xBF/', '', $xmlDte);
+    $dataB64  = str_replace(["\r", "\n"], '', base64_encode($xmlNoBom));
 
-        \App\Utils\Logger::log("→ SYSTEM_REQUEST params: Data1=POST_DOCUMENT_SAT_PDF, Data2(Base64)=".strlen($dataB64)." bytes, Data3={$reference}", $logFile);
+    $params = [
+        'Transaction' => 'SYSTEM_REQUEST',
+        'Data1'       => 'POST_DOCUMENT_SAT_PDF',
+        'Data2'       => $dataB64,
+        'Data3'       => $reference,
+    ];
 
-        try {
-            $respXml = $this->requestTransaction($params);
-        } catch (\Throwable $e) {
-            \App\Utils\Logger::log("❌ Error en requestTransaction(): " . $e->getMessage(), $logFile);
-            throw $e;
-        }
+    \App\Utils\Logger::log("→ SYSTEM_REQUEST params: Data1=POST_DOCUMENT_SAT_PDF, Data2(Base64)=".strlen($dataB64)." bytes, Data3={$reference}", $logFile);
 
-        \App\Utils\Logger::log("SOAP Response:\n" . $respXml, $logFile);
+    try {
+        $respXml = $this->requestTransaction($params);
+    } catch (\Throwable $e) {
+        \App\Utils\Logger::log("❌ Error en requestTransaction(): " . $e->getMessage(), $logFile);
+        throw $e;
+    }
 
-        // 6) Extraer UUID y PDF base64
-        $uuid   = null;
-        $pdfB64 = null;
+    \App\Utils\Logger::log("SOAP Response:\n" . $respXml, $logFile);
 
-        try {
-            $sx = @simplexml_load_string($respXml);
-            if ($sx) {
-                $sx->registerXPathNamespace('ns0','http://www.fact.com.mx/schema/ws');
-                $node = $sx->xpath('//ns0:RequestTransactionResult');
-                if ($node && isset($node[0])) {
-                    $inner = (string)$node[0];            // XML interno
-                    $ix    = @simplexml_load_string($inner);
+    // 6) Extraer UUID y PDF base64
+    $uuid   = null;
+    $pdfB64 = null;
 
-                    if ($ix) {
-                        // UUID en distintas ubicaciones
+    try {
+        // --- NUEVO: primero leer ResponseData1/2/3 del SOAP externo ---
+        $sx = @simplexml_load_string($respXml);
+        if ($sx) {
+            // sin namespace explícito, buscar por nombre también
+            // 6.1 UUID en ResponseData2 (muchas respuestas lo traen allí)
+            $respData2 = $sx->xpath('//ResponseData2');
+            if ($respData2 && isset($respData2[0])) {
+                $uuidCandidate = trim((string)$respData2[0]);
+                if ($uuidCandidate !== '') {
+                    $uuid = $uuidCandidate;
+                }
+            }
+            // 6.2 PDF en ResponseData3 (POST_DOCUMENT_SAT_PDF devuelve el PDF aquí)
+            $respData3 = $sx->xpath('//ResponseData3');
+            if ($respData3 && isset($respData3[0])) {
+                $pdfB64Candidate = trim((string)$respData3[0]);
+                if ($pdfB64Candidate !== '') {
+                    $pdfB64 = $pdfB64Candidate;
+                }
+            }
+
+            // Además, algunas implementaciones anidan XML en RequestTransactionResult
+            $sx->registerXPathNamespace('ns0','http://www.fact.com.mx/schema/ws');
+            $node = $sx->xpath('//ns0:RequestTransactionResult');
+            if ($node && isset($node[0])) {
+                $inner = (string)$node[0];            // XML interno
+                $ix    = @simplexml_load_string($inner);
+
+                if ($ix) {
+                    // UUID posibles
+                    if (!$uuid) {
                         $uuid = (string)($ix->Response->UUID ?? '');
                         if ($uuid === '' && isset($ix->DocumentGUID)) $uuid = (string)$ix->DocumentGUID;
                         if ($uuid === '' && isset($ix->UUID))         $uuid = (string)$ix->UUID;
+                    }
 
-                        // Posibles campos PDF
+                    // Candidatos de PDF dentro del XML interno
+                    if (!$pdfB64) {
                         $cands = [
                             (string)($ix->Response->PDF ?? ''),
                             (string)($ix->Response->Pdf ?? ''),
@@ -824,104 +847,110 @@ private function fixUno(string $s): string
                             (string)($ix->Response->Data1 ?? ''),
                         ];
                         foreach ($cands as $c) { $c = trim($c); if ($c !== '') { $pdfB64 = $c; break; } }
-
-                        // <Document><Name>PDF</Name><Data>...</Data>
                         if (!$pdfB64 && isset($ix->Document)) {
                             $name = strtoupper((string)($ix->Document->Name ?? ''));
                             $data = (string)($ix->Document->Data ?? '');
                             if ($name === 'PDF' && $data !== '') $pdfB64 = trim($data);
                         }
-                    } else {
-                        // Regex de respaldo sobre el XML interno
-                        if (!$uuid && preg_match('/<UUID>([^<]+)<\/UUID>/i', $inner, $m)) $uuid = $m[1];
-                        if (!$uuid && preg_match('/<DocumentGUID>([^<]+)<\/DocumentGUID>/i', $inner, $m)) $uuid = $m[1];
+                    }
+                } else {
+                    // Regex sobre XML interno
+                    if (!$uuid && preg_match('/<UUID>([^<]+)<\/UUID>/i', $inner, $m)) $uuid = $m[1];
+                    if (!$uuid && preg_match('/<DocumentGUID>([^<]+)<\/DocumentGUID>/i', $inner, $m)) $uuid = $m[1];
 
-                        if (!$pdfB64 && preg_match('/<(PDF|PDFBase64|Pdf)>\s*([A-Za-z0-9+\/=\r\n]+)\s*<\/\1>/i', $inner, $m)) {
-                            $pdfB64 = trim($m[2]);
-                        }
-                        if (!$pdfB64 && preg_match('/<Data1>\s*([A-Za-z0-9+\/=\r\n]+)\s*<\/Data1>/i', $inner, $m)) {
-                            $pdfB64 = trim($m[1]);
-                        }
-                        if (!$pdfB64 && preg_match('/<Data1>\s*<Value>\s*([A-Za-z0-9+\/=\r\n]+)\s*<\/Value>\s*<\/Data1>/is', $inner, $m)) {
-                            $pdfB64 = trim($m[1]);
-                        }
-                        if (!$pdfB64 && preg_match('/<Name>\s*PDF\s*<\/Name>.*?<Data>\s*([A-Za-z0-9+\/=\r\n]+)\s*<\/Data>/is', $inner, $m)) {
-                            $pdfB64 = trim($m[1]);
-                        }
+                    if (!$pdfB64 && preg_match('/<(PDF|PDFBase64|Pdf)>\s*([A-Za-z0-9+\/=\r\n]+)\s*<\/\1>/i', $inner, $m)) {
+                        $pdfB64 = trim($m[2]);
+                    }
+                    if (!$pdfB64 && preg_match('/<Data1>\s*([A-Za-z0-9+\/=\r\n]+)\s*<\/Data1>/i', $inner, $m)) {
+                        $pdfB64 = trim($m[1]);
+                    }
+                    if (!$pdfB64 && preg_match('/<Data1>\s*<Value>\s*([A-Za-z0-9+\/=\r\n]+)\s*<\/Value>\s*<\/Data1>/is', $inner, $m)) {
+                        $pdfB64 = trim($m[1]);
+                    }
+                    if (!$pdfB64 && preg_match('/<Name>\s*PDF\s*<\/Name>.*?<Data>\s*([A-Za-z0-9+\/=\r\n]+)\s*<\/Data>/is', $inner, $m)) {
+                        $pdfB64 = trim($m[1]);
                     }
                 }
             }
+        }
 
-            // Fallbacks sobre TODO el SOAP
-            if (!$uuid && preg_match('/<UUID>([^<]+)<\/UUID>/i', $respXml, $m)) $uuid = $m[1];
-            if (!$uuid && preg_match('/<DocumentGUID>([^<]+)<\/DocumentGUID>/i', $respXml, $m)) $uuid = $m[1];
+        // Fallbacks sobre TODO el SOAP
+        if (!$uuid && preg_match('/<UUID>([^<]+)<\/UUID>/i', $respXml, $m)) $uuid = $m[1];
+        if (!$uuid && preg_match('/<DocumentGUID>([^<]+)<\/DocumentGUID>/i', $respXml, $m)) $uuid = $m[1];
+        // 🔧 NUEVO: si no se capturó antes, intentar UUID directo desde <ResponseData2>
+        if (!$uuid && preg_match('/<ResponseData2>\s*([^<]+)\s*<\/ResponseData2>/i', $respXml, $m)) {
+            $uuid = trim($m[1]);
+        }
+        // 🔧 NUEVO: PDF directo en <ResponseData3>
+        if (!$pdfB64 && preg_match('/<ResponseData3>\s*([A-Za-z0-9+\/=\r\n]+)\s*<\/ResponseData3>/i', $respXml, $m)) {
+            $pdfB64 = trim($m[1]);
+        }
 
-            if (!$pdfB64) {
-                if (preg_match('/<(PDF|PDFBase64|Pdf)>\s*([A-Za-z0-9+\/=\r\n]+)\s*<\/\1>/i', $respXml, $m)) {
-                    $pdfB64 = trim($m[2]);
-                }
-                if (!$pdfB64 && preg_match('/<Data1>\s*([A-Za-z0-9+\/=\r\n]+)\s*<\/Data1>/i', $respXml, $m)) {
-                    $pdfB64 = trim($m[1]);
-                }
-                if (!$pdfB64 && preg_match('/<Data1>\s*<Value>\s*([A-Za-z0-9+\/=\r\n]+)\s*<\/Value>\s*<\/Data1>/is', $respXml, $m)) {
-                    $pdfB64 = trim($m[1]);
-                }
-                if (!$pdfB64 && preg_match('/<Name>\s*PDF\s*<\/Name>.*?<Data>\s*([A-Za-z0-9+\/=\r\n]+)\s*<\/Data>/is', $respXml, $m)) {
-                    $pdfB64 = trim($m[1]);
-                }
+        // Otros fallbacks ya existentes
+        if (!$pdfB64) {
+            if (preg_match('/<(PDF|PDFBase64|Pdf)>\s*([A-Za-z0-9+\/=\r\n]+)\s*<\/\1>/i', $respXml, $m)) {
+                $pdfB64 = trim($m[2]);
+            }
+            if (!$pdfB64 && preg_match('/<Data1>\s*([A-Za-z0-9+\/=\r\n]+)\s*<\/Data1>/i', $respXml, $m)) {
+                $pdfB64 = trim($m[1]);
+            }
+            if (!$pdfB64 && preg_match('/<Data1>\s*<Value>\s*([A-Za-z0-9+\/=\r\n]+)\s*<\/Value>\s*<\/Data1>/is', $respXml, $m)) {
+                $pdfB64 = trim($m[1]);
+            }
+            if (!$pdfB64 && preg_match('/<Name>\s*PDF\s*<\/Name>.*?<Data>\s*([A-Za-z0-9+\/=\r\n]+)\s*<\/Data>/is', $respXml, $m)) {
+                $pdfB64 = trim($m[1]);
+            }
+        }
+    } catch (\Throwable $e) {
+        \App\Utils\Logger::log("Warn parse UUID/PDF: ".$e->getMessage(), $logFile);
+    }
+
+    // Limpieza de base64
+    if ($pdfB64) $pdfB64 = str_replace(["\r","\n"," "], '', $pdfB64);
+
+    // Si no vino PDF o no es PDF real, intenta descargarlo por GUID
+    if ($uuid && !$this->isBase64Pdf($pdfB64)) {
+        try {
+            $pdfB64 = $this->fetchPdfByGuid($uuid, 'GET_DOCUMENT_SAT_PDF');
+            if (!$this->isBase64Pdf($pdfB64)) {
+                $pdfB64 = $this->fetchPdfByGuid($uuid, 'GET_DOCUMENT_PDF');
+            }
+            if (!$this->isBase64Pdf($pdfB64)) {
+                $pdfB64 = $this->fetchPdfByGuid($uuid, 'GET_DOCUMENT');
             }
         } catch (\Throwable $e) {
-            \App\Utils\Logger::log("Warn parse UUID/PDF: ".$e->getMessage(), $logFile);
+            \App\Utils\Logger::log("PDF fallback error: ".$e->getMessage(), $logFile);
         }
-
-        // --- 👇 CAMBIO SOLICITADO: limpieza + fallback por GUID ---
-        // Limpieza de espacios y saltos
-        if ($pdfB64) $pdfB64 = str_replace(["\r","\n"," "], '', $pdfB64);
-
-        // Si no vino PDF o no es PDF real, intenta descargarlo por GUID
-        if ($uuid && !$this->isBase64Pdf($pdfB64)) {
-            try {
-                $pdfB64 = $this->fetchPdfByGuid($uuid, 'GET_DOCUMENT_SAT_PDF');
-                if (!$this->isBase64Pdf($pdfB64)) {
-                    $pdfB64 = $this->fetchPdfByGuid($uuid, 'GET_DOCUMENT_PDF');
-                }
-                if (!$this->isBase64Pdf($pdfB64)) {
-                    $pdfB64 = $this->fetchPdfByGuid($uuid, 'GET_DOCUMENT');
-                }
-            } catch (\Throwable $e) {
-                \App\Utils\Logger::log("PDF fallback error: ".$e->getMessage(), $logFile);
-            }
-        }
-        // --- FIN CAMBIO ---
-        // ✅ Guarda el PDF localmente si vino en base64
-if ($uuid && $this->isBase64Pdf($pdfB64)) {
-    $tzGT = new \DateTimeZone('America/Guatemala');
-    $now  = new \DateTime('now', $tzGT);
-    $dir  = sprintf('%s/fel/%s/%s',
-        rtrim((string)$this->config->get('STORAGE_PATH', __DIR__.'/../../storage'), '/'),
-        $now->format('Y'), $now->format('m')
-    );
-    if (!is_dir($dir)) @mkdir($dir, 0775, true);
-
-    $pdfPath = $dir.'/'.$uuid.'.pdf';
-    @file_put_contents($pdfPath, base64_decode($pdfB64));
-    \App\Utils\Logger::log("✅ PDF guardado en: {$pdfPath}", $logFile);
-}
-
-
-        $result = [
-            'ok'         => (bool)$uuid,
-            'uuid'       => $uuid ?: null,
-            'pdf_base64' => $pdfB64 ?: null,
-            'raw'        => $respXml,
-            'httpStatus' => $this->getLastHttpStatus(),
-            'reference'  => $reference,
-        ];
-        \App\Utils\Logger::log("Resultado final (PDF): " . json_encode($result, JSON_UNESCAPED_UNICODE), $logFile);
-        \App\Utils\Logger::log("=== [SUBMIT INVOICE (PDF) END] ===", $logFile);
-
-        return $result;
     }
+
+    // ✅ Guarda el PDF localmente si vino en base64
+    if ($uuid && $this->isBase64Pdf($pdfB64)) {
+        $tzGT = new \DateTimeZone('America/Guatemala');
+        $now  = new \DateTime('now', $tzGT);
+        $dir  = sprintf('%s/fel/%s/%s',
+            rtrim((string)$this->config->get('STORAGE_PATH', __DIR__.'/../../storage'), '/'),
+            $now->format('Y'), $now->format('m')
+        );
+        if (!is_dir($dir)) @mkdir($dir, 0775, true);
+
+        $pdfPath = $dir.'/'.$uuid.'.pdf';
+        @file_put_contents($pdfPath, base64_decode($pdfB64));
+        \App\Utils\Logger::log("✅ PDF guardado en: {$pdfPath}", $logFile);
+    }
+
+    $result = [
+        'ok'         => (bool)$uuid,
+        'uuid'       => $uuid ?: null,
+        'pdf_base64' => $pdfB64 ?: null,
+        'raw'        => $respXml,
+        'httpStatus' => $this->getLastHttpStatus(),
+        'reference'  => $reference,
+    ];
+    \App\Utils\Logger::log("Resultado final (PDF): " . json_encode($result, JSON_UNESCAPED_UNICODE), $logFile);
+    \App\Utils\Logger::log("=== [SUBMIT INVOICE (PDF) END] ===", $logFile);
+
+    return $result;
+}
 
  // ¿es un PDF real?
 private function isBase64Pdf(?string $b64): bool {

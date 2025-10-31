@@ -72,6 +72,23 @@ $router->get('/api/fel/xml', function () use ($api) {
     return $api->felXml();
 });
 
+// --- PDFs FEL ---
+// 1) Por UUID directo (descarga desde G4S si hace falta)
+$router->get('/api/fel/document-pdf', function () use ($api) {
+    $api->getFelDocumentPdfByUuid(); // ?uuid=...
+});
+
+// 2) PDF de una manual_invoices por ID (lee BD o baja por UUID y guarda)
+$router->get('/api/fel/manual-invoice/pdf', function () use ($api) {
+    $api->getManualInvoicePdf(); // ?id=...
+});
+
+// 3) Una fila de manual_invoices (para leer fel_pdf_base64 si quieres)
+$router->get('/api/fel/manual-invoice/one', function () use ($api) {
+    $api->getManualInvoiceOne(); // ?id=...
+});
+
+
 // (Si aún usas estas) — normalmente SOLO ADMIN
 $router->get('/api/sync/tickets', function () use ($api) {
      Auth::requireAuth();

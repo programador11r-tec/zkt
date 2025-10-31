@@ -2338,7 +2338,7 @@ class ApiController {
         // Log en BD
         $insertId = null;
         try {
-            $pdo = $this->getPdo();
+            $pdo = DB::pdo();      
             $this->ensureManualOpenTable($pdo);
             $stmt = $pdo->prepare("
                 INSERT INTO manual_open_logs (
@@ -2597,7 +2597,6 @@ class ApiController {
     }
 }
 
-
     public function manualInvoiceList(): void
 {
     header('Content-Type: application/json; charset=utf-8');
@@ -2630,6 +2629,135 @@ class ApiController {
     }
 }
 
+public function getFelDocumentPdfByUuid(): void
+{
+    header('Content-Type: application/json; charset=utf-8');
+    try {
+        $uuid = trim((string)($_GET['uuid'] ?? ''));
+        if ($uuid === '') { echo json_encode(['ok'=>false,'error'=>'uuid requerido']); return; }
+
+        $cfg    = new \Config\Config(__DIR__ . '/../../.env');
+        $client = new \App\Services\G4SClient($cfg);
+
+        // intenta por orden más “oficial”
+        $pdfB64 = $client->fetchPdfByGuid($uuid, 'GET_DOCUMENT_SAT_PDF');
+        if (!$client->isBase64Pdf($pdfB64)) {
+            $pdfB64 = $client->fetchPdfByGuid($uuid, 'GET_DOCUMENT_PDF');
+        }
+        if (!$client->isBase64Pdf($pdfB64)) {
+            $pdfB64 = $client->fetchPdfByGuid($uuid, 'GET_DOCUMENT');
+        }
+
+        if (!$client->isBase64Pdf($pdfB64)) {
+            echo json_encode(['ok'=>false,'error'=>'PDF no disponible para ese UUID']); return;
+        }
+
+        // opcional: guardar en storage/fel/YYYY/MM/UUID.pdf
+        $tzGT = new \DateTimeZone('America/Guatemala');
+        $now  = new \DateTime('now', $tzGT);
+        $dir  = sprintf('%s/fel/%s/%s',
+            rtrim((string)$cfg->get('STORAGE_PATH', __DIR__.'/../../storage'), '/'),
+            $now->format('Y'), $now->format('m')
+        );
+        if (!is_dir($dir)) @mkdir($dir, 0775, true);
+        @file_put_contents($dir.'/'.$uuid.'.pdf', base64_decode($pdfB64));
+
+        echo json_encode(['ok'=>true,'uuid'=>$uuid,'pdf_base64'=>$pdfB64]);
+    } catch (\Throwable $e) {
+        echo json_encode(['ok'=>false,'error'=>$e->getMessage()]);
+    }
+}
+
+public function getManualInvoicePdf(): void
+{
+    header('Content-Type: application/json; charset=utf-8');
+    try {
+        $id = (int)($_GET['id'] ?? 0);
+        if ($id <= 0) { echo json_encode(['ok'=>false,'error'=>'id requerido']); return; }
+
+        $cfg  = new \Config\Config(__DIR__ . '/../../.env');
+        $dsn  = $cfg->get('DB_DSN',  'mysql:host=127.0.0.1;dbname=zkt;charset=utf8mb4');
+        $user = $cfg->get('DB_USER', 'root');
+        $pass = $cfg->get('DB_PASS', '');
+
+        $pdo = new \PDO($dsn, $user, $pass, [
+            \PDO::ATTR_ERRMODE            => \PDO::ERRMODE_EXCEPTION,
+            \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC,
+        ]);
+
+        $row = null;
+        $st  = $pdo->prepare("SELECT * FROM manual_invoices WHERE id = :i LIMIT 1");
+        $st->execute([':i'=>$id]);
+        $row = $st->fetch();
+
+        if (!$row) { echo json_encode(['ok'=>false,'error'=>'No existe la factura']); return; }
+
+        $pdfB64 = (string)($row['fel_pdf_base64'] ?? '');
+        $uuid   = (string)($row['fel_uuid'] ?? '');
+
+        // Si no hay PDF guardado pero sí UUID, intenta descargarlo y persistirlo
+        if ($pdfB64 === '' && $uuid !== '' && (int)$row['send_to_fel'] === 1 && strtoupper((string)$row['fel_status']) === 'OK') {
+            $client = new \App\Services\G4SClient($cfg);
+            $pdfB64 = $client->fetchPdfByGuid($uuid, 'GET_DOCUMENT_SAT_PDF');
+            if (!$client->isBase64Pdf($pdfB64)) {
+                $pdfB64 = $client->fetchPdfByGuid($uuid, 'GET_DOCUMENT_PDF');
+            }
+            if (!$client->isBase64Pdf($pdfB64)) {
+                $pdfB64 = $client->fetchPdfByGuid($uuid, 'GET_DOCUMENT');
+            }
+
+            if ($client->isBase64Pdf($pdfB64)) {
+                // guardar en BD
+                $up = $pdo->prepare("UPDATE manual_invoices SET fel_pdf_base64 = :p WHERE id = :i");
+                $up->execute([':p'=>$pdfB64, ':i'=>$id]);
+
+                // y en disco
+                $tzGT = new \DateTimeZone('America/Guatemala');
+                $now  = new \DateTime('now', $tzGT);
+                $dir  = sprintf('%s/fel/%s/%s',
+                    rtrim((string)$cfg->get('STORAGE_PATH', __DIR__.'/../../storage'), '/'),
+                    $now->format('Y'), $now->format('m')
+                );
+                if (!is_dir($dir)) @mkdir($dir, 0775, true);
+                @file_put_contents($dir.'/'.$uuid.'.pdf', base64_decode($pdfB64));
+            }
+        }
+
+        if ($pdfB64 === '') { echo json_encode(['ok'=>false,'error'=>'PDF no disponible']); return; }
+        echo json_encode(['ok'=>true,'id'=>$id,'uuid'=>$uuid ?: null,'pdf_base64'=>$pdfB64]);
+    } catch (\Throwable $e) {
+        echo json_encode(['ok'=>false,'error'=>$e->getMessage()]);
+    }
+}
+
+public function getManualInvoiceOne(): void
+{
+    header('Content-Type: application/json; charset=utf-8');
+    try {
+        $id = (int)($_GET['id'] ?? 0);
+        if ($id <= 0) { echo json_encode(['ok'=>false,'error'=>'id requerido']); return; }
+
+        $cfg  = new \Config\Config(__DIR__ . '/../../.env');
+        $dsn  = $cfg->get('DB_DSN',  'mysql:host=127.0.0.1;dbname=zkt;charset=utf8mb4');
+        $user = $cfg->get('DB_USER', 'root');
+        $pass = $cfg->get('DB_PASS', '');
+
+        $pdo = new \PDO($dsn, $user, $pass, [
+            \PDO::ATTR_ERRMODE            => \PDO::ERRMODE_EXCEPTION,
+            \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC,
+        ]);
+
+        $st = $pdo->prepare("SELECT * FROM manual_invoices WHERE id = :i LIMIT 1");
+        $st->execute([':i'=>$id]);
+        $row = $st->fetch();
+
+        if (!$row) { echo json_encode(['ok'=>false,'error'=>'No existe']); return; }
+
+        echo json_encode(['ok'=>true,'data'=>$row], JSON_UNESCAPED_UNICODE);
+    } catch (\Throwable $e) {
+        echo json_encode(['ok'=>false,'error'=>$e->getMessage()]);
+    }
+}
 
 
 }

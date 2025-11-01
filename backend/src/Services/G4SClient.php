@@ -25,146 +25,197 @@ class G4SClient
      * Enviar factura a G4S (TIMBRAR) usando SecureTransaction + DataExchange (XML dentro de CDATA).
      * Devuelve array con: ok(bool), uuid(?string), raw(string XML SOAP), httpStatus(?int)
      */
-    public function submitInvoice(array $payload)
-    {
-        $logFile = __DIR__ . '/../../storage/fel_submit_invoice.log';
-        \App\Utils\Logger::log("=== [SUBMIT INVOICE START] ===", $logFile);
-        \App\Utils\Logger::log("Payload recibido: " . json_encode($payload, JSON_UNESCAPED_UNICODE), $logFile);
+    public function submitInvoice(array $payload): array
+{
+    $logFile = __DIR__ . '/../../storage/fel_submit_invoice_pdf.log';
+    \App\Utils\Logger::log("=== [SUBMIT INVOICE (PDF) START] ===", $logFile);
+    \App\Utils\Logger::log("Payload: " . json_encode($payload, JSON_UNESCAPED_UNICODE), $logFile);
 
-        // 1) Validaciones
-        $total = isset($payload['total']) ? (float)$payload['total'] : 0.0;
-        if ($total <= 0) {
-            $msg = "❌ Total debe ser > 0 para construir DTE (valor={$total})";
-            \App\Utils\Logger::log($msg, $logFile);
-            throw new \RuntimeException($msg);
-        }
+    // 1) Validaciones mínimas
+    $total = isset($payload['total']) ? (float)$payload['total'] : 0.0;
+    if ($total <= 0) {
+        $msg = "❌ Total debe ser > 0 para construir DTE (valor={$total})";
+        \App\Utils\Logger::log($msg, $logFile);
+        throw new \RuntimeException($msg);
+    }
 
-        // 2) Normaliza/consulta NIT
-        $nit = strtoupper(trim($payload['receptor_nit'] ?? 'CF'));
-        if ($nit !== 'CF') {
-            try {
-                $q = $this->g4sLookupNit($nit);
-                \App\Utils\Logger::log("[NIT LOOKUP] " . json_encode($q, JSON_UNESCAPED_UNICODE), $logFile);
-                if (!empty($q['ok']) && !empty($q['nombre'])) {
-                    $payload['receptor_nombre'] = $q['nombre'];
-                }
-            } catch (\Throwable $e) {
-                \App\Utils\Logger::log("[NIT LOOKUP] Error: " . $e->getMessage(), $logFile);
+    // 2) Normaliza/consulta NIT
+    $nit = strtoupper(trim($payload['receptor_nit'] ?? 'CF'));
+    if ($nit !== 'CF') {
+        try {
+            $q = $this->g4sLookupNit($nit);
+            \App\Utils\Logger::log("[NIT LOOKUP] " . json_encode($q, JSON_UNESCAPED_UNICODE), $logFile);
+            if (!empty($q['ok']) && !empty($q['nombre'])) {
+                $payload['receptor_nombre'] = $q['nombre'];
             }
-        }
-        $payload['receptor_nit'] = $nit;
-
-        // 3) Construye XML DTE
-        try {
-            $xmlDte = $this->buildGuatemalaDTE([
-                'emisor' => [
-                    'nit'             => $this->config->get('FEL_G4S_ENTITY', '81491514'),
-                    'nombre'          => $this->config->get('EMISOR_NOMBRE', 'PARQUEO OBELISCO REFORMA'),
-                    'comercial'       => $this->config->get('EMISOR_COMERCIAL', 'PARQUEO OBELISCO REFORMA'),
-                    'establecimiento' => $this->config->get('FEL_G4S_ESTABLECIMIENTO', '4'),
-                    'direccion'       => [
-                        'direccion'    => $this->config->get('EMISOR_DIR', 'Ciudad'),
-                        'postal'       => $this->config->get('EMISOR_POSTAL', '01001'),
-                        'municipio'    => $this->config->get('EMISOR_MUNI', 'Guatemala'),
-                        'departamento' => $this->config->get('EMISOR_DEPTO', 'Guatemala'),
-                        'pais'         => 'GT',
-                    ],
-                ],
-                'receptor' => [
-                    'nit'    => $nit,
-                    'nombre' => $nit === 'CF' ? 'Consumidor Final' : ($payload['receptor_nombre'] ?? 'Receptor'),
-                    'direccion' => [
-                        'direccion'    => 'CIUDAD',
-                        'postal'       => '01005',
-                        'municipio'    => '.',
-                        'departamento' => '.',
-                        'pais'         => 'GT',
-                    ],
-                ],
-                'documento' => [
-                    'moneda' => 'GTQ',
-                    'total'  => $total,
-                    'items'  => [
-                        ['descripcion' => $payload['descripcion'] ?? 'Servicio de parqueo'],
-                    ],
-                ],
-            ]);
         } catch (\Throwable $e) {
-            \App\Utils\Logger::log("❌ Error generando XML DTE: " . $e->getMessage(), $logFile);
-            throw $e;
+            \App\Utils\Logger::log("[NIT LOOKUP] Error: " . $e->getMessage(), $logFile);
         }
+    }
+    $payload['receptor_nit'] = $nit;
 
-        // 4) Guarda el XML para inspección
-        $xmlPath = __DIR__ . '/../../storage/last_dte.xml';
-        @file_put_contents($xmlPath, $xmlDte);
-        \App\Utils\Logger::log("XML generado guardado en: {$xmlPath}", $logFile);
+    // 3) Construir DTE (usa tu builder; reconoce 'descripcion')
+    $xmlDte = $this->buildGuatemalaDTE([
+        'emisor' => [
+            'nit'             => $this->config->get('FEL_G4S_ENTITY', '81491514'),
+            'nombre'          => $this->config->get('EMISOR_NOMBRE', 'PARQUEO OBELISCO REFORMA'),
+            'comercial'       => $this->config->get('EMISOR_COMERCIAL', 'PARQUEO OBELISCO REFORMA'),
+            'establecimiento' => $this->config->get('FEL_G4S_ESTABLECIMIENTO', '4'),
+            'direccion'       => [
+                'direccion'    => $this->config->get('EMISOR_DIR', 'Ciudad'),
+                'postal'       => $this->config->get('EMISOR_POSTAL', '01001'),
+                'municipio'    => $this->config->get('EMISOR_MUNI', 'Guatemala'),
+                'departamento' => $this->config->get('EMISOR_DEPTO', 'Guatemala'),
+                'pais'         => 'GT',
+            ],
+        ],
+        'receptor' => [
+            'nit'    => $nit,
+            'nombre' => $nit === 'CF' ? 'Consumidor Final' : ($payload['receptor_nombre'] ?? 'Receptor'),
+            'direccion' => ['direccion'=>'CIUDAD','postal'=>'01005','municipio'=>'.','departamento'=>'.','pais'=>'GT'],
+        ],
+        'documento' => [
+            'moneda' => 'GTQ',
+            'total'  => $total,
+            'items'  => [
+                ['descripcion' => $payload['descripcion'] ?? 'Servicio de parqueo'],
+            ],
+        ],
+    ]);
 
-        // 5) Envía SYSTEM_REQUEST + POST_DOCUMENT_SAT (Data2 = XML Base64)
-        $clave     = (string)($this->config->get('FEL_G4S_PASS', '') ?: $this->config->get('FEL_G4S_CLAVE', ''));
-        $reference = (string)($payload['ticket_no'] ?? ('FACT'.date('YmdHis')));
+    // Guarda XML para inspección
+    @file_put_contents(__DIR__ . '/../../storage/last_dte_pdf.xml', $xmlDte);
 
-        // base64 limpio del XML
-        $xmlNoBom = preg_replace('/^\xEF\xBB\xBF/', '', $xmlDte);
-        $dataB64  = str_replace(["\r", "\n"], '', base64_encode($xmlNoBom));
+    // 4) SYSTEM_REQUEST con POST_DOCUMENT_SAT_PDF
+    $reference = (string)($payload['ticket_no'] ?? ('FACT'.date('YmdHis')));
+    $xmlNoBom  = preg_replace('/^\xEF\xBB\xBF/', '', $xmlDte);
+    $xmlB64    = str_replace(["\r","\n"," "], '', base64_encode($xmlNoBom));
 
-        // ⬇️ Lo que cambia: Data2 lleva el Base64 del XML; la clave pasa (si la requieren) a Data3 o no se envía.
-        $params = [
-            'Transaction' => 'SYSTEM_REQUEST',
-            'Data1'       => 'POST_DOCUMENT_SAT',
-            'Data2'       => $dataB64,      // <-- XML FEL EN BASE64 AQUÍ
-            // 'Data4'    => $clave,        // solo si tu variant la necesita; si NO, elimínalo
-        ];
+    $params = [
+        'Transaction' => 'SYSTEM_REQUEST',
+        'Data1'       => 'POST_DOCUMENT_SAT_PDF', // ← como tu ejemplo
+        'Data2'       => $xmlB64,                 // ← XML en Base64
+        'Data3'       => $reference,              // opcional, referencia
+        // Si tu emisor exige clave, colócala en Data3 o Data4 según su variante
+    ];
+    \App\Utils\Logger::log("→ SYSTEM_REQUEST POST_DOCUMENT_SAT_PDF (XML b64 len=".strlen($xmlB64).", ref={$reference})", $logFile);
 
-        \App\Utils\Logger::log("→ SYSTEM_REQUEST params: Data1=POST_DOCUMENT_SAT, Data2(Base64)=".strlen($dataB64)." bytes, Data3={$reference}", $logFile);
+    try {
+        $respXml = $this->requestTransaction($params); // usa tu helper existente
+    } catch (\Throwable $e) {
+        \App\Utils\Logger::log("❌ Error en requestTransaction(): " . $e->getMessage(), $logFile);
+        throw $e;
+    }
 
-        try {
-            $respXml = $this->requestTransaction($params);
-        } catch (\Throwable $e) {
-            \App\Utils\Logger::log("❌ Error en requestTransaction(): " . $e->getMessage(), $logFile);
-            throw $e;
-        }
+    \App\Utils\Logger::log("SOAP Response:\n" . $respXml, $logFile);
 
+    // 5) Extraer UUID (ResponseData2) y PDF base64 (ResponseData3)
+    $uuid   = null;
+    $pdfB64 = null;
 
-        \App\Utils\Logger::log("SOAP Response:\n" . $respXml, $logFile);
+    try {
+        $sx = @simplexml_load_string($respXml);
+        if ($sx) {
+            // UUID directo en <ResponseData2>
+            $rd2 = $sx->xpath('//ResponseData2');
+            if ($rd2 && isset($rd2[0])) {
+                $uCandidate = trim((string)$rd2[0]);
+                if ($uCandidate !== '') $uuid = $uCandidate;
+            }
+            // PDF directo en <ResponseData3>
+            $rd3 = $sx->xpath('//ResponseData3');
+            if ($rd3 && isset($rd3[0])) {
+                $pCandidate = trim((string)$rd3[0]);
+                if ($pCandidate !== '') $pdfB64 = $pCandidate;
+            }
 
-        // 6) Extrae UUID si viene
-        $uuid = null;
-        try {
-            $sx = @simplexml_load_string($respXml);
-            if ($sx) {
-                $sx->registerXPathNamespace('s', 'http://schemas.xmlsoap.org/soap/envelope/');
-                $sx->registerXPathNamespace('ns0','http://www.fact.com.mx/schema/ws');
-                // a) puede venir en el XML interno
-                $node = $sx->xpath('//ns0:RequestTransactionResult');
-                if ($node && isset($node[0])) {
-                    $inner = (string)$node[0];
-                    $ix = @simplexml_load_string($inner);
-                    if ($ix) {
+            // XML interno en <ns0:RequestTransactionResult>
+            $sx->registerXPathNamespace('ns0','http://www.fact.com.mx/schema/ws');
+            $node = $sx->xpath('//ns0:RequestTransactionResult');
+            if ($node && isset($node[0])) {
+                $inner = (string)$node[0];
+                $ix = @simplexml_load_string($inner);
+                if ($ix) {
+                    if (!$uuid) {
                         $uuid = (string)($ix->Response->UUID ?? '');
                         if ($uuid === '' && isset($ix->DocumentGUID)) $uuid = (string)$ix->DocumentGUID;
+                        if ($uuid === '' && isset($ix->UUID))         $uuid = (string)$ix->UUID;
+                    }
+                    if (!$pdfB64) {
+                        $cands = [
+                            (string)($ix->Response->PDF ?? ''),
+                            (string)($ix->Response->Pdf ?? ''),
+                            (string)($ix->PDF ?? ''),
+                            (string)($ix->Pdf ?? ''),
+                            (string)($ix->Response->PDFBase64 ?? ''),
+                            (string)($ix->Response->Data1 ?? ''),
+                        ];
+                        foreach ($cands as $c) { $c = trim($c); if ($c !== '') { $pdfB64 = $c; break; } }
+                        if (!$pdfB64 && isset($ix->Document)) {
+                            $name = strtoupper((string)($ix->Document->Name ?? ''));
+                            $data = (string)($ix->Document->Data ?? '');
+                            if ($name === 'PDF' && $data !== '') $pdfB64 = trim($data);
+                        }
+                    }
+                } else {
+                    if (!$uuid && preg_match('/<UUID>([^<]+)<\/UUID>/i', $inner, $m)) $uuid = $m[1];
+                    if (!$uuid && preg_match('/<DocumentGUID>([^<]+)<\/DocumentGUID>/i', $inner, $m)) $uuid = $m[1];
+                    if (!$pdfB64 && preg_match('/<(PDF|PDFBase64|Pdf)>\s*([A-Za-z0-9+\/=\r\n]+)\s*<\/\1>/i', $inner, $m)) {
+                        $pdfB64 = trim($m[2]);
+                    }
+                    if (!$pdfB64 && preg_match('/<Data1>\s*([A-Za-z0-9+\/=\r\n]+)\s*<\/Data1>/i', $inner, $m)) {
+                        $pdfB64 = trim($m[1]);
+                    }
+                    if (!$pdfB64 && preg_match('/<Name>\s*PDF\s*<\/Name>.*?<Data>\s*([A-Za-z0-9+\/=\r\n]+)\s*<\/Data>/is', $inner, $m)) {
+                        $pdfB64 = trim($m[1]);
                     }
                 }
             }
-            // b) fallback regex
-            if (!$uuid && preg_match('/<UUID>([^<]+)<\/UUID>/', $respXml, $m)) $uuid = $m[1];
-            if (!$uuid && preg_match('/<DocumentGUID>([^<]+)<\/DocumentGUID>/', $respXml, $m)) $uuid = $m[1];
-        } catch (\Throwable $e) {
-            \App\Utils\Logger::log("Warn parse UUID: ".$e->getMessage(), $logFile);
         }
 
-        // 7) Respuesta final
-        $result = [
-            'ok'         => (bool)$uuid,
-            'uuid'       => $uuid,
-            'raw'        => $respXml,
-            'httpStatus' => $this->getLastHttpStatus(),
-            'reference'  => $reference,
-        ];
-        \App\Utils\Logger::log("Resultado final: " . json_encode($result, JSON_UNESCAPED_UNICODE), $logFile);
-        \App\Utils\Logger::log("=== [SUBMIT INVOICE END] ===", $logFile);
-
-        return $result;
+        // Fallbacks sobre todo el SOAP
+        if (!$uuid && preg_match('/<ResponseData2>\s*([^<]+)\s*<\/ResponseData2>/i', $respXml, $m)) $uuid = trim($m[1]);
+        if (!$uuid && preg_match('/<UUID>([^<]+)<\/UUID>/i', $respXml, $m)) $uuid = $m[1];
+        if (!$uuid && preg_match('/<DocumentGUID>([^<]+)<\/DocumentGUID>/i', $respXml, $m)) $uuid = $m[1];
+        if (!$pdfB64 && preg_match('/<ResponseData3>\s*([A-Za-z0-9+\/=\r\n]+)\s*<\/ResponseData3>/i', $respXml, $m)) {
+            $pdfB64 = trim($m[1]);
+        }
+        if (!$pdfB64 && preg_match('/<(PDF|PDFBase64|Pdf)>\s*([A-Za-z0-9+\/=\r\n]+)\s*<\/\1>/i', $respXml, $m)) {
+            $pdfB64 = trim($m[2]);
+        }
+    } catch (\Throwable $e) {
+        \App\Utils\Logger::log("Warn parse UUID/PDF: ".$e->getMessage(), $logFile);
     }
+
+    // Limpieza y verificación básica de PDF
+    if ($pdfB64) $pdfB64 = str_replace(["\r","\n"," "], '', $pdfB64);
+    $isPdf = false;
+    if ($pdfB64) {
+        $bin = base64_decode($pdfB64, true);
+        $isPdf = (is_string($bin) && strncmp($bin, '%PDF', 4) === 0);
+    }
+    if ($isPdf) {
+        \App\Utils\Logger::log("PDF base64 len=".strlen($pdfB64)." (ok)", $logFile);
+    } else {
+        if ($pdfB64) \App\Utils\Logger::log("⚠️ PDF capturado pero no valida como PDF.", $logFile);
+        else         \App\Utils\Logger::log("⚠️ No se encontró PDF en la respuesta.", $logFile);
+        $pdfB64 = null;
+    }
+
+    $result = [
+        'ok'         => (bool)$uuid,
+        'uuid'       => $uuid ?: null,
+        'pdf_base64' => $pdfB64,                 // ← listo para guardar en BD
+        'raw'        => $respXml,
+        'httpStatus' => $this->getLastHttpStatus(),
+        'reference'  => $reference,
+    ];
+    \App\Utils\Logger::log("Resultado final (PDF): " . json_encode($result, JSON_UNESCAPED_UNICODE), $logFile);
+    \App\Utils\Logger::log("=== [SUBMIT INVOICE (PDF) END] ===", $logFile);
+
+    return $result;
+}
+
 
     /** 🧩 Helper para loggear request/response SOAP */
     private function logSoap(string $file, string $content): void
@@ -187,7 +238,7 @@ class G4SClient
         return $this->lastHttpStatus;
     }
 
-    private function requestTransaction(array $params): string
+    public function requestTransaction(array $params): string
     {
         $soapUrl   = (string)$this->config->get('FEL_G4S_SOAP_URL', 'https://fel.g4sdocumenta.com/webservicefront/factwsfront.asmx');
         $soapAction= 'http://www.fact.com.mx/schema/ws/RequestTransaction';
@@ -1054,6 +1105,34 @@ private function extractPdfBase64FromSoap(string $soap): ?string {
         if ($this->isBase64Pdf($b)) return $b;
     }
     return null;
+}
+
+public function pdfFromUuidViaG4S(string $uuid): ?string
+{
+    // Algunas instalaciones aceptan UUID en Data2:
+    $params = [
+        'Transaction' => 'SYSTEM_REQUEST',
+        'Data1'       => 'POST_DOCUMENT_SAT_PDF', // literal que te mostró G4S
+        'Data2'       => $uuid,                    // UUID directo
+        'Data3'       => (string)$this->config->get('FEL_G4S_DATA3', ''), // clave si aplica
+    ];
+    $soap = $this->requestTransaction($params);
+    return $this->extractPdfBase64FromSoap($soap);
+}
+
+public function pdfFromXmlViaG4S(string $xml): ?string
+{
+    $xmlNoBom = preg_replace('/^\xEF\xBB\xBF/', '', $xml);
+    $b64      = str_replace(["\r","\n"], '', base64_encode($xmlNoBom));
+
+    $params = [
+        'Transaction' => 'SYSTEM_REQUEST',
+        'Data1'       => 'POST_DOCUMENT_SAT_PDF',  // según tu captura
+        'Data2'       => $b64,                      // XML en Base64
+        'Data3'       => (string)$this->config->get('FEL_G4S_DATA3', ''), // clave/ref si tu emisor la pide
+    ];
+    $soap = $this->requestTransaction($params);
+    return $this->extractPdfBase64FromSoap($soap);
 }
 
 

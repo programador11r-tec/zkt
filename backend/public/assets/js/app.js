@@ -815,7 +815,7 @@ async function renderDashboard() {
   await renderDashboard();
 })();
 
-  // ===== Facturación (tabla + Facturar) — Bootstrap =====
+  // ===== Facturación (tabla + Facturar) =====
   async function renderInvoices() {
     const settings = await loadSettings();
     const hourlyRateSetting = settings?.billing?.hourly_rate ?? null;
@@ -1448,125 +1448,335 @@ async function renderDashboard() {
   }
 
   // ===== Reportes =====
-  async function renderReports() {
-    const today = new Date();
-    const toISODate = (d) => d.toISOString().slice(0, 10);
-    const defaultTo = toISODate(today);
-    const defaultFrom = toISODate(new Date(today.getTime() - 6 * 24 * 60 * 60 * 1000));
+// ===== Reportes =====
+async function renderReports() {
+  const today = new Date();
+  const toISODate = (d) => d.toISOString().slice(0, 10);
+  const defaultTo = toISODate(today);
+  const defaultFrom = toISODate(new Date(today.getTime() - 6 * 24 * 60 * 60 * 1000));
 
-    const ticketState = {
-      rows: [],
-      summary: null,
-      generatedAt: null,
-      filters: {
-        from: defaultFrom,
-        to: defaultTo,
-        status: 'ANY',
-        plate: '',
-        nit: '',
-        min_total: '',
-        max_total: '',
-      },
+  const invoiceState = {
+    rows: [],
+    summary: null,
+    generatedAt: null,
+    filters: { from: defaultFrom, to: defaultTo, status: 'ANY', nit: '', uuid: '' },
+    page: 1,
+    perPage: 10,
+  };
+
+  // === Helpers ===
+  const escapeHtml = (v) => String(v ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
+  const formatDateValue = (v) => !v ? '—' : new Date(v).toLocaleString('es-GT');
+  const formatCurrency = (n) => `Q ${Number(n ?? 0).toFixed(2)}`;
+  const formatInvoiceStatus = (s) =>
+    s === 'OK' ? 'Certificada'
+      : s === 'PENDING' ? 'Pendiente'
+      : s === 'ERROR' ? 'Error'
+      : s || '—';
+
+  const downloadBlob = (blob, filename) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const paginate = (rows, page, perPage) => {
+    const totalPages = Math.ceil(rows.length / perPage) || 1;
+    const p = Math.min(Math.max(page, 1), totalPages);
+    const start = (p - 1) * perPage;
+    const end = start + perPage;
+    return { slice: rows.slice(start, end), totalPages, currentPage: p };
+  };
+
+  const buildPagination = (container, state, renderFn) => {
+    const { totalPages, currentPage } = paginate(state.rows, state.page, state.perPage);
+    if (totalPages <= 1) { container.innerHTML = ''; return; }
+    let html = `<nav><ul class="pagination pagination-sm justify-content-center mb-0">`;
+    for (let i = 1; i <= totalPages; i++) {
+      html += `<li class="page-item ${i === currentPage ? 'active' : ''}">
+        <button class="page-link" data-page="${i}">${i}</button></li>`;
+    }
+    html += `</ul></nav>`;
+    container.innerHTML = html;
+    container.querySelectorAll('button[data-page]').forEach((b) => {
+      b.addEventListener('click', () => { state.page = parseInt(b.dataset.page); renderFn(); });
+    });
+  };
+
+  // Extrae el UUID desde la fila: directo o dentro de response_json
+  const getUuid = (r) => {
+    if (r?.uuid) return r.uuid;
+    try {
+      const j = JSON.parse(r?.response_json || '{}');
+      return j?.uuid || j?.data?.uuid || null;
+    } catch { return null; }
+  };
+
+  // === UI principal ===
+  app.innerHTML = `
+  <div class="d-flex flex-column gap-4">
+    <section class="card shadow-sm">
+      <div class="card-body">
+        <div class="d-flex flex-wrap justify-content-between align-items-start gap-2">
+          <div>
+            <h5 class="card-title mb-1">Reporte de facturas emitidas</h5>
+            <p class="text-muted small mb-0">Descarga documentos certificados y consulta su estado.</p>
+          </div>
+          <span class="badge text-bg-success">Facturación</span>
+        </div>
+
+        <form id="invoiceFilters" class="row g-3 mt-3">
+          <div class="col-md-3">
+            <label class="form-label small" for="invoiceFrom">Desde</label>
+            <input type="date" id="invoiceFrom" class="form-control form-control-sm" value="${escapeHtml(defaultFrom)}">
+          </div>
+          <div class="col-md-3">
+            <label class="form-label small" for="invoiceTo">Hasta</label>
+            <input type="date" id="invoiceTo" class="form-control form-control-sm" value="${escapeHtml(defaultTo)}">
+          </div>
+          <div class="col-md-3">
+            <label class="form-label small" for="invoiceStatus">Estado</label>
+            <select id="invoiceStatus" class="form-select form-select-sm">
+              <option value="ANY">Todos</option>
+              <option value="OK">OK</option>
+              <option value="PENDING">Pendiente</option>
+              <option value="ERROR">Error</option>
+            </select>
+          </div>
+          <div class="col-md-3">
+            <label class="form-label small" for="invoiceNit">NIT</label>
+            <input type="text" id="invoiceNit" class="form-control form-control-sm" placeholder="CF o NIT">
+          </div>
+        </form>
+
+        <div class="d-flex flex-wrap gap-2 align-items-center mt-3">
+          <div class="btn-group btn-group-sm" role="group">
+            <button type="button" class="btn btn-primary" id="invoiceFetch">Buscar</button>
+            <button type="button" class="btn btn-outline-secondary" id="invoiceReset">Limpiar</button>
+          </div>
+          <div class="ms-auto d-flex gap-2">
+            <button type="button" class="btn btn-outline-primary btn-sm" id="invoiceCsv" disabled>Exportar CSV</button>
+          </div>
+        </div>
+
+        <div id="invoiceAlert" class="mt-3"></div>
+
+        <div id="invoiceSummary" class="row g-3 mt-2"></div>
+        <div class="table-responsive mt-3">
+          <table class="table table-sm table-bordered align-middle mb-0">
+            <thead class="table-light">
+              <tr>
+                <th>Ticket</th>
+                <th>Fecha</th>
+                <th class="text-end">Total</th>
+                <th>Receptor</th>
+                <th>UUID</th>
+                <th>Estado</th>
+                <th class="text-center">Acciones</th>
+              </tr>
+            </thead>
+            <tbody id="invoiceRows">
+              <tr><td colspan="7" class="text-center text-muted">Consulta para ver resultados.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div id="invoicePagination" class="mt-2"></div>
+        <div id="invoiceMessage" class="small text-muted mt-2"></div>
+      </div>
+    </section>
+  </div>
+  `;
+
+  const invoiceRowsEl = document.getElementById('invoiceRows');
+  const invoiceSummaryEl = document.getElementById('invoiceSummary');
+  const invoiceMsgEl = document.getElementById('invoiceMessage');
+  const paginationEl = document.getElementById('invoicePagination');
+  const alertBox = document.getElementById('invoiceAlert');
+  const invoiceCsvBtn = document.getElementById('invoiceCsv');
+
+  const showAlert = (message, type = 'info') => {
+    alertBox.innerHTML = `
+      <div class="alert alert-${type} alert-dismissible fade show" role="alert">
+        ${escapeHtml(message)}
+        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+      </div>`;
+  };
+
+  const clearAlert = () => { alertBox.innerHTML = ''; };
+
+  const fetchInvoiceReport = async () => {
+    invoiceRowsEl.innerHTML = `<tr><td colspan="7" class="text-center text-muted">Consultando...</td></tr>`;
+    invoiceSummaryEl.innerHTML = '';
+    invoiceMsgEl.textContent = '';
+    clearAlert();
+    invoiceCsvBtn.disabled = true;
+
+    const params = new URLSearchParams();
+    const from = document.getElementById('invoiceFrom').value;
+    const to = document.getElementById('invoiceTo').value;
+    const status = document.getElementById('invoiceStatus').value;
+    const nit = document.getElementById('invoiceNit').value;
+    if (from) params.set('from', from);
+    if (to) params.set('to', to);
+    if (status !== 'ANY') params.set('status', status);
+    if (nit) params.set('nit', nit);
+
+    try {
+      const url = params.size ? `${api('facturacion/emitidas')}?${params}` : api('facturacion/emitidas');
+      const js = await fetchJSON(url);
+      if (!js || js.ok === false) throw new Error(js.error || 'Sin respuesta');
+      const rows = (js.rows || []).map((r) => ({ ...r, total: Number(r.total ?? 0) }));
+
+      invoiceState.rows = rows;
+      invoiceState.summary = {
+        total: rows.length,
+        total_amount: rows.reduce((a, r) => a + (r.total ?? 0), 0),
+        ok: rows.filter(r => (r.status || '').toUpperCase() === 'OK').length,
+        pending: rows.filter(r => (r.status || '').toUpperCase() === 'PENDING').length,
+        error: rows.filter(r => (r.status || '').toUpperCase() === 'ERROR').length,
+      };
+      invoiceState.page = 1;
+      renderInvoiceRows();
+      renderInvoiceSummary();
+      invoiceCsvBtn.disabled = rows.length === 0;
+    } catch (err) {
+      invoiceRowsEl.innerHTML = `<tr><td colspan="7" class="text-center text-danger">Error: ${escapeHtml(err.message)}</td></tr>`;
+      showAlert(`No se pudo cargar el reporte: ${err.message}`, 'danger');
+    }
+  };
+
+  const renderInvoiceSummary = () => {
+    const s = invoiceState.summary;
+    if (!s) return;
+    invoiceSummaryEl.innerHTML = `
+      <div class="col-sm-6 col-lg-3">
+        <div class="card border-0 bg-body-tertiary h-100"><div class="card-body py-3">
+          <div class="text-muted small">Facturas</div>
+          <div class="fs-5 fw-semibold">${s.total}</div>
+        </div></div>
+      </div>
+      <div class="col-sm-6 col-lg-3">
+        <div class="card border-0 bg-body-tertiary h-100"><div class="card-body py-3">
+          <div class="text-muted small">Monto total</div>
+          <div class="fs-5 fw-semibold">${formatCurrency(s.total_amount)}</div>
+        </div></div>
+      </div>
+      <div class="col-sm-6 col-lg-3">
+        <div class="card border-0 bg-body-tertiary h-100"><div class="card-body py-3">
+          <div class="text-muted small">Certificadas</div>
+          <div class="fs-5 fw-semibold">${s.ok}</div>
+        </div></div>
+      </div>
+      <div class="col-sm-6 col-lg-3">
+        <div class="card border-0 bg-body-tertiary h-100"><div class="card-body py-3">
+          <div class="text-muted small">Pendientes</div>
+          <div class="fs-5 fw-semibold">${s.pending}</div>
+        </div></div>
+      </div>
+    `;
+    invoiceMsgEl.textContent = `Errores: ${s.error}`;
+  };
+
+  const renderInvoiceRows = () => {
+    const { slice } = paginate(invoiceState.rows, invoiceState.page, invoiceState.perPage);
+    if (!slice.length) {
+      invoiceRowsEl.innerHTML = `<tr><td colspan="7" class="text-center text-muted">No hay registros.</td></tr>`;
+      paginationEl.innerHTML = '';
+      return;
+    }
+    invoiceRowsEl.innerHTML = slice.map((r) => {
+      const status = (r.status || '').toUpperCase();
+      const badge = status === 'OK'
+        ? 'text-bg-success'
+        : status === 'PENDING'
+        ? 'text-bg-warning'
+        : status === 'ERROR'
+        ? 'text-bg-danger'
+        : 'text-bg-secondary';
+
+      const uuid = getUuid(r);
+      const actions = uuid
+        ? `<button type="button" class="btn btn-sm btn-outline-primary me-1" data-action="pdf" data-uuid="${escapeHtml(uuid)}">PDF</button>`
+        : '<span class="badge text-bg-light border">Sin UUID</span>';
+
+      return `
+        <tr>
+          <td>${escapeHtml(r.ticket_no)}</td>
+          <td>${escapeHtml(formatDateValue(r.fecha))}</td>
+          <td class="text-end">${formatCurrency(r.total)}</td>
+          <td>${escapeHtml(r.receptor ?? 'CF')}</td>
+          <td class="text-truncate" style="max-width:220px;">${escapeHtml(uuid ?? '—')}</td>
+          <td><span class="badge ${badge}">${formatInvoiceStatus(status)}</span></td>
+          <td class="text-center">${actions}</td>
+        </tr>`;
+    }).join('');
+    buildPagination(paginationEl, invoiceState, renderInvoiceRows);
+  };
+
+  // === Eventos ===
+  document.getElementById('invoiceFetch').addEventListener('click', fetchInvoiceReport);
+  document.getElementById('invoiceReset').addEventListener('click', () => {
+    document.getElementById('invoiceFrom').value = defaultFrom;
+    document.getElementById('invoiceTo').value = defaultTo;
+    document.getElementById('invoiceStatus').value = 'ANY';
+    document.getElementById('invoiceNit').value = '';
+    fetchInvoiceReport();
+  });
+
+  // Exportar CSV (todas las filas del estado actual)
+  invoiceCsvBtn.addEventListener('click', () => {
+    const rows = invoiceState.rows || [];
+    if (!rows.length) return;
+
+    const headers = ['ticket_no','fecha','total','receptor','uuid','status'];
+    const csv = [
+      headers.join(','),
+      ...rows.map(r => [
+        String(r.ticket_no ?? '').replaceAll('"','""'),
+        new Date(r.fecha ?? '').toISOString(),
+        Number(r.total ?? 0).toFixed(2),
+        String(r.receptor ?? 'CF').replaceAll('"','""'),
+        String(getUuid(r) ?? '').replaceAll('"','""'),
+        String((r.status || '').toUpperCase()).replaceAll('"','""'),
+      ].map(v => `"${v}"`).join(',')),
+    ].join('\r\n');
+
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    downloadBlob(blob, `facturas_${document.getElementById('invoiceFrom').value}_${document.getElementById('invoiceTo').value}.csv`);
+  });
+
+  // === Botón PDF (usa el mismo flujo que facturas manuales) ===
+  invoiceRowsEl.addEventListener('click', async (ev) => {
+    const btn = ev.target.closest('button[data-action="pdf"]');
+    if (!btn) return;
+    const uuid = btn.dataset.uuid;
+    if (!uuid) { showAlert('Este registro no tiene UUID disponible.', 'warning'); return; }
+
+    btn.disabled = true;
+    const old = btn.textContent;
+    btn.textContent = 'Generando...';
+    clearAlert();
+
+    // Helper
+    const base64ToBlob = (base64, mime = 'application/pdf') => {
+      const byteChars = atob(base64);
+      const byteNumbers = new Array(byteChars.length);
+      for (let i = 0; i < byteChars.length; i++) byteNumbers[i] = byteChars.charCodeAt(i);
+      const byteArray = new Uint8Array(byteNumbers);
+      return new Blob([byteArray], { type: mime });
     };
-
-    const invoiceState = {
-      rows: [],
-      summary: null,
-      generatedAt: null,
-      filters: {
-        from: defaultFrom,
-        to: defaultTo,
-        status: 'ANY',
-        nit: '',
-        uuid: '',
-      },
-    };
-
-    const escapeHtml = (value) => String(value ?? '')
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#39;');
-
-    const formatDateValue = (value, withTime = true) => {
-      if (!value) return '—';
-      const normalised = typeof value === 'string' && value.includes('T')
-        ? value
-        : typeof value === 'string' ? value.replace(' ', 'T') : value;
-      const dt = new Date(normalised);
-      if (Number.isNaN(dt.getTime())) return value;
-      return withTime ? dt.toLocaleString('es-GT') : dt.toLocaleDateString('es-GT');
-    };
-
-    const formatDuration = (minutes) => {
-      if (minutes === null || minutes === undefined || Number.isNaN(minutes)) return '—';
-      const totalMinutes = Math.max(0, Number(minutes));
-      const hours = Math.floor(totalMinutes / 60);
-      const mins = Math.round(totalMinutes % 60);
-      if (hours === 0) return `${mins} min`;
-      return `${hours} h ${mins.toString().padStart(2, '0')} min`;
-    };
-
-    const formatCurrency = (amount) => {
-      try {
-        return new Intl.NumberFormat('es-GT', { style: 'currency', currency: 'GTQ' }).format(Number(amount ?? 0));
-      } catch (_) {
-        return `Q ${Number(amount ?? 0).toFixed(2)}`;
-      }
-    };
-
-    const formatTicketStatus = (status) => {
-      switch (String(status ?? '').toUpperCase()) {
-        case 'CLOSED': return 'Cerrado';
-        case 'OPEN': return 'Abierto';
-        default: return status || '—';
-      }
-    };
-
-    const formatInvoiceStatus = (status) => {
-      switch (String(status ?? '').toUpperCase()) {
-        case 'OK': return 'Certificada';
-        case 'PENDING': return 'Pendiente';
-        case 'ERROR': return 'Error';
-        default: return status || '—';
-      }
-    };
-
-    const downloadHtml = (filename, html) => {
-      const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = filename;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      URL.revokeObjectURL(url);
-    };
-
-    const openPrintWindow = (html) => {
-      const w = window.open('', '_blank');
-      if (!w) {
-        Dialog.warn('Permite ventanas emergentes para mostrar el reporte.', 'Ventana bloqueada');
-        return;
-      }
-      w.document.write(html);
-      w.document.close();
-    };
-
-    const exportCsv = (filename, headers, rows) => {
-      if (!rows.length) {
-        Dialog.info('No hay datos para exportar', 'Exportación CSV')
-        return;
-      }
-      const headerLine = headers.map((h) => `"${h.label}"`).join(',');
-      const lines = rows.map((row) => headers.map((h) => {
-        const raw = h.accessor(row);
-        const text = raw === null || raw === undefined ? '' : String(raw);
-        return `"${text.replace(/"/g, '""')}"`;
-      }).join(','));
-      const blob = new Blob([headerLine, ...lines].join('\n'), { type: 'text/csv;charset=utf-8' });
+    const downloadBlobScoped = (blob, filename) => {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -1577,883 +1787,37 @@ async function renderDashboard() {
       URL.revokeObjectURL(url);
     };
 
-    // ==== Reportes HTML con Bootstrap ====
-
-    const BOOTSTRAP_HEAD = `
-      <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-      <style>
-        body { color: #0f172a; }
-        .chip { display: inline-block; padding: .25rem .5rem; border-radius: 50rem; font-size: .8rem; }
-        .chip-info { background: #e7f1ff; color: #0a58ca; }
-        .chip-muted { background: #e9ecef; color: #6c757d; }
-        @media print {
-          .no-print { display: none !important; }
-          body { margin: 6mm; }
+    try {
+      // 1) Igual que en manuales: pedir JSON con pdf_base64
+      const js = await fetchJSON(`${api('fel/document-pdf')}?uuid=${encodeURIComponent(uuid)}`);
+      if (js?.ok && (js.pdf_base64 || js?.data?.pdf_base64)) {
+        const b64 = js.pdf_base64 || js.data.pdf_base64;
+        const blob = base64ToBlob(b64, 'application/pdf');
+        downloadBlobScoped(blob, `Factura-${uuid}.pdf`);
+        showAlert('PDF generado correctamente.', 'success');
+      } else {
+        // 2) Fallback a binario por /api/fel/pdf
+        const resp = await fetch(`${api('fel/pdf')}?uuid=${encodeURIComponent(uuid)}`);
+        if (!resp.ok) {
+          // Intenta leer el JSON de error para mostrar el mensaje real
+          let errText = `HTTP ${resp.status}`;
+          try { const jerr = await resp.json(); if (jerr?.error) errText = jerr.error; } catch {}
+          throw new Error(errText);
         }
-        /* Ajuste de tabla en impresión */
-        table { font-size: .86rem; }
-        th { white-space: nowrap; }
-      </style>
-    `;
-
-    const buildTicketReportHtml = (printable = false) => {
-      const summary = ticketState.summary;
-      const rows = ticketState.rows;
-      const filters = ticketState.filters;
-      const generated = ticketState.generatedAt ? formatDateValue(ticketState.generatedAt) : formatDateValue(new Date().toISOString());
-
-      const filterLabels = {
-        from: 'Desde',
-        to: 'Hasta',
-        status: 'Estado',
-        plate: 'Placa',
-        nit: 'NIT receptor',
-        min_total: 'Mínimo',
-        max_total: 'Máximo',
-      };
-
-      const filterItems = Object.entries(filters)
-        .filter(([, value]) => value && value !== 'ANY')
-        .map(([key, value]) => `<span class="badge text-bg-light me-2 mb-2"><strong class="me-1">${filterLabels[key] ?? key}:</strong> ${escapeHtml(value)}</span>`)
-        .join('') || '<span class="text-muted">Sin filtros aplicados</span>';
-
-      const summaryCards = summary ? `
-        <div class="row g-3 my-3">
-          <div class="col-sm-6 col-lg-3">
-            <div class="card border-0 bg-body-tertiary h-100">
-              <div class="card-body py-3">
-                <div class="text-muted small">Tickets encontrados</div>
-                <div class="fs-5 fw-semibold">${escapeHtml(summary.total_tickets ?? 0)}</div>
-              </div>
-            </div>
-          </div>
-          <div class="col-sm-6 col-lg-3">
-            <div class="card border-0 bg-body-tertiary h-100">
-              <div class="card-body py-3">
-                <div class="text-muted small">Monto total</div>
-                <div class="fs-5 fw-semibold">${escapeHtml(formatCurrency(summary.total_amount ?? 0))}</div>
-              </div>
-            </div>
-          </div>
-          <div class="col-sm-6 col-lg-3">
-            <div class="card border-0 bg-body-tertiary h-100">
-              <div class="card-body py-3">
-                <div class="text-muted small">Con pagos</div>
-                <div class="fs-5 fw-semibold">${escapeHtml(`${summary.with_payments ?? 0} / ${summary.total_tickets ?? 0}`)}</div>
-              </div>
-            </div>
-          </div>
-          <div class="col-sm-6 col-lg-3">
-            <div class="card border-0 bg-body-tertiary h-100">
-              <div class="card-body py-3">
-                <div class="text-muted small">Estadía promedio</div>
-                <div class="fs-5 fw-semibold">${escapeHtml(summary.average_minutes !== null && summary.average_minutes !== undefined ? formatDuration(summary.average_minutes) : '—')}</div>
-              </div>
-            </div>
-          </div>
-        </div>
-      ` : '';
-
-      const statusBreakdown = summary && summary.status_breakdown
-        ? Object.entries(summary.status_breakdown).map(([k, v]) => `<span class="badge rounded-pill text-bg-info me-2 mb-2">${escapeHtml(formatTicketStatus(k))}: ${escapeHtml(v)}</span>`).join('')
-        : '';
-
-      const tableRows = rows.length ? rows.map((row) => `
-        <tr>
-          <td>${escapeHtml(row.plate)}</td>
-          <td>${escapeHtml(row.receptor_nit ?? 'CF')}</td>
-          <td>${escapeHtml(formatTicketStatus(row.status))}</td>
-          <td>${escapeHtml(formatDateValue(row.entry_at))}</td>
-          <td>${escapeHtml(formatDateValue(row.exit_at))}</td>
-          <td>${escapeHtml(formatDuration(row.duration_min))}</td>
-          <td class="text-end">${escapeHtml(formatCurrency(row.total))}</td>
-          <td>
-            ${(row.payments || []).length ? row.payments.map((p) => `
-              <div class="small mb-1">
-                <strong>${escapeHtml(formatCurrency(p.amount))}</strong>
-                <div class="text-muted">${escapeHtml(p.method || 'Método no indicado')}</div>
-                <div class="text-muted">${escapeHtml(formatDateValue(p.paid_at))}</div>
-              </div>
-            `).join('') : '<span class="badge text-bg-light">Sin pagos</span>'}
-          </td>
-        </tr>
-      `).join('') : `
-        <tr>
-          <td colspan="8" class="text-center text-muted py-4">No hay datos para mostrar.</td>
-        </tr>
-      `;
-
-      return `<!DOCTYPE html>
-      <html lang="es">
-      <head>
-        <meta charset="utf-8" />
-        <title>Reporte de tickets</title>
-        ${BOOTSTRAP_HEAD}
-      </head>
-      <body class="p-4">
-        <header class="mb-3">
-          <h1 class="h3 mb-1">Reporte de tickets</h1>
-          <p class="text-muted mb-0">Integración ZKTeco → FEL G4S · Generado ${escapeHtml(generated)}</p>
-        </header>
-
-        <section class="mb-3">
-          <h2 class="h5">Filtros aplicados</h2>
-          <div>${filterItems}</div>
-        </section>
-
-        ${summaryCards}
-        ${statusBreakdown ? `<div class="mb-3">${statusBreakdown}</div>` : ''}
-
-        <section>
-          <h2 class="h5">Detalle</h2>
-          <div class="table-responsive">
-            <table class="table table-sm table-bordered align-middle">
-              <thead class="table-light">
-                <tr>
-                  <th>Ticket</th>
-                  <th>Receptor</th>
-                  <th>Estado</th>
-                  <th>Entrada</th>
-                  <th>Salida</th>
-                  <th>Estadía</th>
-                  <th class="text-end">Total</th>
-                  <th>Pagos</th>
-                </tr>
-              </thead>
-              <tbody>${tableRows}</tbody>
-            </table>
-          </div>
-        </section>
-
-        <footer class="mt-4 text-muted small">Reporte generado automáticamente. Fuente: Base de datos interna.</footer>
-        ${printable ? '<script>window.addEventListener("load",()=>{setTimeout(()=>window.print(),300);});</script>' : ''}
-      </body>
-      </html>`;
-    };
-
-    const buildInvoiceReportHtml = (printable = false) => {
-      const summary = invoiceState.summary;
-      const rows = invoiceState.rows;
-      const filters = invoiceState.filters;
-      const generated = invoiceState.generatedAt ? formatDateValue(invoiceState.generatedAt) : formatDateValue(new Date().toISOString());
-
-      const filterLabels = {
-        from: 'Desde',
-        to: 'Hasta',
-        status: 'Estado',
-        nit: 'NIT receptor',
-        uuid: 'UUID',
-      };
-
-      const filterItems = Object.entries(filters)
-        .filter(([, value]) => value && value !== 'ANY')
-        .map(([key, value]) => `<span class="badge text-bg-light me-2 mb-2"><strong class="me-1">${filterLabels[key] ?? key}:</strong> ${escapeHtml(value)}</span>`)
-        .join('') || '<span class="text-muted">Sin filtros aplicados</span>';
-
-      const summaryCards = summary ? `
-        <div class="row g-3 my-3">
-          <div class="col-sm-6 col-lg-3">
-            <div class="card border-0 bg-body-tertiary h-100">
-              <div class="card-body py-3">
-                <div class="text-muted small">Facturas encontradas</div>
-                <div class="fs-5 fw-semibold">${escapeHtml(summary.total ?? 0)}</div>
-              </div>
-            </div>
-          </div>
-          <div class="col-sm-6 col-lg-3">
-            <div class="card border-0 bg-body-tertiary h-100">
-              <div class="card-body py-3">
-                <div class="text-muted small">Monto total</div>
-                <div class="fs-5 fw-semibold">${escapeHtml(formatCurrency(summary.total_amount ?? 0))}</div>
-              </div>
-            </div>
-          </div>
-          <div class="col-sm-6 col-lg-3">
-            <div class="card border-0 bg-body-tertiary h-100">
-              <div class="card-body py-3">
-                <div class="text-muted small">Certificadas (OK)</div>
-                <div class="fs-5 fw-semibold">${escapeHtml(summary.ok ?? 0)}</div>
-              </div>
-            </div>
-          </div>
-          <div class="col-sm-6 col-lg-3">
-            <div class="card border-0 bg-body-tertiary h-100">
-              <div class="card-body py-3">
-                <div class="text-muted small">Promedio por factura</div>
-                <div class="fs-5 fw-semibold">${escapeHtml(summary.average_amount ? formatCurrency(summary.average_amount) : '—')}</div>
-              </div>
-            </div>
-          </div>
-        </div>
-      ` : '';
-
-      const statusBreakdown = summary ? [
-        ['OK', summary.ok ?? 0],
-        ['PENDING', summary.pending ?? 0],
-        ['ERROR', summary.error ?? 0],
-      ].filter(([, value]) => value > 0).map(([key, value]) =>
-        `<span class="badge rounded-pill ${key==='OK'?'text-bg-success':key==='PENDING'?'text-bg-warning':'text-bg-danger'} me-2 mb-2">${escapeHtml(formatInvoiceStatus(key))}: ${escapeHtml(value)}</span>`
-      ).join('') : '';
-
-      const tableRows = rows.length ? rows.map((row) => `
-        <tr>
-          <td>${escapeHtml(row.ticket_no)}</td>
-          <td>${escapeHtml(formatDateValue(row.fecha))}</td>
-          <td class="text-end">${escapeHtml(formatCurrency(row.total))}</td>
-          <td>${escapeHtml(row.receptor ?? 'CF')}</td>
-          <td class="text-truncate" style="max-width: 260px;">${escapeHtml(row.uuid ?? '—')}</td>
-          <td>${escapeHtml(formatInvoiceStatus(row.status))}</td>
-        </tr>
-      `).join('') : `
-        <tr>
-          <td colspan="6" class="text-center text-muted py-4">No hay facturas con los filtros dados.</td>
-        </tr>
-      `;
-
-      return `<!DOCTYPE html>
-      <html lang="es">
-      <head>
-        <meta charset="utf-8" />
-        <title>Reporte de facturas emitidas</title>
-        ${BOOTSTRAP_HEAD}
-      </head>
-      <body class="p-4">
-        <header class="mb-3">
-          <h1 class="h3 mb-1">Reporte de facturas emitidas</h1>
-          <p class="text-muted mb-0">Integración ZKTeco → FEL G4S · Generado ${escapeHtml(generated)}</p>
-        </header>
-
-        <section class="mb-3">
-          <h2 class="h5">Filtros aplicados</h2>
-          <div>${filterItems}</div>
-        </section>
-
-        ${summaryCards}
-        ${statusBreakdown ? `<div class="mb-3">${statusBreakdown}</div>` : ''}
-
-        <section>
-          <h2 class="h5">Detalle</h2>
-          <div class="table-responsive">
-            <table class="table table-sm table-bordered align-middle">
-              <thead class="table-light">
-                <tr>
-                  <th>Ticket</th>
-                  <th>Fecha</th>
-                  <th class="text-end">Total</th>
-                  <th>Receptor</th>
-                  <th>UUID</th>
-                  <th>Estado</th>
-                </tr>
-              </thead>
-              <tbody>${tableRows}</tbody>
-            </table>
-          </div>
-        </section>
-
-        <footer class="mt-4 text-muted small">Reporte generado automáticamente. Fuente: tabla de facturas (invoices).</footer>
-        ${printable ? '<script>window.addEventListener("load",()=>{setTimeout(()=>window.print(),300);});</script>' : ''}
-      </body>
-      </html>`;
-    };
-
-    // ====== UI principal (ajustes mínimos a Bootstrap puro) ======
-    app.innerHTML = `
-      <div class="d-flex flex-column gap-4">
-        <section class="card shadow-sm">
-          <div class="card-body">
-            <div class="d-flex flex-wrap align-items-start justify-content-between gap-2">
-              <div>
-                <h5 class="card-title mb-1">Reporte de tickets</h5>
-                <p class="text-muted small mb-0">Analiza tickets cerrados, montos recaudados y tiempos de permanencia.</p>
-              </div>
-              <span class="badge text-bg-info">Tickets</span>
-            </div>
-            <form id="ticketFilters" class="row g-3 mt-3">
-              <div class="col-md-3">
-                <label class="form-label small" for="ticketFrom">Desde</label>
-                <input type="date" id="ticketFrom" class="form-control form-control-sm">
-              </div>
-              <div class="col-md-3">
-                <label class="form-label small" for="ticketTo">Hasta</label>
-                <input type="date" id="ticketTo" class="form-control form-control-sm">
-              </div>
-              <div class="col-md-3">
-                <label class="form-label small" for="ticketStatus">Estado</label>
-                <select id="ticketStatus" class="form-select form-select-sm">
-                  <option value="ANY">Todos</option>
-                  <option value="CLOSED">Cerrados</option>
-                  <option value="OPEN">Abiertos</option>
-                </select>
-              </div>
-              <div class="col-md-3">
-                <label class="form-label small" for="ticketPlate">Placa</label>
-                <input type="text" id="ticketPlate" class="form-control form-control-sm" placeholder="Parcial o completa">
-              </div>
-              <div class="col-md-3">
-                <label class="form-label small" for="ticketNit">NIT receptor</label>
-                <input type="text" id="ticketNit" class="form-control form-control-sm" placeholder="Solo números"
-                  value="${escapeHtml(ticketState.filters.nit || '')}"
-                  inputmode="numeric" pattern="\\d*" maxlength="15"/>
-              </div>
-              <div class="col-md-3">
-                <label class="form-label small" for="ticketMin">Monto mínimo</label>
-                <input type="number" step="0.01" id="ticketMin" class="form-control form-control-sm" placeholder="Q">
-              </div>
-              <div class="col-md-3">
-                <label class="form-label small" for="ticketMax">Monto máximo</label>
-                <input type="number" step="0.01" id="ticketMax" class="form-control form-control-sm" placeholder="Q">
-              </div>
-            </form>
-            <div class="d-flex flex-wrap gap-2 align-items-center mt-3">
-              <div class="btn-group btn-group-sm" role="group">
-                <button type="button" class="btn btn-primary" id="ticketFetch">Consultar</button>
-                <button type="button" class="btn btn-outline-secondary" id="ticketReset">Limpiar</button>
-              </div>
-              <div class="ms-auto d-flex flex-wrap gap-2">
-                <button type="button" class="btn btn-outline-primary btn-sm" id="ticketHtml" disabled>Descargar HTML</button>
-                <button type="button" class="btn btn-outline-primary btn-sm" id="ticketPdf" disabled>Vista PDF</button>
-                <button type="button" class="btn btn-outline-secondary btn-sm" id="ticketCsv" disabled>Exportar CSV</button>
-              </div>
-            </div>
-            <div id="ticketSummary" class="row g-3 mt-3"></div>
-            <div class="table-responsive mt-3">
-              <table class="table table-sm align-middle mb-0">
-                <thead class="table-light">
-                  <tr>
-                    <th>Ticket</th>
-                    <th>Receptor</th>
-                    <th>Estado</th>
-                    <th>Entrada</th>
-                    <th>Salida</th>
-                    <th>Estadía</th>
-                    <th class="text-end">Total</th>
-                    <th>Pagos</th>
-                  </tr>
-                </thead>
-                <tbody id="ticketRows">
-                  <tr><td colspan="8" class="text-center text-muted">Selecciona filtros y consulta para ver resultados.</td></tr>
-                </tbody>
-              </table>
-            </div>
-            <div id="ticketMessage" class="small text-muted mt-2"></div>
-          </div>
-        </section>
-
-        <section class="card shadow-sm">
-          <div class="card-body">
-            <div class="d-flex flex-wrap align-items-start justify-content-between gap-2">
-              <div>
-                <h5 class="card-title mb-1">Reporte de facturas emitidas</h5>
-                <p class="text-muted small mb-0">Consulta documentos certificados, descárgalos y obtén estadísticas por estado.</p>
-              </div>
-              <span class="badge text-bg-success">Facturación</span>
-            </div>
-            <form id="invoiceFilters" class="row g-3 mt-3">
-              <div class="col-md-3">
-                <label class="form-label small" for="invoiceFrom">Desde</label>
-                <input type="date" id="invoiceFrom" class="form-control form-control-sm">
-              </div>
-              <div class="col-md-3">
-                <label class="form-label small" for="invoiceTo">Hasta</label>
-                <input type="date" id="invoiceTo" class="form-control form-control-sm">
-              </div>
-              <div class="col-md-3">
-                <label class="form-label small" for="invoiceStatus">Estado</label>
-                <select id="invoiceStatus" class="form-select form-select-sm">
-                  <option value="ANY">Todos</option>
-                  <option value="OK">OK</option>
-                  <option value="PENDING">Pendientes</option>
-                  <option value="ERROR">Errores</option>
-                </select>
-              </div>
-              <div class="col-md-3">
-                <label class="form-label small" for="invoiceNit">NIT receptor</label>
-                <input type="text" id="invoiceNit" class="form-control form-control-sm" placeholder="CF o NIT">
-              </div>
-              <div class="col-md-3">
-                <label class="form-label small" for="invoiceUuid">UUID</label>
-                <input type="text" id="invoiceUuid" class="form-control form-control-sm" placeholder="Coincidencia exacta">
-              </div>
-            </form>
-            <div class="d-flex flex-wrap gap-2 align-items-center mt-3">
-              <div class="btn-group btn-group-sm" role="group">
-                <button type="button" class="btn btn-primary" id="invoiceFetch">Buscar</button>
-                <button type="button" class="btn btn-outline-secondary" id="invoiceReset">Limpiar</button>
-              </div>
-              <div class="ms-auto d-flex flex-wrap gap-2">
-                <button type="button" class="btn btn-outline-primary btn-sm" id="invoiceHtml" disabled>Descargar HTML</button>
-                <button type="button" class="btn btn-outline-primary btn-sm" id="invoicePdf" disabled>Vista PDF</button>
-                <button type="button" class="btn btn-outline-secondary btn-sm" id="invoiceCsv" disabled>Exportar CSV</button>
-              </div>
-            </div>
-            <div id="invoiceSummary" class="row g-3 mt-3"></div>
-            <div class="table-responsive mt-3">
-              <table class="table table-sm align-middle mb-0">
-                <thead class="table-light">
-                  <tr>
-                    <th>Ticket</th>
-                    <th>Fecha</th>
-                    <th class="text-end">Total</th>
-                    <th>Receptor</th>
-                    <th>UUID</th>
-                    <th>Estado</th>
-                    <th class="text-center">Acciones</th>
-                  </tr>
-                </thead>
-                <tbody id="invoiceRows">
-                  <tr><td colspan="7" class="text-center text-muted">Selecciona filtros y consulta para ver resultados.</td></tr>
-                </tbody>
-              </table>
-            </div>
-            <div id="invoiceMessage" class="small text-muted mt-2"></div>
-          </div>
-        </section>
-      </div>
-    `;
-
-    const nitInput = document.getElementById('ticketNit');
-    if (nitInput) {
-      nitInput.addEventListener('input', () => {
-        nitInput.value = nitInput.value.replace(/\D+/g, '');
-      });
+        const blob = await resp.blob();
+        downloadBlobScoped(blob, `Factura-${uuid}.pdf`);
+        showAlert('PDF generado correctamente.', 'success');
+      }
+    } catch (e) {
+      showAlert(`No se pudo generar el PDF: ${e.message}`, 'danger');
+    } finally {
+      btn.textContent = old;
+      btn.disabled = false;
     }
+  });
 
-    // Solo números: elimina cualquier carácter no numérico
-    nitInput && nitInput.addEventListener('input', () => {
-      nitInput.value = nitInput.value.replace(/\D+/g, '');
-    });
-
-    const ticketInputs = {
-      from: document.getElementById('ticketFrom'),
-      to: document.getElementById('ticketTo'),
-      status: document.getElementById('ticketStatus'),
-      plate: document.getElementById('ticketPlate'),
-      nit: document.getElementById('ticketNit'),
-      min_total: document.getElementById('ticketMin'),
-      max_total: document.getElementById('ticketMax'),
-    };
-
-    const invoiceInputs = {
-      from: document.getElementById('invoiceFrom'),
-      to: document.getElementById('invoiceTo'),
-      status: document.getElementById('invoiceStatus'),
-      nit: document.getElementById('invoiceNit'),
-      uuid: document.getElementById('invoiceUuid'),
-    };
-
-    const ticketSummaryEl = document.getElementById('ticketSummary');
-    const ticketRowsEl = document.getElementById('ticketRows');
-    const ticketMsgEl = document.getElementById('ticketMessage');
-
-    const invoiceSummaryEl = document.getElementById('invoiceSummary');
-    const invoiceRowsEl = document.getElementById('invoiceRows');
-    const invoiceMsgEl = document.getElementById('invoiceMessage');
-
-    const syncTicketForm = () => {
-      ticketInputs.from.value = ticketState.filters.from || '';
-      ticketInputs.to.value = ticketState.filters.to || '';
-      ticketInputs.status.value = ticketState.filters.status || 'ANY';
-      ticketInputs.plate.value = ticketState.filters.plate || '';
-      ticketInputs.nit.value = ticketState.filters.nit || '';
-      ticketInputs.min_total.value = ticketState.filters.min_total || '';
-      ticketInputs.max_total.value = ticketState.filters.max_total || '';
-    };
-
-    const syncInvoiceForm = () => {
-      invoiceInputs.from.value = invoiceState.filters.from || '';
-      invoiceInputs.to.value = invoiceState.filters.to || '';
-      invoiceInputs.status.value = invoiceState.filters.status || 'ANY';
-      invoiceInputs.nit.value = invoiceState.filters.nit || '';
-      invoiceInputs.uuid.value = invoiceState.filters.uuid || '';
-    };
-
-    syncTicketForm();
-    syncInvoiceForm();
-
-    const getTicketFilters = () => {
-      const filters = {
-        from: ticketInputs.from.value || '',
-        to: ticketInputs.to.value || '',
-        status: ticketInputs.status.value || 'ANY',
-        plate: ticketInputs.plate.value.trim(),
-        nit: ticketInputs.nit.value.trim(),
-        min_total: ticketInputs.min_total.value !== '' ? ticketInputs.min_total.value : '',
-        max_total: ticketInputs.max_total.value !== '' ? ticketInputs.max_total.value : '',
-      };
-      ticketState.filters = { ...ticketState.filters, ...filters };
-      return filters;
-    };
-
-    const getInvoiceFilters = () => {
-      const filters = {
-        from: invoiceInputs.from.value || '',
-        to: invoiceInputs.to.value || '',
-        status: invoiceInputs.status.value || 'ANY',
-        nit: invoiceInputs.nit.value.trim(),
-        uuid: invoiceInputs.uuid.value.trim(),
-      };
-      invoiceState.filters = { ...invoiceState.filters, ...filters };
-      return filters;
-    };
-
-    const renderTicketSummary = () => {
-      const summary = ticketState.summary;
-      if (!summary) {
-        ticketSummaryEl.innerHTML = '';
-        ticketMsgEl.textContent = ticketState.rows.length ? '' : 'No hay datos para mostrar.';
-        return;
-      }
-      ticketSummaryEl.innerHTML = `
-        <div class="col-sm-6 col-lg-3">
-          <div class="card shadow-sm border-0 bg-body-tertiary">
-            <div class="card-body py-3">
-              <div class="text-muted small">Tickets</div>
-              <div class="fs-5 fw-semibold">${summary.total_tickets}</div>
-              <div class="text-muted small">Registros encontrados</div>
-            </div>
-          </div>
-        </div>
-        <div class="col-sm-6 col-lg-3">
-          <div class="card shadow-sm border-0 bg-body-tertiary">
-            <div class="card-body py-3">
-              <div class="text-muted small">Monto total</div>
-              <div class="fs-5 fw-semibold">${formatCurrency(summary.total_amount ?? 0)}</div>
-              <div class="text-muted small">Incluye tickets sin pagos</div>
-            </div>
-          </div>
-        </div>
-        <div class="col-sm-6 col-lg-3">
-          <div class="card shadow-sm border-0 bg-body-tertiary">
-            <div class="card-body py-3">
-              <div class="text-muted small">Tickets con pagos</div>
-              <div class="fs-5 fw-semibold">${summary.with_payments}/${summary.total_tickets}</div>
-              <div class="text-muted small">Con al menos un cobro</div>
-            </div>
-          </div>
-        </div>
-        <div class="col-sm-6 col-lg-3">
-          <div class="card shadow-sm border-0 bg-body-tertiary">
-            <div class="card-body py-3">
-              <div class="text-muted small">Estadía promedio</div>
-              <div class="fs-5 fw-semibold">${summary.average_minutes !== null && summary.average_minutes !== undefined ? formatDuration(summary.average_minutes) : '—'}</div>
-              <div class="text-muted small">Minutos por ticket</div>
-            </div>
-          </div>
-        </div>
-      `;
-
-      const breakdown = summary.status_breakdown || {};
-      const chips = Object.entries(breakdown)
-        .map(([k, v]) => `<span class="badge rounded-pill text-bg-light me-1">${formatTicketStatus(k)}: ${v}</span>`)
-        .join('');
-      const updated = ticketState.generatedAt ? formatDateValue(ticketState.generatedAt) : formatDateValue(new Date().toISOString());
-      ticketMsgEl.innerHTML = `${chips ? chips + ' · ' : ''}<span class="text-muted">Actualizado: ${updated}</span>`;
-    };
-
-    const renderTicketRows = () => {
-      if (!ticketState.rows.length) {
-        ticketRowsEl.innerHTML = '<tr><td colspan="8" class="text-center text-muted">No se encontraron tickets con los filtros seleccionados.</td></tr>';
-        return;
-      }
-      ticketRowsEl.innerHTML = ticketState.rows.map((row) => {
-        const payments = (row.payments || []).map((p) => `
-          <div class="small">
-            <strong>${formatCurrency(p.amount)}</strong>
-            <div class="text-muted">${p.method || 'Método no indicado'}</div>
-            <div class="text-muted">${formatDateValue(p.paid_at)}</div>
-          </div>
-        `).join('');
-        const status = String(row.status || '').toUpperCase();
-        const statusClass = status === 'CLOSED' ? 'bg-success-subtle text-success' : status === 'OPEN' ? 'bg-warning-subtle text-warning' : 'bg-secondary-subtle text-secondary';
-        return `
-          <tr>
-            <td><span class="fw-semibold">${escapeHtml(row.plate)}</span></td>
-            <td>${escapeHtml(row.receptor_nit ?? 'CF')}</td>
-            <td><span class="badge ${statusClass}">${escapeHtml(formatTicketStatus(row.status))}</span></td>
-            <td>${escapeHtml(formatDateValue(row.entry_at))}</td>
-            <td>${escapeHtml(formatDateValue(row.exit_at))}</td>
-            <td>${escapeHtml(formatDuration(row.duration_min))}</td>
-            <td class="text-end fw-semibold">${escapeHtml(formatCurrency(row.total))}</td>
-            <td>${payments || '<span class="badge text-bg-light border">Sin pagos</span>'}</td>
-          </tr>
-        `;
-      }).join('');
-    };
-
-    const updateTicketActions = () => {
-      const disabled = !ticketState.rows.length;
-      document.getElementById('ticketHtml').disabled = disabled;
-      document.getElementById('ticketPdf').disabled = disabled;
-      document.getElementById('ticketCsv').disabled = disabled;
-    };
-
-    const renderInvoiceSummary = () => {
-      const summary = invoiceState.summary;
-      if (!summary) {
-        invoiceSummaryEl.innerHTML = '';
-        invoiceMsgEl.textContent = invoiceState.rows.length ? '' : 'No hay datos para mostrar.';
-        return;
-      }
-      invoiceSummaryEl.innerHTML = `
-        <div class="col-sm-6 col-lg-3">
-          <div class="card shadow-sm border-0 bg-body-tertiary">
-            <div class="card-body py-3">
-              <div class="text-muted small">Facturas</div>
-              <div class="fs-5 fw-semibold">${summary.total}</div>
-              <div class="text-muted small">Documentos encontrados</div>
-            </div>
-          </div>
-        </div>
-        <div class="col-sm-6 col-lg-3">
-          <div class="card shadow-sm border-0 bg-body-tertiary">
-            <div class="card-body py-3">
-              <div class="text-muted small">Monto total</div>
-              <div class="fs-5 fw-semibold">${formatCurrency(summary.total_amount ?? 0)}</div>
-              <div class="text-muted small">Suma de montos certificados</div>
-            </div>
-          </div>
-        </div>
-        <div class="col-sm-6 col-lg-3">
-          <div class="card shadow-sm border-0 bg-body-tertiary">
-            <div class="card-body py-3">
-              <div class="text-muted small">Certificadas</div>
-              <div class="fs-5 fw-semibold">${summary.ok}</div>
-              <div class="text-muted small">Estado OK</div>
-            </div>
-          </div>
-        </div>
-        <div class="col-sm-6 col-lg-3">
-          <div class="card shadow-sm border-0 bg-body-tertiary">
-            <div class="card-body py-3">
-              <div class="text-muted small">Promedio</div>
-              <div class="fs-5 fw-semibold">${summary.average_amount !== null && summary.average_amount !== undefined ? formatCurrency(summary.average_amount) : '—'}</div>
-              <div class="text-muted small">Por factura</div>
-            </div>
-          </div>
-        </div>
-      `;
-
-      const parts = [];
-      if (summary.ok) parts.push(`OK: ${summary.ok}`);
-      if (summary.pending) parts.push(`Pendientes: ${summary.pending}`);
-      if (summary.error) parts.push(`Errores: ${summary.error}`);
-      const updated = invoiceState.generatedAt ? formatDateValue(invoiceState.generatedAt) : formatDateValue(new Date().toISOString());
-      invoiceMsgEl.innerHTML = `${parts.join(' · ')}${parts.length ? ' · ' : ''}<span class="text-muted">Actualizado: ${updated}</span>`;
-    };
-
-    const renderInvoiceRows = () => {
-      if (!invoiceState.rows.length) {
-        invoiceRowsEl.innerHTML = '<tr><td colspan="7" class="text-center text-muted">No se encontraron facturas con los filtros seleccionados.</td></tr>';
-        return;
-      }
-      invoiceRowsEl.innerHTML = invoiceState.rows.map((row) => {
-        const status = String(row.status || '').toUpperCase();
-        let statusClass = 'text-bg-secondary';
-        if (status === 'OK') statusClass = 'text-bg-success';
-        else if (status === 'PENDING') statusClass = 'text-bg-warning';
-        else if (status === 'ERROR') statusClass = 'text-bg-danger';
-        const actions = row.uuid ? `
-          <a class="btn btn-sm btn-outline-primary me-1" href="${api('fel/pdf')}?uuid=${encodeURIComponent(row.uuid)}" target="_blank" rel="noopener">PDF</a>
-          <a class="btn btn-sm btn-outline-secondary" href="${api('fel/xml')}?uuid=${encodeURIComponent(row.uuid)}" target="_blank" rel="noopener">XML</a>
-        ` : '<span class="badge text-bg-light border">Sin UUID</span>';
-        return `
-          <tr>
-            <td><span class="fw-semibold">${escapeHtml(row.ticket_no)}</span></td>
-            <td>${escapeHtml(formatDateValue(row.fecha))}</td>
-            <td class="text-end fw-semibold">${escapeHtml(formatCurrency(row.total))}</td>
-            <td>${escapeHtml(row.receptor ?? 'CF')}</td>
-            <td class="text-truncate" style="max-width: 220px;">${escapeHtml(row.uuid ?? '—')}</td>
-            <td><span class="badge ${statusClass}">${escapeHtml(formatInvoiceStatus(row.status))}</span></td>
-            <td class="text-center">${actions}</td>
-          </tr>
-        `;
-      }).join('');
-    };
-
-    const updateInvoiceActions = () => {
-      const disabled = !invoiceState.rows.length;
-      document.getElementById('invoiceHtml').disabled = disabled;
-      document.getElementById('invoicePdf').disabled = disabled;
-      document.getElementById('invoiceCsv').disabled = disabled;
-    };
-
-    const fetchTicketReport = async () => {
-      const filters = getTicketFilters();
-      const params = new URLSearchParams();
-      Object.entries(filters).forEach(([key, value]) => {
-        if (value && (key !== 'status' || value !== 'ANY')) {
-          params.set(key, value);
-        }
-      });
-      const query = params.toString();
-      ticketRowsEl.innerHTML = '<tr><td colspan="8" class="text-center text-muted">Generando reporte…</td></tr>';
-      ticketSummaryEl.innerHTML = '';
-      ticketMsgEl.textContent = '';
-      try {
-        const url = query ? api(`reports/tickets?${query}`) : api('reports/tickets');
-        const js = await fetchJSON(url);
-        if (js.ok === false && js.error) throw new Error(js.error);
-        ticketState.rows = js.rows || [];
-        ticketState.summary = js.summary || null;
-        ticketState.generatedAt = js.generated_at || null;
-        if (js.filters) {
-          ticketState.filters = { ...ticketState.filters, ...js.filters };
-          syncTicketForm();
-        }
-        renderTicketRows();
-        renderTicketSummary();
-      } catch (err) {
-        ticketRowsEl.innerHTML = `<tr><td colspan="8" class="text-center text-danger">Error: ${escapeHtml(err.message)}</td></tr>`;
-        ticketSummaryEl.innerHTML = '';
-        ticketMsgEl.textContent = '';
-        ticketState.rows = [];
-        ticketState.summary = null;
-      }
-      updateTicketActions();
-    };
-
-    const fetchInvoiceReport = async () => {
-      const filters = getInvoiceFilters();
-      const params = new URLSearchParams();
-      Object.entries(filters).forEach(([key, value]) => {
-        if (value && (key !== 'status' || value !== 'ANY')) {
-          params.set(key === 'uuid' ? 'uuid' : key, value);
-        }
-      });
-      const query = params.toString();
-      invoiceRowsEl.innerHTML = '<tr><td colspan="7" class="text-center text-muted">Consultando facturas…</td></tr>';
-      invoiceSummaryEl.innerHTML = '';
-      invoiceMsgEl.textContent = '';
-      try {
-        const url = query ? `${api('facturacion/emitidas')}?${query}` : api('facturacion/emitidas');
-        const js = await fetchJSON(url);
-        if (js.ok === false && js.error) throw new Error(js.error);
-        const rows = (js.rows || []).map((row) => ({
-          ...row,
-          total: Number(row.total ?? 0),
-        }));
-        invoiceState.rows = rows;
-        const total = rows.length;
-        const totalAmount = rows.reduce((acc, row) => acc + Number(row.total ?? 0), 0);
-        const ok = rows.filter((row) => String(row.status || '').toUpperCase() === 'OK').length;
-        const pending = rows.filter((row) => String(row.status || '').toUpperCase() === 'PENDING').length;
-        const error = rows.filter((row) => String(row.status || '').toUpperCase() === 'ERROR').length;
-        invoiceState.summary = {
-          total,
-          total_amount: Number(totalAmount.toFixed(2)),
-          ok,
-          pending,
-          error,
-          average_amount: total ? Number((totalAmount / total).toFixed(2)) : 0,
-        };
-        invoiceState.generatedAt = new Date().toISOString();
-        if (js.filters) {
-          invoiceState.filters = { ...invoiceState.filters, ...js.filters };
-          syncInvoiceForm();
-        }
-        renderInvoiceRows();
-        renderInvoiceSummary();
-      } catch (err) {
-        invoiceRowsEl.innerHTML = `<tr><td colspan="7" class="text-center text-danger">Error: ${escapeHtml(err.message)}</td></tr>`;
-        invoiceSummaryEl.innerHTML = '';
-        invoiceMsgEl.textContent = '';
-        invoiceState.rows = [];
-        invoiceState.summary = null;
-      }
-      updateInvoiceActions();
-    };
-
-    document.getElementById('ticketFetch').addEventListener('click', (e) => {
-      e.preventDefault();
-      fetchTicketReport();
-    });
-
-    document.getElementById('ticketReset').addEventListener('click', (e) => {
-      e.preventDefault();
-      ticketState.filters = { ...ticketState.filters, ...{
-        from: defaultFrom,
-        to: defaultTo,
-        status: 'ANY',
-        plate: '',
-        nit: '',
-        min_total: '',
-        max_total: '',
-      } };
-      syncTicketForm();
-      fetchTicketReport();
-    });
-
-    document.getElementById('ticketHtml').addEventListener('click', () => {
-      const html = buildTicketReportHtml(false);
-      const todayIso = new Date().toISOString().slice(0, 10);
-      downloadHtml(`reporte_tickets_${todayIso}.html`, html);
-    });
-
-    document.getElementById('ticketPdf').addEventListener('click', () => {
-      const html = buildTicketReportHtml(true);
-      openPrintWindow(html);
-    });
-
-    document.getElementById('ticketCsv').addEventListener('click', () => {
-      const headers = [
-        { label: 'ticket_no', accessor: (row) => row.ticket_no },
-        { label: 'receptor', accessor: (row) => row.receptor_nit ?? 'CF' },
-        { label: 'status', accessor: (row) => row.status },
-        { label: 'entry_at', accessor: (row) => row.entry_at },
-        { label: 'exit_at', accessor: (row) => row.exit_at },
-        { label: 'duration_min', accessor: (row) => row.duration_min },
-        { label: 'total', accessor: (row) => row.total },
-        { label: 'pagos', accessor: (row) => (row.payments || []).map((p) => `${p.amount} ${p.method || ''} ${p.paid_at || ''}`).join(' | ') },
-      ];
-      const todayIso = new Date().toISOString().slice(0, 10);
-      exportCsv(`reporte_tickets_${todayIso}.csv`, headers, ticketState.rows);
-    });
-
-    document.getElementById('invoiceFetch').addEventListener('click', (e) => {
-      e.preventDefault();
-      fetchInvoiceReport();
-    });
-
-    document.getElementById('invoiceReset').addEventListener('click', (e) => {
-      e.preventDefault();
-      invoiceState.filters = { ...invoiceState.filters, ...{
-        from: defaultFrom,
-        to: defaultTo,
-        status: 'ANY',
-        nit: '',
-        uuid: '',
-      } };
-      syncInvoiceForm();
-      fetchInvoiceReport();
-    });
-
-    document.getElementById('invoiceHtml').addEventListener('click', () => {
-      const html = buildInvoiceReportHtml(false);
-      const todayIso = new Date().toISOString().slice(0, 10);
-      downloadHtml(`reporte_facturas_${todayIso}.html`, html);
-    });
-
-    document.getElementById('invoicePdf').addEventListener('click', () => {
-      const html = buildInvoiceReportHtml(true);
-      openPrintWindow(html);
-    });
-
-    document.getElementById('invoiceCsv').addEventListener('click', () => {
-      const headers = [
-        { label: 'ticket_no', accessor: (row) => row.ticket_no },
-        { label: 'fecha', accessor: (row) => row.fecha },
-        { label: 'total', accessor: (row) => row.total },
-        { label: 'receptor', accessor: (row) => row.receptor ?? 'CF' },
-        { label: 'uuid', accessor: (row) => row.uuid ?? '' },
-        { label: 'status', accessor: (row) => row.status },
-      ];
-      const todayIso = new Date().toISOString().slice(0, 10);
-      exportCsv(`reporte_facturas_${todayIso}.csv`, headers, invoiceState.rows);
-    });
-
-    await fetchTicketReport();
-    await fetchInvoiceReport();
-  }
+  await fetchInvoiceReport();
+}
 
   // ===== Ajustes  =====
   async function renderSettings() {
@@ -2976,7 +2340,6 @@ async function renderDashboard() {
         .replace(/'/g, '&#39;');
     }
   }
-
 
   const PAGE_STORAGE_KEY = 'zkt:lastPage';
 

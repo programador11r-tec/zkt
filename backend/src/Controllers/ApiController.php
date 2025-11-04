@@ -1771,8 +1771,6 @@ class ApiController {
     }
 
 
-
-
     /** Helper simple para logging */
     private function debugLog(string $file, array $data): void
     {
@@ -2201,7 +2199,7 @@ class ApiController {
 
             // PDF binario como base64 o bytes segÃºn proveedor; aquÃ­ asumimos base64 en Response.Data
             $respStr = $g4s->requestTransaction([
-                'Transaction' => 'GET_DOCUMENT',
+                'Transaction' => 'GET_DOCUMENT_SAT_PDF',
                 'Data1'       => $uuid,  // UUID
                 'Data2'       => 'PDF',  // tipo
             ]);

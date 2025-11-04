@@ -1448,7 +1448,6 @@ async function renderDashboard() {
   }
 
   // ===== Reportes =====
-// ===== Reportes =====
 async function renderReports() {
   const today = new Date();
   const toISODate = (d) => d.toISOString().slice(0, 10);
@@ -1707,8 +1706,11 @@ async function renderReports() {
 
       const uuid = getUuid(r);
       const actions = uuid
-        ? `<button type="button" class="btn btn-sm btn-outline-primary me-1" data-action="pdf" data-uuid="${escapeHtml(uuid)}">PDF</button>`
-        : '<span class="badge text-bg-light border">Sin UUID</span>';
+      ? `<button type="button" class="btn btn-sm btn-outline-primary me-1"
+          data-action="pdf"
+          data-uuid="${escapeHtml(uuid)}"
+          data-id="${escapeHtml(String(r.id ?? ''))}">PDF</button>`
+      : '<span class="badge text-bg-light border">Sin UUID</span>';
 
       return `
         <tr>
@@ -1724,17 +1726,7 @@ async function renderReports() {
     buildPagination(paginationEl, invoiceState, renderInvoiceRows);
   };
 
-  // === Eventos ===
-  document.getElementById('invoiceFetch').addEventListener('click', fetchInvoiceReport);
-  document.getElementById('invoiceReset').addEventListener('click', () => {
-    document.getElementById('invoiceFrom').value = defaultFrom;
-    document.getElementById('invoiceTo').value = defaultTo;
-    document.getElementById('invoiceStatus').value = 'ANY';
-    document.getElementById('invoiceNit').value = '';
-    fetchInvoiceReport();
-  });
-
-  // Exportar CSV (todas las filas del estado actual)
+  // === Exportar CSV (todas las filas del estado actual)
   invoiceCsvBtn.addEventListener('click', () => {
     const rows = invoiceState.rows || [];
     if (!rows.length) return;
@@ -1756,57 +1748,136 @@ async function renderReports() {
     downloadBlob(blob, `facturas_${document.getElementById('invoiceFrom').value}_${document.getElementById('invoiceTo').value}.csv`);
   });
 
-  // === Botón PDF (usa el mismo flujo que facturas manuales) ===
+  // === Helpers para PDF ===
+  function b64ToBlobPdf(b64) {
+    const byteChars = atob(b64);
+    const byteArrays = [];
+    const chunk = 1024 * 64;
+    for (let offset = 0; offset < byteChars.length; offset += chunk) {
+      const slice = byteChars.slice(offset, offset + chunk);
+      const nums = new Array(slice.length);
+      for (let i = 0; i < slice.length; i++) nums[i] = slice.charCodeAt(i);
+      byteArrays.push(new Uint8Array(nums));
+    }
+    return new Blob(byteArrays, { type: 'application/pdf' });
+  }
+
+  function downloadBase64Pdf(filename, b64) {
+    const blob = b64ToBlobPdf(b64);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename || 'documento.pdf';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  // === NUEVOS helpers para priorizar base64 desde BD ===
+  function normalizePdfB64(v) {
+    if (!v) return null;
+    const s = String(v).trim();
+    const i = s.indexOf(';base64,');
+    return i >= 0 ? s.slice(i + ';base64,'.length) : s;
+  }
+
+  function extractPdfFromResponseJson(row) {
+    try {
+      const j = JSON.parse(row?.response_json || '{}');
+      return j?.pdf_base64 || j?.data?.pdf_base64 || j?.result?.pdf_base64 || null;
+    } catch { return null; }
+  }
+
+  function findInvoiceRowByIdOrUuid(id, uuid) {
+    const rows = invoiceState.rows || [];
+    let r = rows.find(x => String(x?.id ?? '') === String(id ?? ''));
+    if (r) return r;
+    r = rows.find(x => (getUuid(x) || '') === (uuid || ''));
+    return r || null;
+  }
+
+  // === Click en PDF (con prioridad a BD/base64) ===
   invoiceRowsEl.addEventListener('click', async (ev) => {
     const btn = ev.target.closest('button[data-action="pdf"]');
     if (!btn) return;
-    const uuid = btn.dataset.uuid;
-    if (!uuid) { showAlert('Este registro no tiene UUID disponible.', 'warning'); return; }
+
+    const uuid = btn.dataset.uuid || '';
+    const id   = btn.dataset.id || ''; // <-- para endpoints por ID
+    if (!uuid && !id) { showAlert('Este registro no tiene UUID ni ID disponibles.', 'warning'); return; }
 
     btn.disabled = true;
     const old = btn.textContent;
     btn.textContent = 'Generando...';
     clearAlert();
 
-    // Helper
-    const base64ToBlob = (base64, mime = 'application/pdf') => {
-      const byteChars = atob(base64);
-      const byteNumbers = new Array(byteChars.length);
-      for (let i = 0; i < byteChars.length; i++) byteNumbers[i] = byteChars.charCodeAt(i);
-      const byteArray = new Uint8Array(byteNumbers);
-      return new Blob([byteArray], { type: mime });
-    };
-    const downloadBlobScoped = (blob, filename) => {
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    };
-
     try {
-      // 1) Igual que en manuales: pedir JSON con pdf_base64
-      const js = await fetchJSON(`${api('fel/document-pdf')}?uuid=${encodeURIComponent(uuid)}`);
-      if (js?.ok && (js.pdf_base64 || js?.data?.pdf_base64)) {
-        const b64 = js.pdf_base64 || js.data.pdf_base64;
-        const blob = base64ToBlob(b64, 'application/pdf');
-        downloadBlobScoped(blob, `Factura-${uuid}.pdf`);
-        showAlert('PDF generado correctamente.', 'success');
-      } else {
-        // 2) Fallback a binario por /api/fel/pdf
+      let b64 = null;
+
+      // (A) 1ra prioridad: LEER DIRECTO DE LA FILA (BD)
+      const row = findInvoiceRowByIdOrUuid(id, uuid);
+      if (row) {
+        b64 = row.fel_pdf_base64 || row.pdf_base64 || extractPdfFromResponseJson(row);
+        b64 = normalizePdfB64(b64);
+      }
+
+      // (B) 2da prioridad: endpoint por ID que devuelve la fila/BD
+      if (!b64 && id) {
+        try {
+          const r3 = await fetchJSON(api('fel/manual-invoice/one') + '?id=' + encodeURIComponent(id));
+          const tmp = r3?.data?.fel_pdf_base64 || r3?.fel_pdf_base64 || r3?.data?.pdf_base64 || r3?.pdf_base64;
+          b64 = normalizePdfB64(tmp);
+          if (!b64) {
+            const tmp2 = extractPdfFromResponseJson(r3?.data || r3);
+            b64 = normalizePdfB64(tmp2);
+          }
+        } catch (_) {}
+      }
+
+      // (C) 3ra prioridad: por UUID (servicio que ya tenías)
+      if (!b64 && uuid) {
+        try {
+          const r1 = await fetchJSON(api('fel/document-pdf') + '?uuid=' + encodeURIComponent(uuid));
+          const tmp = r1?.pdf_base64 || r1?.data?.pdf_base64;
+          b64 = normalizePdfB64(tmp);
+        } catch (_) {}
+      }
+
+      // (D) 4ta prioridad: endpoint específico por ID que arma el PDF
+      if (!b64 && id) {
+        try {
+          const r2 = await fetchJSON(api('fel/manual-invoice/pdf') + '?id=' + encodeURIComponent(id));
+          const tmp = r2?.pdf_base64;
+          b64 = normalizePdfB64(tmp);
+        } catch (_) {}
+      }
+
+      // (E) 5to fallback binario: /api/fel/pdf?uuid=...
+      if (b64) {
+        downloadBase64Pdf(uuid ? `Factura-${uuid}.pdf` : `manual-invoice-${id}.pdf`, b64);
+        showAlert('PDF generado correctamente (desde BD).', 'success');
+        return;
+      }
+
+      if (uuid) {
         const resp = await fetch(`${api('fel/pdf')}?uuid=${encodeURIComponent(uuid)}`);
         if (!resp.ok) {
-          // Intenta leer el JSON de error para mostrar el mensaje real
           let errText = `HTTP ${resp.status}`;
           try { const jerr = await resp.json(); if (jerr?.error) errText = jerr.error; } catch {}
           throw new Error(errText);
         }
         const blob = await resp.blob();
-        downloadBlobScoped(blob, `Factura-${uuid}.pdf`);
-        showAlert('PDF generado correctamente.', 'success');
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `Factura-${uuid}.pdf`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        showAlert('PDF generado correctamente (servicio binario).', 'success');
+      } else {
+        throw new Error('No se pudo obtener el PDF (sin UUID y sin base64 en BD).');
       }
     } catch (e) {
       showAlert(`No se pudo generar el PDF: ${e.message}`, 'danger');
@@ -1816,8 +1887,19 @@ async function renderReports() {
     }
   });
 
+  // === Eventos ===
+  document.getElementById('invoiceFetch').addEventListener('click', fetchInvoiceReport);
+  document.getElementById('invoiceReset').addEventListener('click', () => {
+    document.getElementById('invoiceFrom').value = defaultFrom;
+    document.getElementById('invoiceTo').value = defaultTo;
+    document.getElementById('invoiceStatus').value = 'ANY';
+    document.getElementById('invoiceNit').value = '';
+    fetchInvoiceReport();
+  });
+
   await fetchInvoiceReport();
 }
+
 
   // ===== Ajustes  =====
   async function renderSettings() {

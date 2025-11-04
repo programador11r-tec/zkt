@@ -88,7 +88,6 @@ $router->get('/api/fel/manual-invoice/one', function () use ($api) {
     $api->getManualInvoiceOne(); // ?id=...
 });
 
-
 // (Si aún usas estas) — normalmente SOLO ADMIN
 $router->get('/api/sync/tickets', function () use ($api) {
      Auth::requireAuth();

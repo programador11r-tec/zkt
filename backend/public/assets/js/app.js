@@ -95,8 +95,6 @@ async function fetchJSON(url, opts = {}) {
   return data;
 }
 
-
-
   const settingsState = { cache: null, promise: null };
 
   const escapeHtml = (value) => String(value ?? '')
@@ -816,1090 +814,1125 @@ async function renderDashboard() {
 })();
 
   // ===== Facturación (tabla + Facturar) =====
-  async function renderInvoices() {
-    const settings = await loadSettings();
-    const hourlyRateSetting = settings?.billing?.hourly_rate ?? null;
+async function renderInvoices() {
+  // === Carga de settings + helpers ===
+  const settings = await loadSettings();
 
-    // ——— helpers (mínimos) ———
-    const debounce = (fn, ms = 500) => {
-      let t; return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
-    };
-    
-    async function lookupNit(nitRaw) {
-      // Acepta dígitos o "CF"
-      const nit = (nitRaw ?? '').toString().trim().toUpperCase();
-      const q = nit === 'CF' ? 'CF' : nit.replace(/\D+/g, ''); // solo dígitos si no es CF
-      const url = api(`g4s/lookup-nit?nit=${encodeURIComponent(q)}`);
-
-      return await fetchJSON(url, { method: 'GET' });
-    }
-
-
-    app.innerHTML = `
-      <div class="card shadow-sm">
-        <div class="card-body">
-          <div class="d-flex flex-wrap align-items-start gap-3 mb-3">
-            <div class="flex-grow-1">
-              <h5 class="card-title mb-1">Facturación (BD → G4S)</h5>
-              <p class="text-muted small mb-1">Lista tickets <strong>CLOSED</strong> con pagos (o monto) y <strong>sin factura</strong>.</p>
-              <div class="text-muted small" id="invoiceHourlyRateHint"></div>
-            </div>
-
-            <div class="ms-auto d-flex flex-wrap align-items-center gap-2" style="max-width: 520px;">
-              <input type="search" id="invSearch" class="form-control form-control-sm" placeholder="Buscar ticket..." aria-label="Buscar ticket pendiente" />
-              <div class="btn-group btn-group-sm" role="group" aria-label="Aperturas manuales">
-                <button type="button" class="btn btn-outline-warning" id="btnManualOpen" title="Abrir barrera de SALIDA (Apertura manual)">
-                  <i class="bi bi-box-arrow-right me-1"></i> Salida
-                </button>
-                <button type="button" class="btn btn-outline-primary" id="btnManualOpenIn" title="Abrir barrera de ENTRADA (Apertura manual)">
-                  <i class="bi bi-box-arrow-in-left me-1"></i> Entrada
-                </button>
-              </div>
-            </div>
-          </div>
-
-          <div class="table-responsive">
-            <table class="table table-sm table-hover align-middle mb-0">
-              <thead class="table-light">
-                <tr>
-                  <th>Ticket / Placa</th>
-                  <th>Fecha</th>
-                  <th class="text-end">Total</th>
-                  <th>UUID</th>
-                  <th class="text-center">Acción</th>
-                </tr>
-              </thead>
-              <tbody id="invRows">
-                <tr>
-                  <td colspan="5" class="text-muted text-center py-4">
-                    <div class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></div>
-                    Cargando…
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-
-          <div class="d-flex flex-wrap gap-2 align-items-center justify-content-between mt-3">
-            <small class="text-muted" id="invMeta"></small>
-            <div class="btn-group btn-group-sm" role="group" aria-label="Paginación de facturas">
-              <button type="button" class="btn btn-outline-secondary" id="invPrev"><i class="bi bi-chevron-left"></i> Anterior</button>
-              <button type="button" class="btn btn-outline-secondary" id="invNext">Siguiente <i class="bi bi-chevron-right"></i></button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Modal de confirmación (Bootstrap-styled, controlado por JS) -->
-      <div class="modal fade" id="invoiceConfirmModal" tabindex="-1" aria-hidden="true">
-        <div class="modal-dialog modal-dialog-centered">
-          <form class="modal-content" id="invoiceConfirmForm">
-            <div class="modal-header">
-              <h5 class="modal-title">Confirmar cobro</h5>
-              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar" data-action="cancel"></button>
-            </div>
-            <div class="modal-body">
-              <div class="border rounded p-2 mb-3 bg-light">
-                <div class="d-flex justify-content-between small mb-1">
-                  <span class="text-muted">Ticket</span><span id="mSumTicket">—</span>
-                </div>
-                <div class="d-flex justify-content-between small mb-1">
-                  <span class="text-muted">Fecha</span><span id="mSumFecha">—</span>
-                </div>
-                <div class="d-flex justify-content-between small mb-1">
-                  <span class="text-muted">Horas registradas</span><span id="mSumHoras">—</span>
-                </div>
-                <div class="d-flex justify-content-between small">
-                  <span class="text-muted">Total en BD</span><span id="mSumTotalDb">—</span>
-                </div>
-                <div class="d-flex justify-content-between small mt-1" id="mSumTotalHourlyRow" hidden>
-                  <span class="text-muted">Total por hora</span><span id="mSumTotalHourly">—</span>
-                </div>
-              </div>
-
-              <div class="form-check">
-                <input class="form-check-input" type="radio" name="billingMode" id="mModeHourly" value="hourly">
-                <label class="form-check-label" for="mModeHourly">
-                  Cobro por hora <strong class="ms-1" id="mHourlyLabel"></strong>
-                </label>
-                <div class="form-text" id="mHourlyHelp">Define una tarifa por hora en Ajustes para habilitar esta opción.</div>
-              </div>
-
-              <div class="form-check mt-2">
-                <input class="form-check-input" type="radio" name="billingMode" id="mModeGrace" value="grace">
-                <label class="form-check-label" for="mModeGrace">
-                  Ticket de gracia <strong class="ms-1">Q0.00</strong>
-                </label>
-                <div class="form-text">No se cobra, no se envía a FEL; se registra en BD y se notifica a PayNotify.</div>
-              </div>
-
-              <div class="form-check mt-2">
-                <input class="form-check-input" type="radio" name="billingMode" id="mModeCustom" value="custom">
-                <label class="form-check-label" for="mModeCustom">
-                  Cobro personalizado
-                </label>
-                <div class="form-text">Indica el total que deseas facturar manualmente.</div>
-              </div>
-
-              <div class="input-group input-group-sm mt-2">
-                <span class="input-group-text">Q</span>
-                <input type="number" step="0.01" min="0" class="form-control" id="mCustomInput" placeholder="0.00" disabled>
-              </div>
-
-              <div class="mt-3">
-                <label for="mNit" class="form-label mb-1">NIT del cliente</label>
-                <input
-                  type="text"
-                  id="mNit"
-                  class="form-control"
-                  placeholder='Escribe el NIT o "CF"'
-                  value="CF"
-                  autocomplete="off"
-                  inputmode="numeric"
-                  aria-describedby="mNitHelp mNitStatus"
-                >
-                <div class="form-text" id="mNitHelp">Escribe el NIT o “CF” (consumidor final). Si ingresas NIT, se consultará en SAT (G4S).</div>
-                <div class="small mt-1 text-muted" id="mNitStatus" aria-live="polite"></div>
-              </div>
-
-              <div class="text-danger small mt-2" id="mError" hidden></div>
-            </div>
-            <div class="modal-footer">
-              <button type="button" class="btn btn-outline-secondary btn-sm" data-action="cancel">Cancelar</button>
-              <button type="submit" class="btn btn-primary btn-sm">Confirmar</button>
-            </div>
-          </form>
-        </div>
-      </div>
-    `;
-
-    // --------- refs
-    const tbody = document.getElementById('invRows');
-    const searchInput = document.getElementById('invSearch');
-    const meta = document.getElementById('invMeta');
-    const prevBtn = document.getElementById('invPrev');
-    const nextBtn = document.getElementById('invNext');
-    const hourlyRateHint = document.getElementById('invoiceHourlyRateHint');
-
-    const state = { search: '', page: 1 };
-    const pageSize = 20;
-    let allRows = [];
-
-    // --------- Botones apertura manual (Bootstrap buttons, mismo backend)
-    const manualOpenBtn   = document.getElementById('btnManualOpen');    // Salida
-    const manualOpenInBtn = document.getElementById('btnManualOpenIn'); // Entrada
-    const CHANNEL_SALIDA  = '40288048981adc4601981b7cb2660b05';
-    const CHANNEL_ENTRADA = '40288048981adc4601981b7c2d010aff';
-
-    function wireManualOpen(buttonEl, { title, channelId }) {
-      if (!buttonEl || buttonEl.dataset.bound === '1') return;
-      buttonEl.dataset.bound = '1';
-      let busy = false;
-
-      buttonEl.addEventListener('click', async () => {
-        if (busy) return;
-        const proceed = await (Dialog?.confirm?.(
-          `¿Deseas realizar una APERTURA MANUAL de la barrera (${title})?`,
-          'Confirmar apertura'
-        ) ?? Promise.resolve(window.confirm(`¿Aperturar barrera manual (${title})?`)));
-        if (!proceed) return;
-
-        let reason =
-          (await (Dialog?.prompt?.({
-            title: `Motivo de apertura (${title})`,
-            label: 'Describe brevemente el motivo (mín. 5 caracteres):',
-            placeholder: 'Ej. Emergencia, fallo del lector, visita autorizada, etc.',
-            confirmText: 'Continuar',
-            cancelText: 'Cancelar'
-          }) ?? Promise.resolve(window.prompt(`Motivo de apertura (${title}):`)))) || '';
-
-        reason = (reason || '').trim();
-        if (reason.length < 5) { (Dialog?.ok?.('El motivo debe tener al menos 5 caracteres.', 'Motivo inválido')) || alert('Motivo muy corto.'); return; }
-        if (reason.length > 255) { (Dialog?.ok?.('El motivo no debe superar 255 caracteres.', 'Motivo demasiado largo')) || alert('Motivo muy largo.'); return; }
-
-        busy = true;
-        buttonEl.disabled = true;
-        const original = buttonEl.innerHTML;
-        buttonEl.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span> Aperturando…`;
-        const m = Dialog?.loading?.({ title: `Apertura manual (${title})`, message: 'Contactando servicio…' });
-
-        try {
-          const res = await fetchJSON(api('gate/manual-open'), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ reason, channel_id: channelId })
-          });
-
-          if (!res.ok) {
-            if (res.debug) console.warn('gate/manual-open debug:', res.debug);
-            throw new Error(res.message || (res.field === 'reason' ? 'Motivo inválido.' : 'No se pudo aperturar'));
-          }
-
-          (Dialog?.ok?.(
-            [
-              `Apertura manual (${title}) ejecutada.`,
-              res.opened_at ? `\nHora: ${res.opened_at}` : '',
-              res.code !== undefined ? `\nCódigo: ${res.code}` : '',
-              res.message ? `\nMensaje: ${res.message}` : '',
-              `\nMotivo registrado: ${reason}`
-            ].join(''),
-            `Apertura manual (${title})`
-          )) || alert(`Apertura manual (${title}) ejecutada.`);
-        } catch (e) {
-          Dialog?.err?.(e, `Error en apertura manual (${title})`) || alert(`Error: ${e.message}`);
-        } finally {
-          if (m && typeof m.close === 'function') m.close();
-          buttonEl.disabled = false;
-          buttonEl.innerHTML = original;
-          busy = false;
-        }
-      });
-    }
-
-    wireManualOpen(manualOpenBtn,   { title: 'Salida',  channelId: CHANNEL_SALIDA });
-    wireManualOpen(manualOpenInBtn, { title: 'Entrada', channelId: CHANNEL_ENTRADA });
-
-    // --------- util
-    const formatCurrency = (value) => {
-      if (value === null || value === undefined || value === '') return '—';
-      const num = Number(value);
-      if (!Number.isFinite(num)) return '—';
-      try {
-        return num.toLocaleString('es-GT', { style: 'currency', currency: 'GTQ' });
-      } catch {
-        return `Q${num.toFixed(2)}`;
-      }
-    };
-
-    if (hourlyRateHint) {
-      const hourlyNumber = Number(hourlyRateSetting);
-      hourlyRateHint.textContent =
-        Number.isFinite(hourlyNumber) && hourlyNumber > 0
-          ? `Tarifa por hora ${formatCurrency(hourlyNumber)}.`
-          : 'Configura una tarifa por hora en Ajustes para habilitar los cálculos automáticos.';
-    }
-
-    function filterRows() {
-      if (!state.search) return allRows;
-      const term = state.search.toLowerCase();
-      return allRows.filter((row) =>
-        Object.values(row).some((value) => String(value ?? '').toLowerCase().includes(term))
-      );
-    }
-
-    const buildPayload = (row) => ({
-      ticket_no: row.ticket_no,
-      plate: row.plate,
-      receptor_nit: row.receptor || 'CF',
-      serie: row.serie || 'A',
-      numero: row.numero || null,
-      fecha: row.fecha ?? null,
-      total: row.total ?? null,
-      hours: row.hours ?? row.duration_minutes ?? null,
-      duration_minutes: row.duration_minutes ?? null,
-      entry_at: row.entry_at ?? null,
-      exit_at: row.exit_at ?? null,
-    });
-
-    // --------- Modal de confirmación (con validación NIT y búsqueda automática)
-    function openInvoiceConfirmation(ticket, billingConfig = {}) {
-      return new Promise((resolve) => {
-        // cálculos
-        const hoursValue   = typeof ticket.hours === 'number' ? ticket.hours : Number(ticket.hours);
-        const hours        = Number.isFinite(hoursValue) && hoursValue > 0 ? Number(hoursValue.toFixed(2)) : null;
-        const minutesValue = typeof ticket.duration_minutes === 'number' ? ticket.duration_minutes : Number(ticket.duration_minutes);
-        const minutes      = Number.isFinite(minutesValue) && minutesValue > 0 ? Math.round(minutesValue) : null;
-
-        const hourlyRateNumber = Number(billingConfig?.hourly_rate ?? null);
-        const hourlyRate = Number.isFinite(hourlyRateNumber) && hourlyRateNumber > 0 ? hourlyRateNumber : null;
-
-        const canHourly   = hourlyRate !== null && hours !== null;
-        const hourlyTotal = canHourly ? Math.round(hours * hourlyRate * 100) / 100 : null;
-
-        const totalFromDb = ticket.total != null && ticket.total !== '' ? Number(ticket.total) : null;
-        const normalizedDbTotal = Number.isFinite(totalFromDb) ? Number(totalFromDb.toFixed(2)) : null;
-
-        const customDefault = hourlyTotal ?? normalizedDbTotal;
-        const customValue = customDefault != null ? customDefault.toFixed(2) : '';
-        const dateCandidate = ticket.exit_at || ticket.entry_at || ticket.fecha || null;
-
-        // refs modal
-        const modalEl  = document.getElementById('invoiceConfirmModal');
-        const form     = document.getElementById('invoiceConfirmForm');
-        const mErr     = document.getElementById('mError');
-        const mCustom  = document.getElementById('mCustomInput');
-        const mHourly  = document.getElementById('mModeHourly');
-        const mGrace   = document.getElementById('mModeGrace');
-        const mCustomR = document.getElementById('mModeCustom');
-        const mNit     = document.getElementById('mNit');
-        const mNitHelp = document.getElementById('mNitHelp');
-        const mNitStatus = document.getElementById('mNitStatus');
-        const mHourlyLabel = document.getElementById('mHourlyLabel');
-        const mHourlyHelp  = document.getElementById('mHourlyHelp');
-
-        // resumen
-        document.getElementById('mSumTicket').textContent   = String(ticket.ticket_no ?? '');
-        document.getElementById('mSumFecha').textContent    = dateCandidate ? `${formatDateTime(dateCandidate)} (${formatRelativeTime(dateCandidate)})` : '—';
-        document.getElementById('mSumHoras').textContent    = hours != null ? `${hours.toFixed(2)} h${minutes && minutes % 60 ? ` (${minutes} min)` : ''}` : '—';
-        document.getElementById('mSumTotalDb').textContent  = normalizedDbTotal != null ? formatCurrency(normalizedDbTotal) : '—';
-
-        const totalHourlyRow = document.getElementById('mSumTotalHourlyRow');
-        if (hourlyTotal != null) {
-          totalHourlyRow.hidden = false;
-          document.getElementById('mSumTotalHourly').textContent = formatCurrency(hourlyTotal);
-          mHourlyLabel.textContent = formatCurrency(hourlyTotal);
-          mHourlyHelp.textContent  = `Tarifa ${hourlyRate != null ? formatCurrency(hourlyRate) : '—'} × ${hours != null ? `${hours.toFixed(2)} h` : '—'}.`;
-        } else {
-          totalHourlyRow.hidden = true;
-          mHourlyLabel.textContent = '';
-          mHourlyHelp.textContent  = 'Define una tarifa por hora en Ajustes para habilitar esta opción.';
-        }
-
-        // estado inicial radios
-        mHourly.disabled = !canHourly;
-        if (canHourly) { mHourly.checked = true; mCustom.disabled = true; }
-        else           { mGrace.checked = true; mCustom.disabled = true; }
-        mCustom.value = customValue;
-        mNit.value = 'CF';
-        mErr.hidden = true; mErr.textContent = '';
-        mNitStatus.className = 'small mt-1 text-muted'; mNitStatus.textContent = 'Consumidor final (CF).';
-
-        // ——— NIT: sanitizar + lookup automático ———
-        const normalizeNit = (v) => {
-          v = (v || '').toUpperCase().trim();
-          if (v === 'CF' || v === 'C') return v.length === 1 ? 'C' : 'CF';
-          return v.replace(/\D+/g, ''); // solo dígitos
-        };
-        const setNitStatus = (text, cls = 'text-muted') => {
-          mNitStatus.className = `small mt-1 ${cls}`;
-          mNitStatus.textContent = text || '';
-        };
-
-        const doLookup = debounce(async () => {
-          const v = mNit.value; // <-- sin toUpper aquí; normaliza lookupNit()
-          if (!v || v.toUpperCase() === 'CF') {
-            setNitStatus('Consumidor final (CF).', 'text-muted');
-            return;
-          }
-          if (!/\d{6,}/.test(v.replace(/\D+/g,''))) {
-            setNitStatus('Ingresa al menos 6 dígitos para consultar.', 'text-muted');
-            return;
-          }
-          try {
-            setNitStatus('Buscando en SAT…', 'text-info');
-            const res = await lookupNit(v);
-            if (res?.ok) {
-              const nombre = (res.nombre || res.name || '').trim();
-              const dir = (res.direccion || res.address || '').trim();
-              setNitStatus(`Encontrado: ${nombre || '(sin nombre)'}${dir ? ' — ' + dir : ''}`, 'text-success');
-            } else {
-              setNitStatus(res?.error ? `No encontrado: ${res.error}` : 'NIT no encontrado.', 'text-warning');
-            }
-          } catch (err) {
-            setNitStatus(`Error al consultar: ${err.message || err}`, 'text-danger');
-          }
-        }, 500);
-
-        mNit.addEventListener('input', (e) => {
-          const cur = e.target.value;
-          const norm = normalizeNit(cur);
-          if (norm !== cur) {
-            e.target.value = norm;
-            e.target.setSelectionRange(norm.length, norm.length);
-          }
-          doLookup();
-        });
-        mNit.addEventListener('keydown', (e) => {
-          const k = e.key;
-          const ctrl = e.ctrlKey || e.metaKey;
-          if (ctrl || ['Backspace','Delete','ArrowLeft','ArrowRight','Tab','Home','End'].includes(k)) return;
-          if (/^[a-zA-Z]$/.test(k)) { if (!['c','f','C','F'].includes(k)) e.preventDefault(); return; }
-          if (/^\d$/.test(k)) return;
-          e.preventDefault();
-        });
-
-        // activar/desactivar input custom
-        function updateCustomState() {
-          const isCustom = document.getElementById('mModeCustom').checked;
-          mCustom.disabled = !isCustom;
-          if (isCustom && !mCustom.value) mCustom.value = customValue;
-          mErr.hidden = true; mErr.textContent = '';
-        }
-        mHourly.addEventListener('change', updateCustomState);
-        mGrace.addEventListener('change', updateCustomState);
-        mCustomR.addEventListener('change', updateCustomState);
-
-        // cerrar
-        function closeModal(retVal = null) {
-          modalEl.classList.remove('show');
-          modalEl.style.display = 'none';
-          const oldBackdrop = document.querySelector('.modal-backdrop');
-          if (oldBackdrop) oldBackdrop.remove();
-          document.body.classList.remove('modal-open');
-          document.body.style.removeProperty('padding-right');
-          resolve(retVal);
-        }
-        form.querySelectorAll('[data-action="cancel"]').forEach((b) => {
-          b.addEventListener('click', () => closeModal(null), { once: true });
-        });
-        modalEl.addEventListener('click', (ev) => { if (ev.target === modalEl) closeModal(null); });
-        function onEsc(ev) { if (ev.key === 'Escape') { ev.preventDefault(); closeModal(null); document.removeEventListener('keydown', onEsc); } }
-        document.addEventListener('keydown', onEsc, { once: true });
-
-        // submit
-        form.onsubmit = (e) => {
-          e.preventDefault();
-          mErr.hidden = true; mErr.textContent = '';
-          const selected = form.querySelector('input[name="billingMode"]:checked')?.value;
-          if (!selected) { mErr.textContent = 'Selecciona el tipo de cobro.'; mErr.hidden = false; return; }
-
-          const rawNit = mNit.value.trim().toUpperCase();
-          const receptorNit = (rawNit === 'CF' || rawNit === '') ? 'CF' : rawNit.replace(/\D+/g, '');
-          if (receptorNit !== 'CF' && !/^\d{6,}$/.test(receptorNit)) {
-            mErr.textContent = 'NIT inválido. Debe ser CF o solo dígitos (mín. 6).';
-            mErr.hidden = false; return;
-          }
-
-          if (selected === 'hourly') {
-            if (!canHourly || hourlyTotal == null) { mErr.textContent = 'Configura una tarifa por hora válida en Ajustes para usar esta opción.'; mErr.hidden = false; return; }
-            closeModal({ mode: 'hourly', total: hourlyTotal, label: `Cobro por hora ${formatCurrency(hourlyTotal)}`, receptor_nit: receptorNit });
-            return;
-          }
-          if (selected === 'grace') {
-            closeModal({ mode: 'grace', total: 0, label: 'Ticket de gracia (Q0.00, sin FEL)', receptor_nit: receptorNit });
-            return;
-          }
-          const customVal = parseFloat(mCustom.value);
-          if (!Number.isFinite(customVal) || customVal <= 0) { mErr.textContent = 'Ingresa un total personalizado mayor a cero.'; mErr.hidden = false; return; }
-          const normalized = Math.round(customVal * 100) / 100;
-          closeModal({ mode: 'custom', total: normalized, label: `Cobro personalizado ${formatCurrency(normalized)}`, receptor_nit: receptorNit });
-        };
-
-        // mostrar modal con backdrop estilo Bootstrap
-        modalEl.style.display = 'block';
-        setTimeout(() => modalEl.classList.add('show'), 10);
-        const backdrop = document.createElement('div');
-        backdrop.className = 'modal-backdrop fade show';
-        document.body.appendChild(backdrop);
-        document.body.classList.add('modal-open');
-      });
-    }
-
-    // --------- handlers de la tabla (igual que tu versión)
-    function attachInvoiceHandlers() {
-      tbody.querySelectorAll('[data-action="invoice"]').forEach((btn) => {
-        btn.addEventListener('click', async () => {
-          const payload = JSON.parse(decodeURIComponent(btn.getAttribute('data-payload')));
-          btn.disabled = true;
-          const originalHTML = btn.innerHTML;
-          btn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span> Confirmando…`;
-          try {
-            const settingsSnapshot = await loadSettings();
-            const confirmation = await openInvoiceConfirmation(payload, settingsSnapshot?.billing ?? {});
-            if (!confirmation) { btn.disabled = false; btn.innerHTML = originalHTML; return; }
-
-            btn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span> Enviando…`;
-
-            const receptorNit = confirmation.receptor_nit || payload.receptor_nit || 'CF';
-            const requestPayload = {
-              ticket_no: payload.ticket_no,
-              plate: payload.plate,
-              receptor_nit: receptorNit,
-              serie: payload.serie || 'A',
-              numero: payload.numero || null,
-              mode: confirmation.mode,
-              total: Number(confirmation.total) || 0,
-            };
-            if (confirmation.mode === 'custom') requestPayload.custom_total = Number(confirmation.total);
-
-            const js = await fetchJSON(api('fel/invoice'), {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(requestPayload),
-            });
-
-            if (!js.ok) throw new Error(js.error || 'No se pudo certificar.');
-
-            const uuidTxt = js.uuid ? `UUID ${js.uuid}` : 'Sin UUID (revise respuesta)';
-            const reason =
-              Number(js.billing_amount) <= 0
-                ? 'Dato de billing = 0.'
-                : (js.pay_notify_ack === false
-                    ? (js.pay_notify_error ? `PayNotify sin confirmación (${js.pay_notify_error}).` : 'PayNotify sin confirmación.')
-                    : null);
-
-            if (js.manual_open) {
-              (Dialog?.ok?.(
-                [
-                  'Pago registrado (apertura manual requerida).',
-                  uuidTxt,
-                  reason ? `Motivo: ${reason}` : null,
-                  '',
-                  'La barrera debe aperturarse manualmente.'
-                ].filter(Boolean).join('\n'),
-                'Apertura manual'
-              )) || alert(`Pago registrado. ${uuidTxt}`);
-            } else {
-              (Dialog?.ok?.(
-                [
-                  `Factura enviada (${confirmation.label}).`,
-                  uuidTxt,
-                  js.pay_notify_ack ? 'Notificación a ZKBio confirmada.' : null
-                ].filter(Boolean).join(' '),
-                'FEL enviado'
-              )) || alert(`Factura enviada. ${uuidTxt}`);
-            }
-
-            await loadList();
-          } catch (e) {
-            Dialog?.err?.(e, 'Error al facturar') || alert(`Error: ${e.message}`);
-          } finally {
-            btn.disabled = false;
-            btn.innerHTML = originalHTML;
-          }
-        });
-      });
-    }
-
-    function renderPage() {
-      const filtered = filterRows();
-      const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
-      if (state.page > totalPages) state.page = totalPages;
-
-      const start = (state.page - 1) * pageSize;
-      const pageRows = filtered.slice(start, start + pageSize);
-
-      if (!pageRows.length) {
-        const message = allRows.length && !filtered.length
-          ? 'No se encontraron resultados'
-          : 'No hay pendientes por facturar.';
-        tbody.innerHTML = `
-          <tr>
-            <td colspan="5" class="text-muted text-center py-4">${escapeHtml(message)}</td>
-          </tr>`;
-      } else {
-        tbody.innerHTML = pageRows.map((d) => {
-          const totalFmt = formatCurrency(d.total);
-          const payload = encodeURIComponent(JSON.stringify(buildPayload(d)));
-          const disabled = d.uuid ? 'disabled' : '';
-          const ticketText = d.ticket_no ? `${d.ticket_no}${d.plate ? ' · ' + d.plate : ''}` : (d.plate ?? '(sin placa)');
-          return `
-            <tr>
-              <td>${escapeHtml(ticketText)}</td>
-              <td>${escapeHtml(d.fecha ?? '')}</td>
-              <td class="text-end">${totalFmt}</td>
-              <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(d.uuid ?? '')}</td>
-              <td class="text-center">
-                <button class="btn btn-sm btn-outline-success" data-action="invoice" data-payload="${payload}" ${disabled}>
-                  <i class="bi bi-receipt me-1"></i> Facturar
-                </button>
-              </td>
-            </tr>`;
-        }).join('');
-        attachInvoiceHandlers();
-      }
-
-      if (filtered.length) {
-        meta.textContent = `Mostrando ${start + 1} - ${Math.min(start + pageRows.length, filtered.length)} de ${filtered.length} tickets`;
-      } else if (allRows.length) {
-        meta.textContent = 'No se encontraron resultados para la búsqueda actual';
-      } else {
-        meta.textContent = 'Sin tickets pendientes por facturar';
-      }
-
-      prevBtn.disabled = state.page <= 1 || !filtered.length;
-      nextBtn.disabled = state.page >= totalPages || !filtered.length;
-    }
-
-    // --------- eventos de búsqueda y paginación
-    searchInput.addEventListener('input', (event) => {
-      state.search = event.target.value.trim();
-      state.page = 1;
-      renderPage();
-    });
-    prevBtn.addEventListener('click', () => { if (state.page > 1) { state.page -= 1; renderPage(); } });
-    nextBtn.addEventListener('click', () => {
-      const totalPages = Math.max(1, Math.ceil(filterRows().length / pageSize));
-      if (state.page < totalPages) { state.page += 1; renderPage(); }
-    });
-
-    // --------- carga inicial
-    async function loadList() {
-      tbody.innerHTML = `
-        <tr>
-          <td colspan="5" class="text-muted text-center py-4">
-            <div class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></div>
-            Consultando BD…
-          </td>
-        </tr>`;
-      meta.textContent = '';
-      try {
-        const js = await fetchJSON(api('facturacion/list'));
-        if (!js.ok && js.error) throw new Error(js.error);
-        allRows = js.rows || [];
-        state.page = 1;
-        renderPage();
-      } catch (e) {
-        tbody.innerHTML = `<tr><td colspan="5" class="text-danger text-center">Error: ${escapeHtml(e.message)}</td></tr>`;
-        meta.textContent = '';
-      }
-    }
-    await loadList();
+  // Intenta leer del overview (/api/settings) primero y luego de loadSettings()
+  function parseMoneyLike(x){
+    if (x == null) return null;
+    if (typeof x === 'number') return Number.isFinite(x) ? x : null;
+    const s = String(x).trim(); if (!s) return null;
+    const cleaned = s.replace(/[^\d.,-]/g,'').replace(/,/g,'.');
+    const n = Number(cleaned);
+    return Number.isFinite(n) ? n : null;
   }
 
-  // ===== Reportes =====
-async function renderReports() {
-  const today = new Date();
-  const toISODate = (d) => d.toISOString().slice(0, 10);
-  const defaultTo = toISODate(today);
-  const defaultFrom = toISODate(new Date(today.getTime() - 6 * 24 * 60 * 60 * 1000));
-
-  const invoiceState = {
-    rows: [],
-    summary: null,
-    generatedAt: null,
-    filters: { from: defaultFrom, to: defaultTo, status: 'ANY', nit: '', uuid: '' },
-    page: 1,
-    perPage: 10,
-  };
-
-  // === Helpers ===
-  const escapeHtml = (v) => String(v ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-
-  const formatDateValue = (v) => !v ? '—' : new Date(v).toLocaleString('es-GT');
-  const formatCurrency = (n) => `Q ${Number(n ?? 0).toFixed(2)}`;
-  const formatInvoiceStatus = (s) =>
-    s === 'OK' ? 'Certificada'
-      : s === 'PENDING' ? 'Pendiente'
-      : s === 'ERROR' ? 'Error'
-      : s || '—';
-
-  const downloadBlob = (blob, filename) => {
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-  };
-
-  const paginate = (rows, page, perPage) => {
-    const totalPages = Math.ceil(rows.length / perPage) || 1;
-    const p = Math.min(Math.max(page, 1), totalPages);
-    const start = (p - 1) * perPage;
-    const end = start + perPage;
-    return { slice: rows.slice(start, end), totalPages, currentPage: p };
-  };
-
-  const buildPagination = (container, state, renderFn) => {
-    const { totalPages, currentPage } = paginate(state.rows, state.page, state.perPage);
-    if (totalPages <= 1) { container.innerHTML = ''; return; }
-    let html = `<nav><ul class="pagination pagination-sm justify-content-center mb-0">`;
-    for (let i = 1; i <= totalPages; i++) {
-      html += `<li class="page-item ${i === currentPage ? 'active' : ''}">
-        <button class="page-link" data-page="${i}">${i}</button></li>`;
-    }
-    html += `</ul></nav>`;
-    container.innerHTML = html;
-    container.querySelectorAll('button[data-page]').forEach((b) => {
-      b.addEventListener('click', () => { state.page = parseInt(b.dataset.page); renderFn(); });
-    });
-  };
-
-  // Extrae el UUID desde la fila: directo o dentro de response_json
-  const getUuid = (r) => {
-    if (r?.uuid) return r.uuid;
+  async function getHourlyRateFromOverview(){
     try {
-      const j = JSON.parse(r?.response_json || '{}');
-      return j?.uuid || j?.data?.uuid || null;
-    } catch { return null; }
+      const res = await fetchJSON(api('settings')); // { ok:true, settings: { billing: { hourly_rate: <num|null> } } }
+      const raw = res?.settings?.billing?.hourly_rate ?? null;
+      const v = parseMoneyLike(raw);
+      return (v && v > 0) ? v : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // Resuelve la tarifa por hora: overview -> loadSettings()
+  const hourlyFromOverview = await getHourlyRateFromOverview();
+  const hourlyFromLoad     = parseMoneyLike(settings?.billing?.hourly_rate ?? null);
+  const hourlyRateResolved = hourlyFromOverview ?? hourlyFromLoad; // puede ser null si no está configurado
+
+  // ——— helpers (mínimos) ———
+  const debounce = (fn, ms = 500) => { let t; return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); }; };
+
+  async function lookupNit(nitRaw) {
+    // Acepta dígitos o "CF"
+    const nit = (nitRaw ?? '').toString().trim().toUpperCase();
+    const q = nit === 'CF' ? 'CF' : nit.replace(/\D+/g, ''); // solo dígitos si no es CF
+    const url = api(`g4s/lookup-nit?nit=${encodeURIComponent(q)}`);
+    return await fetchJSON(url, { method: 'GET' });
+  }
+
+  const escapeHtml = (v) => String(v ?? '')
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+
+  const formatCurrency = (value) => {
+    if (value === null || value === undefined || value === '') return '—';
+    const num = Number(value);
+    if (!Number.isFinite(num)) return '—';
+    try { return num.toLocaleString('es-GT', { style: 'currency', currency: 'GTQ' }); }
+    catch { return `Q${num.toFixed(2)}`; }
   };
 
-  // === UI principal ===
+  const formatDateTime = (isoLike) => {
+    try { return new Date(isoLike).toLocaleString('es-GT'); } catch { return String(isoLike ?? ''); }
+  };
+  const formatRelativeTime = (isoLike) => {
+    try {
+      const d = new Date(isoLike).getTime();
+      const now = Date.now();
+      const diff = Math.round((now - d) / 1000);
+      if (!Number.isFinite(diff)) return '';
+      if (diff < 60) return `hace ${diff}s`;
+      const m = Math.round(diff/60); if (m < 60) return `hace ${m}m`;
+      const h = Math.round(m/60); if (h < 24) return `hace ${h}h`;
+      const dd = Math.round(h/24); return `hace ${dd}d`;
+    } catch { return ''; }
+  };
+
   app.innerHTML = `
-  <div class="d-flex flex-column gap-4">
-    <section class="card shadow-sm">
+    <div class="card shadow-sm">
       <div class="card-body">
-        <div class="d-flex flex-wrap justify-content-between align-items-start gap-2">
-          <div>
-            <h5 class="card-title mb-1">Reporte de facturas emitidas</h5>
-            <p class="text-muted small mb-0">Descarga documentos certificados y consulta su estado.</p>
+        <div class="d-flex flex-wrap align-items-start gap-3 mb-3">
+          <div class="flex-grow-1">
+            <h5 class="card-title mb-1">Facturación (BD → G4S)</h5>
+            <p class="text-muted small mb-1">Lista tickets <strong>CLOSED</strong> con pagos (o monto) y <strong>sin factura</strong>.</p>
+            <div class="text-muted small" id="invoiceHourlyRateHint"></div>
           </div>
-          <span class="badge text-bg-success">Facturación</span>
-        </div>
 
-        <form id="invoiceFilters" class="row g-3 mt-3">
-          <div class="col-md-3">
-            <label class="form-label small" for="invoiceFrom">Desde</label>
-            <input type="date" id="invoiceFrom" class="form-control form-control-sm" value="${escapeHtml(defaultFrom)}">
-          </div>
-          <div class="col-md-3">
-            <label class="form-label small" for="invoiceTo">Hasta</label>
-            <input type="date" id="invoiceTo" class="form-control form-control-sm" value="${escapeHtml(defaultTo)}">
-          </div>
-          <div class="col-md-3">
-            <label class="form-label small" for="invoiceStatus">Estado</label>
-            <select id="invoiceStatus" class="form-select form-select-sm">
-              <option value="ANY">Todos</option>
-              <option value="OK">OK</option>
-              <option value="PENDING">Pendiente</option>
-              <option value="ERROR">Error</option>
-            </select>
-          </div>
-          <div class="col-md-3">
-            <label class="form-label small" for="invoiceNit">NIT</label>
-            <input type="text" id="invoiceNit" class="form-control form-control-sm" placeholder="CF o NIT">
-          </div>
-        </form>
-
-        <div class="d-flex flex-wrap gap-2 align-items-center mt-3">
-          <div class="btn-group btn-group-sm" role="group">
-            <button type="button" class="btn btn-primary" id="invoiceFetch">Buscar</button>
-            <button type="button" class="btn btn-outline-secondary" id="invoiceReset">Limpiar</button>
-          </div>
-          <div class="ms-auto d-flex gap-2">
-            <button type="button" class="btn btn-outline-primary btn-sm" id="invoiceCsv" disabled>Exportar CSV</button>
+          <div class="ms-auto d-flex flex-wrap align-items-center gap-2" style="max-width: 520px;">
+            <input type="search" id="invSearch" class="form-control form-control-sm" placeholder="Buscar ticket..." aria-label="Buscar ticket pendiente" />
+            <div class="btn-group btn-group-sm" role="group" aria-label="Aperturas manuales">
+              <button type="button" class="btn btn-outline-warning" id="btnManualOpen" title="Abrir barrera de SALIDA (Apertura manual)">
+                <i class="bi bi-box-arrow-right me-1"></i> Salida
+              </button>
+              <button type="button" class="btn btn-outline-primary" id="btnManualOpenIn" title="Abrir barrera de ENTRADA (Apertura manual)">
+                <i class="bi bi-box-arrow-in-left me-1"></i> Entrada
+              </button>
+            </div>
           </div>
         </div>
 
-        <div id="invoiceAlert" class="mt-3"></div>
-
-        <div id="invoiceSummary" class="row g-3 mt-2"></div>
-        <div class="table-responsive mt-3">
-          <table class="table table-sm table-bordered align-middle mb-0">
+        <div class="table-responsive">
+          <table class="table table-sm table-hover align-middle mb-0">
             <thead class="table-light">
               <tr>
-                <th>Ticket</th>
+                <th>Ticket / Placa</th>
                 <th>Fecha</th>
                 <th class="text-end">Total</th>
-                <th>Receptor</th>
                 <th>UUID</th>
-                <th>Estado</th>
-                <th class="text-center">Acciones</th>
+                <th class="text-center">Acción</th>
               </tr>
             </thead>
-            <tbody id="invoiceRows">
-              <tr><td colspan="7" class="text-center text-muted">Consulta para ver resultados.</td></tr>
+            <tbody id="invRows">
+              <tr>
+                <td colspan="5" class="text-muted text-center py-4">
+                  <div class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></div>
+                  Cargando…
+                </td>
+              </tr>
             </tbody>
           </table>
         </div>
-        <div id="invoicePagination" class="mt-2"></div>
-        <div id="invoiceMessage" class="small text-muted mt-2"></div>
+
+        <div class="d-flex flex-wrap gap-2 align-items-center justify-content-between mt-3">
+          <small class="text-muted" id="invMeta"></small>
+          <div class="btn-group btn-group-sm" role="group" aria-label="Paginación de facturas">
+            <button type="button" class="btn btn-outline-secondary" id="invPrev"><i class="bi bi-chevron-left"></i> Anterior</button>
+            <button type="button" class="btn btn-outline-secondary" id="invNext">Siguiente <i class="bi bi-chevron-right"></i></button>
+          </div>
+        </div>
       </div>
-    </section>
-  </div>
+    </div>
+
+    <!-- Modal de confirmación -->
+    <div class="modal fade" id="invoiceConfirmModal" tabindex="-1" aria-hidden="true">
+      <div class="modal-dialog modal-dialog-centered">
+        <form class="modal-content" id="invoiceConfirmForm">
+          <div class="modal-header">
+            <h5 class="modal-title">Confirmar cobro</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar" data-action="cancel"></button>
+          </div>
+          <div class="modal-body">
+            <div class="border rounded p-2 mb-3 bg-light">
+              <div class="d-flex justify-content-between small mb-1"><span class="text-muted">Ticket</span><span id="mSumTicket">—</span></div>
+              <div class="d-flex justify-content-between small mb-1"><span class="text-muted">Fecha</span><span id="mSumFecha">—</span></div>
+              <div class="d-flex justify-content-between small mb-1"><span class="text-muted">Horas registradas</span><span id="mSumHoras">—</span></div>
+              <div class="d-flex justify-content-between small"><span class="text-muted">Total en BD</span><span id="mSumTotalDb">—</span></div>
+              <div class="d-flex justify-content-between small mt-1" id="mSumTotalHourlyRow" hidden>
+                <span class="text-muted">Total por hora</span><span id="mSumTotalHourly">—</span>
+              </div>
+            </div>
+
+            <div class="form-check">
+              <input class="form-check-input" type="radio" name="billingMode" id="mModeHourly" value="hourly">
+              <label class="form-check-label" for="mModeHourly">
+                Cobro por hora <strong class="ms-1" id="mHourlyLabel"></strong>
+              </label>
+              <div class="form-text" id="mHourlyHelp">Define una tarifa por hora en Ajustes para habilitar esta opción.</div>
+            </div>
+
+            <div class="form-check mt-2">
+              <input class="form-check-input" type="radio" name="billingMode" id="mModeGrace" value="grace">
+              <label class="form-check-label" for="mModeGrace">
+                Ticket de gracia <strong class="ms-1">Q0.00</strong>
+              </label>
+              <div class="form-text">No se cobra, no se envía a FEL; se registra en BD y se notifica a PayNotify.</div>
+            </div>
+
+            <div class="form-check mt-2">
+              <input class="form-check-input" type="radio" name="billingMode" id="mModeCustom" value="custom">
+              <label class="form-check-label" for="mModeCustom">
+                Cobro personalizado
+              </label>
+              <div class="form-text">Indica el total que deseas facturar manualmente.</div>
+            </div>
+
+            <div class="input-group input-group-sm mt-2">
+              <span class="input-group-text">Q</span>
+              <input type="number" step="0.01" min="0" class="form-control" id="mCustomInput" placeholder="0.00" disabled>
+            </div>
+
+            <div class="mt-3">
+              <label for="mNit" class="form-label mb-1">NIT del cliente</label>
+              <input
+                type="text"
+                id="mNit"
+                class="form-control"
+                placeholder='Escribe el NIT o "CF"'
+                value="CF"
+                autocomplete="off"
+                inputmode="numeric"
+                aria-describedby="mNitHelp mNitStatus"
+              >
+              <div class="form-text" id="mNitHelp">Escribe el NIT o “CF” (consumidor final). Si ingresas NIT, se consultará en SAT (G4S).</div>
+              <div class="small mt-1 text-muted" id="mNitStatus" aria-live="polite"></div>
+            </div>
+
+            <div class="text-danger small mt-2" id="mError" hidden></div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-outline-secondary btn-sm" data-action="cancel">Cancelar</button>
+            <button type="submit" class="btn btn-primary btn-sm">Confirmar</button>
+          </div>
+        </form>
+      </div>
+    </div>
   `;
 
-  const invoiceRowsEl = document.getElementById('invoiceRows');
-  const invoiceSummaryEl = document.getElementById('invoiceSummary');
-  const invoiceMsgEl = document.getElementById('invoiceMessage');
-  const paginationEl = document.getElementById('invoicePagination');
-  const alertBox = document.getElementById('invoiceAlert');
-  const invoiceCsvBtn = document.getElementById('invoiceCsv');
+  // --------- refs
+  const tbody = document.getElementById('invRows');
+  const searchInput = document.getElementById('invSearch');
+  const meta = document.getElementById('invMeta');
+  const prevBtn = document.getElementById('invPrev');
+  const nextBtn = document.getElementById('invNext');
+  const hourlyRateHint = document.getElementById('invoiceHourlyRateHint');
 
-  const showAlert = (message, type = 'info') => {
-    alertBox.innerHTML = `
-      <div class="alert alert-${type} alert-dismissible fade show" role="alert">
-        ${escapeHtml(message)}
-        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
-      </div>`;
-  };
+  const state = { search: '', page: 1 };
+  const pageSize = 20;
+  let allRows = [];
 
-  const clearAlert = () => { alertBox.innerHTML = ''; };
+  // --------- Botones apertura manual
+  const manualOpenBtn   = document.getElementById('btnManualOpen');    // Salida
+  const manualOpenInBtn = document.getElementById('btnManualOpenIn'); // Entrada
+  const CHANNEL_SALIDA  = '40288048981adc4601981b7cb2660b05';
+  const CHANNEL_ENTRADA = '40288048981adc4601981b7c2d010aff';
 
-  const fetchInvoiceReport = async () => {
-    invoiceRowsEl.innerHTML = `<tr><td colspan="7" class="text-center text-muted">Consultando...</td></tr>`;
-    invoiceSummaryEl.innerHTML = '';
-    invoiceMsgEl.textContent = '';
-    clearAlert();
-    invoiceCsvBtn.disabled = true;
+  function wireManualOpen(buttonEl, { title, channelId }) {
+    if (!buttonEl || buttonEl.dataset.bound === '1') return;
+    buttonEl.dataset.bound = '1';
+    let busy = false;
 
-    const params = new URLSearchParams();
-    const from = document.getElementById('invoiceFrom').value;
-    const to = document.getElementById('invoiceTo').value;
-    const status = document.getElementById('invoiceStatus').value;
-    const nit = document.getElementById('invoiceNit').value;
-    if (from) params.set('from', from);
-    if (to) params.set('to', to);
-    if (status !== 'ANY') params.set('status', status);
-    if (nit) params.set('nit', nit);
+    buttonEl.addEventListener('click', async () => {
+      if (busy) return;
+      const proceed = await (Dialog?.confirm?.(
+        `¿Deseas realizar una APERTURA MANUAL de la barrera (${title})?`,
+        'Confirmar apertura'
+      ) ?? Promise.resolve(window.confirm(`¿Aperturar barrera manual (${title})?`)));
+      if (!proceed) return;
 
-    try {
-      const url = params.size ? `${api('facturacion/emitidas')}?${params}` : api('facturacion/emitidas');
-      const js = await fetchJSON(url);
-      if (!js || js.ok === false) throw new Error(js.error || 'Sin respuesta');
-      const rows = (js.rows || []).map((r) => ({ ...r, total: Number(r.total ?? 0) }));
+      let reason =
+        (await (Dialog?.prompt?.({
+          title: `Motivo de apertura (${title})`,
+          label: 'Describe brevemente el motivo (mín. 5 caracteres):',
+          placeholder: 'Ej. Emergencia, fallo del lector, visita autorizada, etc.',
+          confirmText: 'Continuar',
+          cancelText: 'Cancelar'
+        }) ?? Promise.resolve(window.prompt(`Motivo de apertura (${title}):`)))) || '';
 
-      invoiceState.rows = rows;
-      invoiceState.summary = {
-        total: rows.length,
-        total_amount: rows.reduce((a, r) => a + (r.total ?? 0), 0),
-        ok: rows.filter(r => (r.status || '').toUpperCase() === 'OK').length,
-        pending: rows.filter(r => (r.status || '').toUpperCase() === 'PENDING').length,
-        error: rows.filter(r => (r.status || '').toUpperCase() === 'ERROR').length,
-      };
-      invoiceState.page = 1;
-      renderInvoiceRows();
-      renderInvoiceSummary();
-      invoiceCsvBtn.disabled = rows.length === 0;
-    } catch (err) {
-      invoiceRowsEl.innerHTML = `<tr><td colspan="7" class="text-center text-danger">Error: ${escapeHtml(err.message)}</td></tr>`;
-      showAlert(`No se pudo cargar el reporte: ${err.message}`, 'danger');
-    }
-  };
+      reason = (reason || '').trim();
+      if (reason.length < 5) { (Dialog?.ok?.('El motivo debe tener al menos 5 caracteres.', 'Motivo inválido')) || alert('Motivo muy corto.'); return; }
+      if (reason.length > 255) { (Dialog?.ok?.('El motivo no debe superar 255 caracteres.', 'Motivo demasiado largo')) || alert('Motivo muy largo.'); return; }
 
-  const renderInvoiceSummary = () => {
-    const s = invoiceState.summary;
-    if (!s) return;
-    invoiceSummaryEl.innerHTML = `
-      <div class="col-sm-6 col-lg-3">
-        <div class="card border-0 bg-body-tertiary h-100"><div class="card-body py-3">
-          <div class="text-muted small">Facturas</div>
-          <div class="fs-5 fw-semibold">${s.total}</div>
-        </div></div>
-      </div>
-      <div class="col-sm-6 col-lg-3">
-        <div class="card border-0 bg-body-tertiary h-100"><div class="card-body py-3">
-          <div class="text-muted small">Monto total</div>
-          <div class="fs-5 fw-semibold">${formatCurrency(s.total_amount)}</div>
-        </div></div>
-      </div>
-      <div class="col-sm-6 col-lg-3">
-        <div class="card border-0 bg-body-tertiary h-100"><div class="card-body py-3">
-          <div class="text-muted small">Certificadas</div>
-          <div class="fs-5 fw-semibold">${s.ok}</div>
-        </div></div>
-      </div>
-      <div class="col-sm-6 col-lg-3">
-        <div class="card border-0 bg-body-tertiary h-100"><div class="card-body py-3">
-          <div class="text-muted small">Pendientes</div>
-          <div class="fs-5 fw-semibold">${s.pending}</div>
-        </div></div>
-      </div>
-    `;
-    invoiceMsgEl.textContent = `Errores: ${s.error}`;
-  };
+      busy = true;
+      buttonEl.disabled = true;
+      const original = buttonEl.innerHTML;
+      buttonEl.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span> Aperturando…`;
+      const m = Dialog?.loading?.({ title: `Apertura manual (${title})`, message: 'Contactando servicio…' });
 
-  const renderInvoiceRows = () => {
-    const { slice } = paginate(invoiceState.rows, invoiceState.page, invoiceState.perPage);
-    if (!slice.length) {
-      invoiceRowsEl.innerHTML = `<tr><td colspan="7" class="text-center text-muted">No hay registros.</td></tr>`;
-      paginationEl.innerHTML = '';
-      return;
-    }
-    invoiceRowsEl.innerHTML = slice.map((r) => {
-      const status = (r.status || '').toUpperCase();
-      const badge = status === 'OK'
-        ? 'text-bg-success'
-        : status === 'PENDING'
-        ? 'text-bg-warning'
-        : status === 'ERROR'
-        ? 'text-bg-danger'
-        : 'text-bg-secondary';
+      try {
+        const res = await fetchJSON(api('gate/manual-open'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reason, channel_id: channelId })
+        });
 
-      const uuid = getUuid(r);
-      const actions = uuid
-      ? `<button type="button" class="btn btn-sm btn-outline-primary me-1"
-          data-action="pdf"
-          data-uuid="${escapeHtml(uuid)}"
-          data-id="${escapeHtml(String(r.id ?? ''))}">PDF</button>`
-      : '<span class="badge text-bg-light border">Sin UUID</span>';
-
-      return `
-        <tr>
-          <td>${escapeHtml(r.ticket_no)}</td>
-          <td>${escapeHtml(formatDateValue(r.fecha))}</td>
-          <td class="text-end">${formatCurrency(r.total)}</td>
-          <td>${escapeHtml(r.receptor ?? 'CF')}</td>
-          <td class="text-truncate" style="max-width:220px;">${escapeHtml(uuid ?? '—')}</td>
-          <td><span class="badge ${badge}">${formatInvoiceStatus(status)}</span></td>
-          <td class="text-center">${actions}</td>
-        </tr>`;
-    }).join('');
-    buildPagination(paginationEl, invoiceState, renderInvoiceRows);
-  };
-
-  // === Exportar CSV (todas las filas del estado actual)
-  invoiceCsvBtn.addEventListener('click', () => {
-    const rows = invoiceState.rows || [];
-    if (!rows.length) return;
-
-    const headers = ['ticket_no','fecha','total','receptor','uuid','status'];
-    const csv = [
-      headers.join(','),
-      ...rows.map(r => [
-        String(r.ticket_no ?? '').replaceAll('"','""'),
-        new Date(r.fecha ?? '').toISOString(),
-        Number(r.total ?? 0).toFixed(2),
-        String(r.receptor ?? 'CF').replaceAll('"','""'),
-        String(getUuid(r) ?? '').replaceAll('"','""'),
-        String((r.status || '').toUpperCase()).replaceAll('"','""'),
-      ].map(v => `"${v}"`).join(',')),
-    ].join('\r\n');
-
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    downloadBlob(blob, `facturas_${document.getElementById('invoiceFrom').value}_${document.getElementById('invoiceTo').value}.csv`);
-  });
-
-  // === Helpers para PDF ===
-  function b64ToBlobPdf(b64) {
-    const byteChars = atob(b64);
-    const byteArrays = [];
-    const chunk = 1024 * 64;
-    for (let offset = 0; offset < byteChars.length; offset += chunk) {
-      const slice = byteChars.slice(offset, offset + chunk);
-      const nums = new Array(slice.length);
-      for (let i = 0; i < slice.length; i++) nums[i] = slice.charCodeAt(i);
-      byteArrays.push(new Uint8Array(nums));
-    }
-    return new Blob(byteArrays, { type: 'application/pdf' });
-  }
-
-  function downloadBase64Pdf(filename, b64) {
-    const blob = b64ToBlobPdf(b64);
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename || 'documento.pdf';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }
-
-  // === NUEVOS helpers para priorizar base64 desde BD ===
-  function normalizePdfB64(v) {
-    if (!v) return null;
-    const s = String(v).trim();
-    const i = s.indexOf(';base64,');
-    return i >= 0 ? s.slice(i + ';base64,'.length) : s;
-  }
-
-  function extractPdfFromResponseJson(row) {
-    try {
-      const j = JSON.parse(row?.response_json || '{}');
-      return j?.pdf_base64 || j?.data?.pdf_base64 || j?.result?.pdf_base64 || null;
-    } catch { return null; }
-  }
-
-  function findInvoiceRowByIdOrUuid(id, uuid) {
-    const rows = invoiceState.rows || [];
-    let r = rows.find(x => String(x?.id ?? '') === String(id ?? ''));
-    if (r) return r;
-    r = rows.find(x => (getUuid(x) || '') === (uuid || ''));
-    return r || null;
-  }
-
-  // === Click en PDF (con prioridad a BD/base64) ===
-  invoiceRowsEl.addEventListener('click', async (ev) => {
-    const btn = ev.target.closest('button[data-action="pdf"]');
-    if (!btn) return;
-
-    const uuid = btn.dataset.uuid || '';
-    const id   = btn.dataset.id || ''; // <-- para endpoints por ID
-    if (!uuid && !id) { showAlert('Este registro no tiene UUID ni ID disponibles.', 'warning'); return; }
-
-    btn.disabled = true;
-    const old = btn.textContent;
-    btn.textContent = 'Generando...';
-    clearAlert();
-
-    try {
-      let b64 = null;
-
-      // (A) 1ra prioridad: LEER DIRECTO DE LA FILA (BD)
-      const row = findInvoiceRowByIdOrUuid(id, uuid);
-      if (row) {
-        b64 = row.fel_pdf_base64 || row.pdf_base64 || extractPdfFromResponseJson(row);
-        b64 = normalizePdfB64(b64);
-      }
-
-      // (B) 2da prioridad: endpoint por ID que devuelve la fila/BD
-      if (!b64 && id) {
-        try {
-          const r3 = await fetchJSON(api('fel/manual-invoice/one') + '?id=' + encodeURIComponent(id));
-          const tmp = r3?.data?.fel_pdf_base64 || r3?.fel_pdf_base64 || r3?.data?.pdf_base64 || r3?.pdf_base64;
-          b64 = normalizePdfB64(tmp);
-          if (!b64) {
-            const tmp2 = extractPdfFromResponseJson(r3?.data || r3);
-            b64 = normalizePdfB64(tmp2);
-          }
-        } catch (_) {}
-      }
-
-      // (C) 3ra prioridad: por UUID (servicio que ya tenías)
-      if (!b64 && uuid) {
-        try {
-          const r1 = await fetchJSON(api('fel/document-pdf') + '?uuid=' + encodeURIComponent(uuid));
-          const tmp = r1?.pdf_base64 || r1?.data?.pdf_base64;
-          b64 = normalizePdfB64(tmp);
-        } catch (_) {}
-      }
-
-      // (D) 4ta prioridad: endpoint específico por ID que arma el PDF
-      if (!b64 && id) {
-        try {
-          const r2 = await fetchJSON(api('fel/manual-invoice/pdf') + '?id=' + encodeURIComponent(id));
-          const tmp = r2?.pdf_base64;
-          b64 = normalizePdfB64(tmp);
-        } catch (_) {}
-      }
-
-      // (E) 5to fallback binario: /api/fel/pdf?uuid=...
-      if (b64) {
-        downloadBase64Pdf(uuid ? `Factura-${uuid}.pdf` : `manual-invoice-${id}.pdf`, b64);
-        showAlert('PDF generado correctamente (desde BD).', 'success');
-        return;
-      }
-
-      if (uuid) {
-        const resp = await fetch(`${api('fel/pdf')}?uuid=${encodeURIComponent(uuid)}`);
-        if (!resp.ok) {
-          let errText = `HTTP ${resp.status}`;
-          try { const jerr = await resp.json(); if (jerr?.error) errText = jerr.error; } catch {}
-          throw new Error(errText);
+        if (!res.ok) {
+          if (res.debug) console.warn('gate/manual-open debug:', res.debug);
+          throw new Error(res.message || (res.field === 'reason' ? 'Motivo inválido.' : 'No se pudo aperturar'));
         }
-        const blob = await resp.blob();
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `Factura-${uuid}.pdf`;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
-        showAlert('PDF generado correctamente (servicio binario).', 'success');
-      } else {
-        throw new Error('No se pudo obtener el PDF (sin UUID y sin base64 en BD).');
+
+        (Dialog?.ok?.(
+          [
+            `Apertura manual (${title}) ejecutada.`,
+            res.opened_at ? `\nHora: ${res.opened_at}` : '',
+            res.code !== undefined ? `\nCódigo: ${res.code}` : '',
+            res.message ? `\nMensaje: ${res.message}` : '',
+            `\nMotivo registrado: ${reason}`
+          ].join(''),
+          `Apertura manual (${title})`
+        )) || alert(`Apertura manual (${title}) ejecutada.`);
+      } catch (e) {
+        Dialog?.err?.(e, `Error en apertura manual (${title})`) || alert(`Error: ${e.message}`);
+      } finally {
+        if (m && typeof m.close === 'function') m.close();
+        buttonEl.disabled = false;
+        buttonEl.innerHTML = original;
+        busy = false;
       }
-    } catch (e) {
-      showAlert(`No se pudo generar el PDF: ${e.message}`, 'danger');
-    } finally {
-      btn.textContent = old;
-      btn.disabled = false;
+    });
+  }
+
+  wireManualOpen(manualOpenBtn,   { title: 'Salida',  channelId: CHANNEL_SALIDA });
+  wireManualOpen(manualOpenInBtn, { title: 'Entrada', channelId: CHANNEL_ENTRADA });
+
+  // Mostrar hint con la tarifa por hora resuelta
+  if (hourlyRateHint) {
+    hourlyRateHint.textContent =
+      Number.isFinite(hourlyRateResolved) && hourlyRateResolved > 0
+        ? `Tarifa por hora ${formatCurrency(hourlyRateResolved)}.`
+        : 'Configura una tarifa por hora en Ajustes para habilitar los cálculos automáticos.';
+  }
+
+  function filterRows() {
+    if (!state.search) return allRows;
+    const term = state.search.toLowerCase();
+    return allRows.filter((row) =>
+      Object.values(row).some((value) => String(value ?? '').toLowerCase().includes(term))
+    );
+  }
+
+  const buildPayload = (row) => ({
+    ticket_no: row.ticket_no,
+    plate: row.plate,
+    receptor_nit: row.receptor || 'CF',
+    serie: row.serie || 'A',
+    numero: row.numero || null,
+    fecha: row.fecha ?? null,
+    total: row.total ?? null,
+    hours: row.hours ?? row.duration_minutes ?? null,
+    duration_minutes: row.duration_minutes ?? null,
+    entry_at: row.entry_at ?? null,
+    exit_at: row.exit_at ?? null,
+  });
+
+  // --------- Modal de confirmación (usa billingConfig.hourly_rate)
+  function openInvoiceConfirmation(ticket, billingConfig = {}) {
+    return new Promise((resolve) => {
+      // cálculos
+      const hoursValue   = typeof ticket.hours === 'number' ? ticket.hours : Number(ticket.hours);
+      const hours        = Number.isFinite(hoursValue) && hoursValue > 0 ? Number(hoursValue.toFixed(2)) : null;
+      const minutesValue = typeof ticket.duration_minutes === 'number' ? ticket.duration_minutes : Number(ticket.duration_minutes);
+      const minutes      = Number.isFinite(minutesValue) && minutesValue > 0 ? Math.round(minutesValue) : null;
+
+      const hourlyRateNumber = Number(billingConfig?.hourly_rate ?? null);
+      const hourlyRate = Number.isFinite(hourlyRateNumber) && hourlyRateNumber > 0 ? hourlyRateNumber : null;
+
+      const canHourly   = hourlyRate !== null && hours !== null;
+      const hourlyTotal = canHourly ? Math.round(hours * hourlyRate * 100) / 100 : null;
+
+      const totalFromDb = ticket.total != null && ticket.total !== '' ? Number(ticket.total) : null;
+      const normalizedDbTotal = Number.isFinite(totalFromDb) ? Number(totalFromDb.toFixed(2)) : null;
+
+      const customDefault = hourlyTotal ?? normalizedDbTotal;
+      const customValue = customDefault != null ? customDefault.toFixed(2) : '';
+      const dateCandidate = ticket.exit_at || ticket.entry_at || ticket.fecha || null;
+
+      // refs modal
+      const modalEl  = document.getElementById('invoiceConfirmModal');
+      const form     = document.getElementById('invoiceConfirmForm');
+      const mErr     = document.getElementById('mError');
+      const mCustom  = document.getElementById('mCustomInput');
+      const mHourly  = document.getElementById('mModeHourly');
+      const mGrace   = document.getElementById('mModeGrace');
+      const mCustomR = document.getElementById('mModeCustom');
+      const mNit     = document.getElementById('mNit');
+      const mNitHelp = document.getElementById('mNitHelp');
+      const mNitStatus = document.getElementById('mNitStatus');
+      const mHourlyLabel = document.getElementById('mHourlyLabel');
+      const mHourlyHelp  = document.getElementById('mHourlyHelp');
+
+      // resumen
+      document.getElementById('mSumTicket').textContent   = String(ticket.ticket_no ?? '');
+      document.getElementById('mSumFecha').textContent    = dateCandidate ? `${formatDateTime(dateCandidate)} (${formatRelativeTime(dateCandidate)})` : '—';
+      document.getElementById('mSumHoras').textContent    = hours != null ? `${hours.toFixed(2)} h${minutes && minutes % 60 ? ` (${minutes} min)` : ''}` : '—';
+      document.getElementById('mSumTotalDb').textContent  = normalizedDbTotal != null ? formatCurrency(normalizedDbTotal) : '—';
+
+      const totalHourlyRow = document.getElementById('mSumTotalHourlyRow');
+      if (hourlyTotal != null) {
+        totalHourlyRow.hidden = false;
+        document.getElementById('mSumTotalHourly').textContent = formatCurrency(hourlyTotal);
+        mHourlyLabel.textContent = formatCurrency(hourlyTotal);
+        mHourlyHelp.textContent  = `Tarifa ${hourlyRate != null ? formatCurrency(hourlyRate) : '—'} × ${hours != null ? `${hours.toFixed(2)} h` : '—'}.`;
+      } else {
+        totalHourlyRow.hidden = true;
+        mHourlyLabel.textContent = '';
+        mHourlyHelp.textContent  = 'Define una tarifa por hora en Ajustes para habilitar esta opción.';
+      }
+
+      // estado inicial radios
+      mHourly.disabled = !canHourly;
+      if (canHourly) { mHourly.checked = true; mCustom.disabled = true; }
+      else           { mGrace.checked = true; mCustom.disabled = true; }
+      mCustom.value = customValue;
+      mNit.value = 'CF';
+      mErr.hidden = true; mErr.textContent = '';
+      mNitStatus.className = 'small mt-1 text-muted'; mNitStatus.textContent = 'Consumidor final (CF).';
+
+      // ——— NIT: sanitizar + lookup automático ———
+      const normalizeNit = (v) => {
+        v = (v || '').toUpperCase().trim();
+        if (v === 'CF' || v === 'C') return v.length === 1 ? 'C' : 'CF';
+        return v.replace(/\D+/g, ''); // solo dígitos
+      };
+      const setNitStatus = (text, cls = 'text-muted') => {
+        mNitStatus.className = `small mt-1 ${cls}`;
+        mNitStatus.textContent = text || '';
+      };
+
+      const doLookup = debounce(async () => {
+        const v = mNit.value;
+        if (!v || v.toUpperCase() === 'CF') {
+          setNitStatus('Consumidor final (CF).', 'text-muted');
+          return;
+        }
+        if (!/\d{6,}/.test(v.replace(/\D+/g,''))) {
+          setNitStatus('Ingresa al menos 6 dígitos para consultar.', 'text-muted');
+          return;
+        }
+        try {
+          setNitStatus('Buscando en SAT…', 'text-info');
+          const res = await lookupNit(v);
+          if (res?.ok) {
+            const nombre = (res.nombre || res.name || '').trim();
+            const dir = (res.direccion || res.address || '').trim();
+            setNitStatus(`Encontrado: ${nombre || '(sin nombre)'}${dir ? ' — ' + dir : ''}`, 'text-success');
+          } else {
+            setNitStatus(res?.error ? `No encontrado: ${res.error}` : 'NIT no encontrado.', 'text-warning');
+          }
+        } catch (err) {
+          setNitStatus(`Error al consultar: ${err.message || err}`, 'text-danger');
+        }
+      }, 500);
+
+      mNit.addEventListener('input', (e) => {
+        const cur = e.target.value;
+        const norm = normalizeNit(cur);
+        if (norm !== cur) {
+          e.target.value = norm;
+          e.target.setSelectionRange(norm.length, norm.length);
+        }
+        doLookup();
+      });
+      mNit.addEventListener('keydown', (e) => {
+        const k = e.key;
+        const ctrl = e.ctrlKey || e.metaKey;
+        if (ctrl || ['Backspace','Delete','ArrowLeft','ArrowRight','Tab','Home','End'].includes(k)) return;
+        if (/^[a-zA-Z]$/.test(k)) { if (!['c','f','C','F'].includes(k)) e.preventDefault(); return; }
+        if (/^\d$/.test(k)) return;
+        e.preventDefault();
+      });
+
+      // activar/desactivar input custom
+      function updateCustomState() {
+        const isCustom = document.getElementById('mModeCustom').checked;
+        mCustom.disabled = !isCustom;
+        if (isCustom && !mCustom.value) mCustom.value = customValue;
+        mErr.hidden = true; mErr.textContent = '';
+      }
+      mHourly.addEventListener('change', updateCustomState);
+      mGrace.addEventListener('change', updateCustomState);
+      mCustomR.addEventListener('change', updateCustomState);
+
+      // cerrar
+      function closeModal(retVal = null) {
+        modalEl.classList.remove('show');
+        modalEl.style.display = 'none';
+        const oldBackdrop = document.querySelector('.modal-backdrop');
+        if (oldBackdrop) oldBackdrop.remove();
+        document.body.classList.remove('modal-open');
+        document.body.style.removeProperty('padding-right');
+        resolve(retVal);
+      }
+      form.querySelectorAll('[data-action="cancel"]').forEach((b) => {
+        b.addEventListener('click', () => closeModal(null), { once: true });
+      });
+      modalEl.addEventListener('click', (ev) => { if (ev.target === modalEl) closeModal(null); });
+      function onEsc(ev) { if (ev.key === 'Escape') { ev.preventDefault(); closeModal(null); document.removeEventListener('keydown', onEsc); } }
+      document.addEventListener('keydown', onEsc, { once: true });
+
+      // submit
+      form.onsubmit = (e) => {
+        e.preventDefault();
+        mErr.hidden = true; mErr.textContent = '';
+        const selected = form.querySelector('input[name="billingMode"]:checked')?.value;
+        if (!selected) { mErr.textContent = 'Selecciona el tipo de cobro.'; mErr.hidden = false; return; }
+
+        const rawNit = mNit.value.trim().toUpperCase();
+        const receptorNit = (rawNit === 'CF' || rawNit === '') ? 'CF' : rawNit.replace(/\D+/g, '');
+        if (receptorNit !== 'CF' && !/^\d{6,}$/.test(receptorNit)) {
+          mErr.textContent = 'NIT inválido. Debe ser CF o solo dígitos (mín. 6).';
+          mErr.hidden = false; return;
+        }
+
+        if (selected === 'hourly') {
+          if (!canHourly || hourlyTotal == null) { mErr.textContent = 'Configura una tarifa por hora válida en Ajustes para usar esta opción.'; mErr.hidden = false; return; }
+          closeModal({ mode: 'hourly', total: hourlyTotal, label: `Cobro por hora ${formatCurrency(hourlyTotal)}`, receptor_nit: receptorNit });
+          return;
+        }
+        if (selected === 'grace') {
+          closeModal({ mode: 'grace', total: 0, label: 'Ticket de gracia (Q0.00, sin FEL)', receptor_nit: receptorNit });
+          return;
+        }
+        const customVal = parseFloat(mCustom.value);
+        if (!Number.isFinite(customVal) || customVal <= 0) { mErr.textContent = 'Ingresa un total personalizado mayor a cero.'; mErr.hidden = false; return; }
+        const normalized = Math.round(customVal * 100) / 100;
+        closeModal({ mode: 'custom', total: normalized, label: `Cobro personalizado ${formatCurrency(normalized)}`, receptor_nit: receptorNit });
+      };
+
+      // mostrar modal con backdrop
+      modalEl.style.display = 'block';
+      setTimeout(() => modalEl.classList.add('show'), 10);
+      const backdrop = document.createElement('div');
+      backdrop.className = 'modal-backdrop fade show';
+      document.body.appendChild(backdrop);
+      document.body.classList.add('modal-open');
+    });
+  }
+
+  // --------- handlers de la tabla
+  function attachInvoiceHandlers() {
+    tbody.querySelectorAll('[data-action="invoice"]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const payload = JSON.parse(decodeURIComponent(btn.getAttribute('data-payload')));
+        btn.disabled = true;
+        const originalHTML = btn.innerHTML;
+        btn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span> Confirmando…`;
+        try {
+          // snapshot de settings + overview para pasar hourly_rate correcto al modal
+          const settingsSnapshot = await loadSettings();
+          const hourlySnapshotOverview = await getHourlyRateFromOverview();
+          const hourlySnapshotLoad     = parseMoneyLike(settingsSnapshot?.billing?.hourly_rate);
+          const hourlySnapshot         = hourlySnapshotOverview ?? hourlySnapshotLoad ?? null;
+
+          const billingCfg = { ...(settingsSnapshot?.billing ?? {}), hourly_rate: hourlySnapshot };
+          const confirmation = await openInvoiceConfirmation(payload, billingCfg);
+          if (!confirmation) { btn.disabled = false; btn.innerHTML = originalHTML; return; }
+
+          btn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span> Enviando…`;
+
+          const receptorNit = confirmation.receptor_nit || payload.receptor_nit || 'CF';
+          const requestPayload = {
+            ticket_no: payload.ticket_no,
+            plate: payload.plate,
+            receptor_nit: receptorNit,
+            serie: payload.serie || 'A',
+            numero: payload.numero || null,
+            mode: confirmation.mode,
+            total: Number(confirmation.total) || 0,
+          };
+          if (confirmation.mode === 'custom') requestPayload.custom_total = Number(confirmation.total);
+
+          const js = await fetchJSON(api('fel/invoice'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(requestPayload),
+          });
+
+          if (!js.ok) throw new Error(js.error || 'No se pudo certificar.');
+
+          const uuidTxt = js.uuid ? `UUID ${js.uuid}` : 'Sin UUID (revise respuesta)';
+          const reason =
+            Number(js.billing_amount) <= 0
+              ? 'Dato de billing = 0.'
+              : (js.pay_notify_ack === false
+                  ? (js.pay_notify_error ? `PayNotify sin confirmación (${js.pay_notify_error}).` : 'PayNotify sin confirmación.')
+                  : null);
+
+          if (js.manual_open) {
+            (Dialog?.ok?.(
+              [
+                'Pago registrado (apertura manual requerida).',
+                uuidTxt,
+                reason ? `Motivo: ${reason}` : null,
+                '',
+                'La barrera debe aperturarse manualmente.'
+              ].filter(Boolean).join('\n'),
+              'Apertura manual'
+            )) || alert(`Pago registrado. ${uuidTxt}`);
+          } else {
+            (Dialog?.ok?.(
+              [
+                `Factura enviada (${confirmation.label}).`,
+                uuidTxt,
+                js.pay_notify_ack ? 'Notificación a ZKBio confirmada.' : null
+              ].filter(Boolean).join(' '),
+              'FEL enviado'
+            )) || alert(`Factura enviada. ${uuidTxt}`);
+          }
+
+          await loadList();
+        } catch (e) {
+          Dialog?.err?.(e, 'Error al facturar') || alert(`Error: ${e.message}`);
+        } finally {
+          btn.disabled = false;
+          btn.innerHTML = originalHTML;
+        }
+      });
+    });
+  }
+
+  function renderPage() {
+    const filtered = filterRows();
+    const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+    if (state.page > totalPages) state.page = totalPages;
+
+    const start = (state.page - 1) * pageSize;
+    const pageRows = filtered.slice(start, start + pageSize);
+
+    if (!pageRows.length) {
+      const message = allRows.length && !filtered.length
+        ? 'No se encontraron resultados'
+        : 'No hay pendientes por facturar.';
+      tbody.innerHTML = `
+        <tr>
+          <td colspan="5" class="text-muted text-center py-4">${escapeHtml(message)}</td>
+        </tr>`;
+    } else {
+      tbody.innerHTML = pageRows.map((d) => {
+        const totalFmt = formatCurrency(d.total);
+        const payload = encodeURIComponent(JSON.stringify(buildPayload(d)));
+        const disabled = d.uuid ? 'disabled' : '';
+        const ticketText = d.ticket_no ? `${d.ticket_no}${d.plate ? ' · ' + d.plate : ''}` : (d.plate ?? '(sin placa)');
+        return `
+          <tr>
+            <td>${escapeHtml(ticketText)}</td>
+            <td>${escapeHtml(d.fecha ?? '')}</td>
+            <td class="text-end">${totalFmt}</td>
+            <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(d.uuid ?? '')}</td>
+            <td class="text-center">
+              <button class="btn btn-sm btn-outline-success" data-action="invoice" data-payload="${payload}" ${disabled}>
+                <i class="bi bi-receipt me-1"></i> Facturar
+              </button>
+            </td>
+          </tr>`;
+      }).join('');
+      attachInvoiceHandlers();
     }
+
+    if (filtered.length) {
+      meta.textContent = `Mostrando ${start + 1} - ${Math.min(start + pageRows.length, filtered.length)} de ${filtered.length} tickets`;
+    } else if (allRows.length) {
+      meta.textContent = 'No se encontraron resultados para la búsqueda actual';
+    } else {
+      meta.textContent = 'Sin tickets pendientes por facturar';
+    }
+
+    prevBtn.disabled = state.page <= 1 || !filtered.length;
+    nextBtn.disabled = state.page >= totalPages || !filtered.length;
+  }
+
+  // --------- eventos de búsqueda y paginación
+  searchInput.addEventListener('input', (event) => {
+    state.search = event.target.value.trim();
+    state.page = 1;
+    renderPage();
+  });
+  prevBtn.addEventListener('click', () => { if (state.page > 1) { state.page -= 1; renderPage(); } });
+  nextBtn.addEventListener('click', () => {
+    const totalPages = Math.max(1, Math.ceil(filterRows().length / pageSize));
+    if (state.page < totalPages) { state.page += 1; renderPage(); }
   });
 
-  // === Eventos ===
-  document.getElementById('invoiceFetch').addEventListener('click', fetchInvoiceReport);
-  document.getElementById('invoiceReset').addEventListener('click', () => {
-    document.getElementById('invoiceFrom').value = defaultFrom;
-    document.getElementById('invoiceTo').value = defaultTo;
-    document.getElementById('invoiceStatus').value = 'ANY';
-    document.getElementById('invoiceNit').value = '';
-    fetchInvoiceReport();
-  });
-
-  await fetchInvoiceReport();
+  // --------- carga inicial
+  async function loadList() {
+    tbody.innerHTML = `
+      <tr>
+        <td colspan="5" class="text-muted text-center py-4">
+          <div class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></div>
+          Consultando BD…
+        </td>
+      </tr>`;
+    meta.textContent = '';
+    try {
+      const js = await fetchJSON(api('facturacion/list'));
+      if (!js.ok && js.error) throw new Error(js.error);
+      allRows = js.rows || [];
+      state.page = 1;
+      renderPage();
+    } catch (e) {
+      tbody.innerHTML = `<tr><td colspan="5" class="text-danger text-center">Error: ${escapeHtml(e.message)}</td></tr>`;
+      meta.textContent = '';
+    }
+  }
+  await loadList();
 }
 
+  // ===== Reportes =====
+  async function renderReports() {
+    const today = new Date();
+    const toISODate = (d) => d.toISOString().slice(0, 10);
+    const defaultTo = toISODate(today);
+    const defaultFrom = toISODate(new Date(today.getTime() - 6 * 24 * 60 * 60 * 1000));
+
+    const invoiceState = {
+      rows: [],
+      summary: null,
+      generatedAt: null,
+      filters: { from: defaultFrom, to: defaultTo, status: 'ANY', nit: '', uuid: '' },
+      page: 1,
+      perPage: 10,
+    };
+
+    // === Helpers ===
+    const escapeHtml = (v) => String(v ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+
+    const formatDateValue = (v) => !v ? '—' : new Date(v).toLocaleString('es-GT');
+    const formatCurrency = (n) => `Q ${Number(n ?? 0).toFixed(2)}`;
+    const formatInvoiceStatus = (s) =>
+      s === 'OK' ? 'Certificada'
+        : s === 'PENDING' ? 'Pendiente'
+        : s === 'ERROR' ? 'Error'
+        : s || '—';
+
+    const downloadBlob = (blob, filename) => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    };
+
+    const paginate = (rows, page, perPage) => {
+      const totalPages = Math.ceil(rows.length / perPage) || 1;
+      const p = Math.min(Math.max(page, 1), totalPages);
+      const start = (p - 1) * perPage;
+      const end = start + perPage;
+      return { slice: rows.slice(start, end), totalPages, currentPage: p };
+    };
+
+    const buildPagination = (container, state, renderFn) => {
+      const { totalPages, currentPage } = paginate(state.rows, state.page, state.perPage);
+      if (totalPages <= 1) { container.innerHTML = ''; return; }
+      let html = `<nav><ul class="pagination pagination-sm justify-content-center mb-0">`;
+      for (let i = 1; i <= totalPages; i++) {
+        html += `<li class="page-item ${i === currentPage ? 'active' : ''}">
+          <button class="page-link" data-page="${i}">${i}</button></li>`;
+      }
+      html += `</ul></nav>`;
+      container.innerHTML = html;
+      container.querySelectorAll('button[data-page]').forEach((b) => {
+        b.addEventListener('click', () => { state.page = parseInt(b.dataset.page); renderFn(); });
+      });
+    };
+
+    // Extrae el UUID desde la fila: directo o dentro de response_json
+    const getUuid = (r) => {
+      if (r?.uuid) return r.uuid;
+      try {
+        const j = JSON.parse(r?.response_json || '{}');
+        return j?.uuid || j?.data?.uuid || null;
+      } catch { return null; }
+    };
+
+    // === UI principal ===
+    app.innerHTML = `
+    <div class="d-flex flex-column gap-4">
+      <section class="card shadow-sm">
+        <div class="card-body">
+          <div class="d-flex flex-wrap justify-content-between align-items-start gap-2">
+            <div>
+              <h5 class="card-title mb-1">Reporte de facturas emitidas</h5>
+              <p class="text-muted small mb-0">Descarga documentos certificados y consulta su estado.</p>
+            </div>
+            <span class="badge text-bg-success">Facturación</span>
+          </div>
+
+          <form id="invoiceFilters" class="row g-3 mt-3">
+            <div class="col-md-3">
+              <label class="form-label small" for="invoiceFrom">Desde</label>
+              <input type="date" id="invoiceFrom" class="form-control form-control-sm" value="${escapeHtml(defaultFrom)}">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label small" for="invoiceTo">Hasta</label>
+              <input type="date" id="invoiceTo" class="form-control form-control-sm" value="${escapeHtml(defaultTo)}">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label small" for="invoiceStatus">Estado</label>
+              <select id="invoiceStatus" class="form-select form-select-sm">
+                <option value="ANY">Todos</option>
+                <option value="OK">OK</option>
+                <option value="PENDING">Pendiente</option>
+                <option value="ERROR">Error</option>
+              </select>
+            </div>
+            <div class="col-md-3">
+              <label class="form-label small" for="invoiceNit">NIT</label>
+              <input type="text" id="invoiceNit" class="form-control form-control-sm" placeholder="CF o NIT">
+            </div>
+          </form>
+
+          <div class="d-flex flex-wrap gap-2 align-items-center mt-3">
+            <div class="btn-group btn-group-sm" role="group">
+              <button type="button" class="btn btn-primary" id="invoiceFetch">Buscar</button>
+              <button type="button" class="btn btn-outline-secondary" id="invoiceReset">Limpiar</button>
+            </div>
+            <div class="ms-auto d-flex gap-2">
+              <button type="button" class="btn btn-outline-primary btn-sm" id="invoiceCsv" disabled>Exportar CSV</button>
+            </div>
+          </div>
+
+          <div id="invoiceAlert" class="mt-3"></div>
+
+          <div id="invoiceSummary" class="row g-3 mt-2"></div>
+          <div class="table-responsive mt-3">
+            <table class="table table-sm table-bordered align-middle mb-0">
+              <thead class="table-light">
+                <tr>
+                  <th>Ticket</th>
+                  <th>Fecha</th>
+                  <th class="text-end">Total</th>
+                  <th>Receptor</th>
+                  <th>UUID</th>
+                  <th>Estado</th>
+                  <th class="text-center">Acciones</th>
+                </tr>
+              </thead>
+              <tbody id="invoiceRows">
+                <tr><td colspan="7" class="text-center text-muted">Consulta para ver resultados.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div id="invoicePagination" class="mt-2"></div>
+          <div id="invoiceMessage" class="small text-muted mt-2"></div>
+        </div>
+      </section>
+    </div>
+    `;
+
+    const invoiceRowsEl = document.getElementById('invoiceRows');
+    const invoiceSummaryEl = document.getElementById('invoiceSummary');
+    const invoiceMsgEl = document.getElementById('invoiceMessage');
+    const paginationEl = document.getElementById('invoicePagination');
+    const alertBox = document.getElementById('invoiceAlert');
+    const invoiceCsvBtn = document.getElementById('invoiceCsv');
+
+    const showAlert = (message, type = 'info') => {
+      alertBox.innerHTML = `
+        <div class="alert alert-${type} alert-dismissible fade show" role="alert">
+          ${escapeHtml(message)}
+          <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+        </div>`;
+    };
+
+    const clearAlert = () => { alertBox.innerHTML = ''; };
+
+    const fetchInvoiceReport = async () => {
+      invoiceRowsEl.innerHTML = `<tr><td colspan="7" class="text-center text-muted">Consultando...</td></tr>`;
+      invoiceSummaryEl.innerHTML = '';
+      invoiceMsgEl.textContent = '';
+      clearAlert();
+      invoiceCsvBtn.disabled = true;
+
+      const params = new URLSearchParams();
+      const from = document.getElementById('invoiceFrom').value;
+      const to = document.getElementById('invoiceTo').value;
+      const status = document.getElementById('invoiceStatus').value;
+      const nit = document.getElementById('invoiceNit').value;
+      if (from) params.set('from', from);
+      if (to) params.set('to', to);
+      if (status !== 'ANY') params.set('status', status);
+      if (nit) params.set('nit', nit);
+
+      try {
+        const url = params.size ? `${api('facturacion/emitidas')}?${params}` : api('facturacion/emitidas');
+        const js = await fetchJSON(url);
+        if (!js || js.ok === false) throw new Error(js.error || 'Sin respuesta');
+        const rows = (js.rows || []).map((r) => ({ ...r, total: Number(r.total ?? 0) }));
+
+        invoiceState.rows = rows;
+        invoiceState.summary = {
+          total: rows.length,
+          total_amount: rows.reduce((a, r) => a + (r.total ?? 0), 0),
+          ok: rows.filter(r => (r.status || '').toUpperCase() === 'OK').length,
+          pending: rows.filter(r => (r.status || '').toUpperCase() === 'PENDING').length,
+          error: rows.filter(r => (r.status || '').toUpperCase() === 'ERROR').length,
+        };
+        invoiceState.page = 1;
+        renderInvoiceRows();
+        renderInvoiceSummary();
+        invoiceCsvBtn.disabled = rows.length === 0;
+      } catch (err) {
+        invoiceRowsEl.innerHTML = `<tr><td colspan="7" class="text-center text-danger">Error: ${escapeHtml(err.message)}</td></tr>`;
+        showAlert(`No se pudo cargar el reporte: ${err.message}`, 'danger');
+      }
+    };
+
+    const renderInvoiceSummary = () => {
+      const s = invoiceState.summary;
+      if (!s) return;
+      invoiceSummaryEl.innerHTML = `
+        <div class="col-sm-6 col-lg-3">
+          <div class="card border-0 bg-body-tertiary h-100"><div class="card-body py-3">
+            <div class="text-muted small">Facturas</div>
+            <div class="fs-5 fw-semibold">${s.total}</div>
+          </div></div>
+        </div>
+        <div class="col-sm-6 col-lg-3">
+          <div class="card border-0 bg-body-tertiary h-100"><div class="card-body py-3">
+            <div class="text-muted small">Monto total</div>
+            <div class="fs-5 fw-semibold">${formatCurrency(s.total_amount)}</div>
+          </div></div>
+        </div>
+        <div class="col-sm-6 col-lg-3">
+          <div class="card border-0 bg-body-tertiary h-100"><div class="card-body py-3">
+            <div class="text-muted small">Certificadas</div>
+            <div class="fs-5 fw-semibold">${s.ok}</div>
+          </div></div>
+        </div>
+        <div class="col-sm-6 col-lg-3">
+          <div class="card border-0 bg-body-tertiary h-100"><div class="card-body py-3">
+            <div class="text-muted small">Pendientes</div>
+            <div class="fs-5 fw-semibold">${s.pending}</div>
+          </div></div>
+        </div>
+      `;
+      invoiceMsgEl.textContent = `Errores: ${s.error}`;
+    };
+
+    const renderInvoiceRows = () => {
+      const { slice } = paginate(invoiceState.rows, invoiceState.page, invoiceState.perPage);
+      if (!slice.length) {
+        invoiceRowsEl.innerHTML = `<tr><td colspan="7" class="text-center text-muted">No hay registros.</td></tr>`;
+        paginationEl.innerHTML = '';
+        return;
+      }
+      invoiceRowsEl.innerHTML = slice.map((r) => {
+        const status = (r.status || '').toUpperCase();
+        const badge = status === 'OK'
+          ? 'text-bg-success'
+          : status === 'PENDING'
+          ? 'text-bg-warning'
+          : status === 'ERROR'
+          ? 'text-bg-danger'
+          : 'text-bg-secondary';
+
+        const uuid = getUuid(r);
+        const actions = uuid
+        ? `<button type="button" class="btn btn-sm btn-outline-primary me-1"
+            data-action="pdf"
+            data-uuid="${escapeHtml(uuid)}"
+            data-id="${escapeHtml(String(r.id ?? ''))}">PDF</button>`
+        : '<span class="badge text-bg-light border">Sin UUID</span>';
+
+        return `
+          <tr>
+            <td>${escapeHtml(r.ticket_no)}</td>
+            <td>${escapeHtml(formatDateValue(r.fecha))}</td>
+            <td class="text-end">${formatCurrency(r.total)}</td>
+            <td>${escapeHtml(r.receptor ?? 'CF')}</td>
+            <td class="text-truncate" style="max-width:220px;">${escapeHtml(uuid ?? '—')}</td>
+            <td><span class="badge ${badge}">${formatInvoiceStatus(status)}</span></td>
+            <td class="text-center">${actions}</td>
+          </tr>`;
+      }).join('');
+      buildPagination(paginationEl, invoiceState, renderInvoiceRows);
+    };
+
+    // === Exportar CSV (todas las filas del estado actual)
+    invoiceCsvBtn.addEventListener('click', () => {
+      const rows = invoiceState.rows || [];
+      if (!rows.length) return;
+
+      const headers = ['ticket_no','fecha','total','receptor','uuid','status'];
+      const csv = [
+        headers.join(','),
+        ...rows.map(r => [
+          String(r.ticket_no ?? '').replaceAll('"','""'),
+          new Date(r.fecha ?? '').toISOString(),
+          Number(r.total ?? 0).toFixed(2),
+          String(r.receptor ?? 'CF').replaceAll('"','""'),
+          String(getUuid(r) ?? '').replaceAll('"','""'),
+          String((r.status || '').toUpperCase()).replaceAll('"','""'),
+        ].map(v => `"${v}"`).join(',')),
+      ].join('\r\n');
+
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      downloadBlob(blob, `facturas_${document.getElementById('invoiceFrom').value}_${document.getElementById('invoiceTo').value}.csv`);
+    });
+
+    // === Helpers para PDF ===
+    function b64ToBlobPdf(b64) {
+      const byteChars = atob(b64);
+      const byteArrays = [];
+      const chunk = 1024 * 64;
+      for (let offset = 0; offset < byteChars.length; offset += chunk) {
+        const slice = byteChars.slice(offset, offset + chunk);
+        const nums = new Array(slice.length);
+        for (let i = 0; i < slice.length; i++) nums[i] = slice.charCodeAt(i);
+        byteArrays.push(new Uint8Array(nums));
+      }
+      return new Blob(byteArrays, { type: 'application/pdf' });
+    }
+
+    function downloadBase64Pdf(filename, b64) {
+      const blob = b64ToBlobPdf(b64);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename || 'documento.pdf';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    // === NUEVOS helpers para priorizar base64 desde BD ===
+    function normalizePdfB64(v) {
+      if (!v) return null;
+      const s = String(v).trim();
+      const i = s.indexOf(';base64,');
+      return i >= 0 ? s.slice(i + ';base64,'.length) : s;
+    }
+
+    function extractPdfFromResponseJson(row) {
+      try {
+        const j = JSON.parse(row?.response_json || '{}');
+        return j?.pdf_base64 || j?.data?.pdf_base64 || j?.result?.pdf_base64 || null;
+      } catch { return null; }
+    }
+
+    function findInvoiceRowByIdOrUuid(id, uuid) {
+      const rows = invoiceState.rows || [];
+      let r = rows.find(x => String(x?.id ?? '') === String(id ?? ''));
+      if (r) return r;
+      r = rows.find(x => (getUuid(x) || '') === (uuid || ''));
+      return r || null;
+    }
+
+    // === Click en PDF (con prioridad a BD/base64) ===
+    invoiceRowsEl.addEventListener('click', async (ev) => {
+      const btn = ev.target.closest('button[data-action="pdf"]');
+      if (!btn) return;
+
+      const uuid = btn.dataset.uuid || '';
+      const id   = btn.dataset.id || ''; // <-- para endpoints por ID
+      if (!uuid && !id) { showAlert('Este registro no tiene UUID ni ID disponibles.', 'warning'); return; }
+
+      btn.disabled = true;
+      const old = btn.textContent;
+      btn.textContent = 'Generando...';
+      clearAlert();
+
+      try {
+        let b64 = null;
+
+        // (A) 1ra prioridad: LEER DIRECTO DE LA FILA (BD)
+        const row = findInvoiceRowByIdOrUuid(id, uuid);
+        if (row) {
+          b64 = row.fel_pdf_base64 || row.pdf_base64 || extractPdfFromResponseJson(row);
+          b64 = normalizePdfB64(b64);
+        }
+
+        // (B) 2da prioridad: endpoint por ID que devuelve la fila/BD
+        if (!b64 && id) {
+          try {
+            const r3 = await fetchJSON(api('fel/manual-invoice/one') + '?id=' + encodeURIComponent(id));
+            const tmp = r3?.data?.fel_pdf_base64 || r3?.fel_pdf_base64 || r3?.data?.pdf_base64 || r3?.pdf_base64;
+            b64 = normalizePdfB64(tmp);
+            if (!b64) {
+              const tmp2 = extractPdfFromResponseJson(r3?.data || r3);
+              b64 = normalizePdfB64(tmp2);
+            }
+          } catch (_) {}
+        }
+
+        // (C) 3ra prioridad: por UUID (servicio que ya tenías)
+        if (!b64 && uuid) {
+          try {
+            const r1 = await fetchJSON(api('fel/document-pdf') + '?uuid=' + encodeURIComponent(uuid));
+            const tmp = r1?.pdf_base64 || r1?.data?.pdf_base64;
+            b64 = normalizePdfB64(tmp);
+          } catch (_) {}
+        }
+
+        // (D) 4ta prioridad: endpoint específico por ID que arma el PDF
+        if (!b64 && id) {
+          try {
+            const r2 = await fetchJSON(api('fel/manual-invoice/pdf') + '?id=' + encodeURIComponent(id));
+            const tmp = r2?.pdf_base64;
+            b64 = normalizePdfB64(tmp);
+          } catch (_) {}
+        }
+
+        // (E) 5to fallback binario: /api/fel/pdf?uuid=...
+        if (b64) {
+          downloadBase64Pdf(uuid ? `Factura-${uuid}.pdf` : `manual-invoice-${id}.pdf`, b64);
+          showAlert('PDF generado correctamente (desde BD).', 'success');
+          return;
+        }
+
+        if (uuid) {
+          const resp = await fetch(`${api('fel/pdf')}?uuid=${encodeURIComponent(uuid)}`);
+          if (!resp.ok) {
+            let errText = `HTTP ${resp.status}`;
+            try { const jerr = await resp.json(); if (jerr?.error) errText = jerr.error; } catch {}
+            throw new Error(errText);
+          }
+          const blob = await resp.blob();
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `Factura-${uuid}.pdf`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 1000);
+          showAlert('PDF generado correctamente (servicio binario).', 'success');
+        } else {
+          throw new Error('No se pudo obtener el PDF (sin UUID y sin base64 en BD).');
+        }
+      } catch (e) {
+        showAlert(`No se pudo generar el PDF: ${e.message}`, 'danger');
+      } finally {
+        btn.textContent = old;
+        btn.disabled = false;
+      }
+    });
+
+    // === Eventos ===
+    document.getElementById('invoiceFetch').addEventListener('click', fetchInvoiceReport);
+    document.getElementById('invoiceReset').addEventListener('click', () => {
+      document.getElementById('invoiceFrom').value = defaultFrom;
+      document.getElementById('invoiceTo').value = defaultTo;
+      document.getElementById('invoiceStatus').value = 'ANY';
+      document.getElementById('invoiceNit').value = '';
+      fetchInvoiceReport();
+    });
+
+    await fetchInvoiceReport();
+  }
 
   // ===== Ajustes  =====
   async function renderSettings() {

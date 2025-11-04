@@ -2220,208 +2220,526 @@ async function renderReports() {
   }
 
   // ===== facturacion manual ======
-  async function renderManualInvoiceModule() {
-    const settings = await loadSettings();
-    const monthlyRate = settings?.billing?.monthly_rate ?? null;
+async function renderManualInvoiceModule() {
+  // ===== Bootstrap-friendly Dialog shim (mezcla y garantiza métodos) =====
+  const Dialog = (() => {
+    function ensureHost() {
+      let host = document.getElementById('app-toast-host');
+      if (!host) {
+        host = document.createElement('div');
+        host.id = 'app-toast-host';
+        host.style.position = 'fixed';
+        host.style.zIndex = '1080';
+        host.style.inset = 'auto 1rem 1rem auto';
+        document.body.appendChild(host);
+      }
+      return host;
+    }
 
-    app.innerHTML = `
-      <div class="card p-3">
-        <div class="d-flex flex-wrap align-items-start gap-3 mb-3">
-          <div class="flex-grow-1">
-            <h5 class="mb-1">Factura manual</h5>
-            <p class="text-muted small mb-1">
-              Genera una factura manual indicando <strong>motivo</strong>, <strong>NIT</strong> y <strong>monto</strong>,
-              o usa la <strong>tarifa mensual</strong>. También permite factura de <strong>gracia</strong> (Q 0.00, sin FEL).
-            </p>
-            <div class="text-muted small">${monthlyRate != null ? `Tarifa mensual actual: Q ${Number(monthlyRate).toFixed(2)}` : 'No hay tarifa mensual configurada.'}</div>
+    function bsToast(message, { title, variant = 'primary', delay = 4000 } = {}) {
+      const host = ensureHost();
+      const wrap = document.createElement('div');
+      wrap.className = 'toast align-items-center text-bg-' + variant;
+      wrap.role = 'alert';
+      wrap.ariaLive = 'assertive';
+      wrap.ariaAtomic = 'true';
+      wrap.innerHTML = `
+        <div class="d-flex">
+          <div class="toast-body">
+            ${title ? `<div class="fw-semibold mb-1">${title}</div>` : ''}
+            ${message ?? ''}
           </div>
-          <div class="ms-auto d-flex flex-wrap align-items-center gap-2">
-            <button type="button" class="btn btn-sm btn-primary" id="btnNewManualInv">Nueva factura manual</button>
-            <button type="button" class="btn btn-sm btn-outline-secondary" id="btnRefreshManualInv">Actualizar</button>
-          </div>
-        </div>
-
-        <div class="table-responsive">
-          <table class="table table-sm mb-0" id="tblManualInvoices">
-            <thead>
-              <tr>
-                <th>#</th><th>Fecha</th><th>Motivo</th><th>NIT</th><th>Monto</th>
-                <th>Usó mensual</th><th>Env. FEL</th><th>Estado FEL</th><th>UUID</th>
-                <th class="text-end">PDF</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td colspan="10" class="text-center py-4">
-                  <div class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></div>
-                  <span class="ms-2">Cargando…</span>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <!-- Modal (igual que antes) -->
-      <div class="modal fade" id="manualInvModal" tabindex="-1" aria-labelledby="manualInvLabel" aria-hidden="true">
-        <!-- … (sin cambios) … -->
-      </div>
-    `;
-
-    // === Helpers para PDF ===
-    function b64ToBlobPdf(b64) {
-      const byteChars = atob(b64);
-      const byteArrays = [];
-      const chunk = 1024 * 64;
-      for (let offset = 0; offset < byteChars.length; offset += chunk) {
-        const slice = byteChars.slice(offset, offset + chunk);
-        const nums = new Array(slice.length);
-        for (let i = 0; i < slice.length; i++) nums[i] = slice.charCodeAt(i);
-        byteArrays.push(new Uint8Array(nums));
-      }
-      return new Blob(byteArrays, { type: 'application/pdf' });
-    }
-
-    function downloadBase64Pdf(filename, b64) {
-      const blob = b64ToBlobPdf(b64);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = filename || 'documento.pdf';
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-    }
-
-    async function fetchPdfForManualInvoice({ id, uuid }) {
-      // intento 1: por UUID genérico
-      if (uuid) {
-        try {
-          const r1 = await fetchJSON(api('fel/document-pdf') + '?uuid=' + encodeURIComponent(uuid));
-          if (r1?.ok && r1.pdf_base64) return r1.pdf_base64;
-        } catch (_) {}
-      }
-      // intento 2: endpoint específico de manual_invoices por id
-      if (id) {
-        try {
-          const r2 = await fetchJSON(api('fel/manual-invoice/pdf') + '?id=' + encodeURIComponent(id));
-          if (r2?.ok && r2.pdf_base64) return r2.pdf_base64;
-        } catch (_) {}
-      }
-      // intento 3: obtener una fila y leer fel_pdf_base64 si tu API lo expone
-      if (id) {
-        try {
-          const r3 = await fetchJSON(api('fel/manual-invoice/one') + '?id=' + encodeURIComponent(id));
-          const b64 = r3?.data?.fel_pdf_base64 || r3?.fel_pdf_base64;
-          if (b64) return b64;
-        } catch (_) {}
-      }
-      throw new Error('No se pudo obtener el PDF (no disponible o endpoint faltante).');
-    }
-
-    async function refreshManualInvoicesTable() {
-      const tbody = document.querySelector('#tblManualInvoices tbody');
-      if (!tbody) return;
-
-      tbody.innerHTML = `
-        <tr>
-          <td colspan="10" class="text-center py-4">
-            <div class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></div>
-            <span class="ms-2">Actualizando…</span>
-          </td>
-        </tr>`;
-
+          <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+        </div>`;
+      host.appendChild(wrap);
       try {
-        const js = await fetchJSON(api('fel/manual-invoice'));
-        const rows = Array.isArray(js?.data) ? js.data : (Array.isArray(js) ? js : []);
-
-        if (!rows.length) {
-          tbody.innerHTML = `
-            <tr>
-              <td colspan="10" class="text-center text-muted py-4">
-                No hay facturas manuales registradas todavía.
-              </td>
-            </tr>`;
-          return;
+        if (window.bootstrap?.Toast) {
+          const t = new bootstrap.Toast(wrap, { delay, autohide: true });
+          t.show();
+        } else {
+          wrap.classList.add('show');
+          setTimeout(() => wrap.remove(), delay);
         }
-
-        tbody.innerHTML = rows.map(r => {
-          const canPdf = (r?.fel_status === 'OK' || r?.fel_status === 'OK ') && !!r?.fel_uuid && r?.send_to_fel;
-          const title = r.receptor_name ? 'Nombre: ' + String(r.receptor_name).replace(/"/g,'&quot;') : '';
-          return `
-            <tr title="${title}">
-              <td>${r.id ?? ''}</td>
-              <td>${r.created_at ?? ''}</td>
-              <td>${r.reason ? escapeHtml(r.reason) : ''}</td>
-              <td>${r.receptor_nit ?? ''}</td>
-              <td>Q ${Number(r.amount ?? 0).toFixed(2)}</td>
-              <td>${r.used_monthly ? 'Sí' : 'No'}</td>
-              <td>${r.send_to_fel ? 'Sí' : 'No'}</td>
-              <td>${r.fel_status ? escapeHtml(r.fel_status) : ''}</td>
-              <td>${r.fel_uuid ? escapeHtml(r.fel_uuid) : ''}</td>
-              <td class="text-end">
-                <button
-                  type="button"
-                  class="btn btn-sm ${canPdf ? 'btn-outline-primary' : 'btn-outline-secondary'} btnManualPdf"
-                  data-id="${r.id ?? ''}"
-                  data-uuid="${r.fel_uuid ?? ''}"
-                  ${canPdf ? '' : 'disabled'}
-                  title="${canPdf ? 'Descargar/abrir PDF' : 'Sin PDF disponible'}">
-                  <i class="bi bi-file-pdf"></i>
-                </button>
-              </td>
-            </tr>`;
-        }).join('');
-
-        // Delegación de eventos para los botones PDF
-        tbody.addEventListener('click', async (ev) => {
-          const btn = ev.target.closest('.btnManualPdf');
-          if (!btn) return;
-          const id = btn.getAttribute('data-id');
-          const uuid = btn.getAttribute('data-uuid');
-
-          const dlg = Dialog.loading({ title: 'Obteniendo PDF', message: 'Consultando…' });
-          try {
-            const b64 = await fetchPdfForManualInvoice({ id, uuid });
-            const filename = (uuid ? `${uuid}.pdf` : `manual-invoice-${id}.pdf`);
-            downloadBase64Pdf(filename, b64);
-            dlg.close();
-            Dialog.toast?.('PDF listo', { variant: 'success' });
-          } catch (err) {
-            dlg.close();
-            Dialog.alert({ title: 'No disponible', message: String(err) });
-          }
-        }, { once: true }); // evita duplicar handlers
-
-      } catch (e) {
-        console.error(e);
-        tbody.innerHTML = `
-          <tr>
-            <td colspan="10" class="text-center py-4">
-              <div class="text-danger">Error al cargar la tabla.</div>
-              <div class="small text-muted">${escapeHtml(String(e))}</div>
-            </td>
-          </tr>`;
+      } catch {
+        wrap.classList.add('show');
+        setTimeout(() => wrap.remove(), delay);
       }
     }
 
-    document.getElementById('btnRefreshManualInv')?.addEventListener('click', refreshManualInvoicesTable);
-    await refreshManualInvoicesTable();
+    function bsAlert({ title, message, variant = 'warning' } = {}) {
+      const host = ensureHost();
+      const div = document.createElement('div');
+      div.className = `alert alert-${variant} alert-dismissible fade show`;
+      div.role = 'alert';
+      div.style.minWidth = '280px';
+      div.innerHTML = `
+        ${title ? `<div class="fw-semibold mb-1">${title}</div>` : ''}
+        <div>${message ?? ''}</div>
+        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>`;
+      host.appendChild(div);
+      return {
+        close: () => div.remove(),
+        el: div,
+      };
+    }
 
-    // === (resto de tu código del modal queda igual) ===
-    // ... todo tu bloque: abrir modal, lookup NIT, submit, etc.
-    // (no lo repito para no alargar)
+    function loading({ title, message } = {}) {
+      const wrap = document.createElement('div');
+      wrap.innerHTML = `
+        <div class="modal-backdrop fade show"></div>
+        <div style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;z-index:1080">
+          <div class="card p-3 shadow-sm">
+            <div class="d-flex align-items-center gap-3">
+              <div class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></div>
+              <div>
+                <div class="fw-semibold">${title ?? 'Cargando'}</div>
+                <div class="small text-muted">${message ?? ''}</div>
+              </div>
+            </div>
+          </div>
+        </div>`;
+      const el = document.createElement('div');
+      el.style.zIndex = 1080;
+      el.appendChild(wrap);
+      document.body.appendChild(el);
+      return { close() { el.remove(); } };
+    }
 
-    function escapeHtml(value) {
-      return String(value ?? '')
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
+    const base = {
+      loading,
+      toast: (msg, opts) => bsToast(msg, opts),
+      alert: (opts) => bsAlert(opts),
+      ok: (message, title = 'Listo') => bsToast(message, { title, variant: 'success' }),
+      err: (e, title = 'Error') =>
+        bsAlert({ title, message: (e?.message ?? String(e)), variant: 'danger' }),
+    };
+
+    const ext = window.Dialog || {};
+    return {
+      ...base,
+      ...ext,
+      loading: ext.loading || base.loading,
+      toast: ext.toast || base.toast,
+      alert: ext.alert || base.alert,
+      ok: ext.ok || base.ok,
+      err: ext.err || base.err,
+    };
+  })();
+
+  const escapeHtml = (v) =>
+    String(v ?? '')
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+      .replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+
+  // Mantén una referencia al modal actual para cerrarlo luego
+  let manualInvModalRef = null;
+
+  function bsModal(id){
+    const el = document.getElementById(id);
+    if (!el) return null;
+    if (window.bootstrap?.Modal) {
+      const inst = bootstrap.Modal.getInstance(el) || new bootstrap.Modal(el);
+      return inst;
+    }
+    // Fallback mínimo sin Bootstrap JS
+    return {
+      show(){
+        el.classList.add('show'); el.style.display='block'; el.removeAttribute('aria-hidden');
+        document.body.classList.add('modal-open');
+        if (!document.querySelector('.modal-backdrop')) {
+          const bd = document.createElement('div');
+          bd.className = 'modal-backdrop fade show';
+          document.body.appendChild(bd);
+        }
+      },
+      hide(){
+        el.classList.remove('show'); el.style.display='none'; el.setAttribute('aria-hidden','true');
+        document.body.classList.remove('modal-open');
+        const bd = document.querySelector('.modal-backdrop'); if (bd) bd.remove();
+      },
+    };
+  }
+
+  // ===== PDF helpers =====
+  function b64ToBlobPdf(b64){
+    const byteChars = atob(b64), byteArrays = []; const chunk = 65536;
+    for (let off=0; off<byteChars.length; off+=chunk){
+      const slice = byteChars.slice(off, off+chunk);
+      const arr = new Uint8Array(slice.length);
+      for (let i=0;i<slice.length;i++) arr[i] = slice.charCodeAt(i);
+      byteArrays.push(arr);
+    }
+    return new Blob(byteArrays, { type:'application/pdf' });
+  }
+  function downloadBase64Pdf(filename, b64){
+    const url = URL.createObjectURL(b64ToBlobPdf(b64));
+    const a = document.createElement('a'); a.href = url; a.download = filename || 'documento.pdf';
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url), 1000);
+  }
+  async function fetchPdfForManualInvoice({ id, uuid }){
+    if (uuid) {
+      try { const r1 = await fetchJSON(api('fel/document-pdf') + '?uuid=' + encodeURIComponent(uuid));
+            if (r1?.ok && r1.pdf_base64) return r1.pdf_base64; } catch {}
+    }
+    if (id) {
+      try { const r2 = await fetchJSON(api('fel/manual-invoice/pdf') + '?id=' + encodeURIComponent(id));
+            if (r2?.ok && r2.pdf_base64) return r2.pdf_base64; } catch {}
+      try { const r3 = await fetchJSON(api('fel/manual-invoice/one') + '?id=' + encodeURIComponent(id));
+            const b64 = r3?.data?.fel_pdf_base64 || r3?.fel_pdf_base64; if (b64) return b64; } catch {}
+    }
+    throw new Error('No se pudo obtener el PDF.');
+  }
+
+  // ===== Parse dinero + settings (SOLO loadSettings) =====
+  function parseMoneyLike(x){
+    if (x == null) return null;
+    if (typeof x === 'number') return Number.isFinite(x) ? x : null;
+    const s = String(x).trim(); if (!s) return null;
+    const cleaned = s.replace(/[^\d.,-]/g,'').replace(/,/g,'.');
+    const n = Number(cleaned);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  const settings = await loadSettings();
+  const rawMonthly =
+    settings?.billing?.monthly_rate ??
+    settings?.billing?.monthlyRate ??
+    settings?.monthly_rate ??
+    settings?.monthlyRate ?? null;
+
+  // ===== Tarifa mensual desde /api/settings/overview =====
+  async function getMonthlyRateFromOverview(){
+    try {
+      const res = await fetchJSON(api('settings'));
+      const raw = res?.settings?.billing?.monthly_rate ?? null;
+      const v = parseMoneyLike(raw);
+      return (v && v > 0) ? v : null;
+    } catch {
+      return null;
     }
   }
+
+  const monthlyRateNumber = await getMonthlyRateFromOverview();
+  const hasMonthly = monthlyRateNumber != null && monthlyRateNumber > 0;
+
+  // ===== Render =====
+  app.innerHTML = `
+    <div class="card p-3">
+      <div class="d-flex flex-wrap align-items-start gap-3 mb-3">
+        <div class="flex-grow-1">
+          <h5 class="mb-1">Factura manual</h5>
+          <p class="text-muted small mb-1">
+            Indica <strong>motivo</strong> y <strong>NIT</strong>; elige <strong>mensual</strong> o <strong>personalizado</strong>. (Siempre se envía a FEL)
+          </p>
+          <div class="text-muted small" id="monthlyRateHint">
+            ${hasMonthly ? `Tarifa mensual actual: Q ${monthlyRateNumber.toFixed(2)}` : 'No hay tarifa mensual configurada.'}
+          </div>
+        </div>
+        <div class="ms-auto d-flex flex-wrap align-items-center gap-2">
+          <button type="button" class="btn btn-sm btn-primary" id="btnNewManualInv">Nueva factura manual</button>
+          <button type="button" class="btn btn-sm btn-outline-secondary" id="btnRefreshManualInv">Actualizar</button>
+        </div>
+      </div>
+
+      <div class="table-responsive">
+        <table class="table table-sm mb-0" id="tblManualInvoices">
+          <thead>
+            <tr>
+              <th>#</th><th>Fecha</th><th>Motivo</th><th>NIT</th><th>Monto</th>
+              <th>Usó mensual</th><th>Estado FEL</th><th>UUID</th>
+              <th class="text-end">PDF</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td colspan="9" class="text-center py-4">
+                <div class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></div>
+                <span class="ms-2">Cargando…</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Modal -->
+    <div class="modal fade" id="manualInvModal" tabindex="-1" aria-labelledby="manualInvLabel" aria-hidden="true">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content manual-inv-modal">
+          <form id="manualInvForm" autocomplete="off">
+            <div class="modal-header">
+              <h5 class="modal-title" id="manualInvLabel">Nueva factura manual</h5>
+              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+            </div>
+            <div class="modal-body">
+
+              <!-- Motivo -->
+              <div class="mb-3">
+                <label class="form-label">Motivo</label>
+                <input type="text" class="form-control" name="reason" id="mReason" minlength="3" maxlength="255" required />
+                <div class="form-text">Este motivo se guardará junto con la factura.</div>
+              </div>
+
+              <!-- Resumen mensual -->
+              <div class="border rounded p-2 mb-3 bg-light">
+                <div class="d-flex justify-content-between small">
+                  <span class="text-muted">Tarifa mensual</span>
+                  <span id="mMonthlyPreview">${hasMonthly ? 'Q ' + monthlyRateNumber.toFixed(2) : '—'}</span>
+                </div>
+              </div>
+
+              <!-- Opciones: mensual / personalizado -->
+              <div class="form-check">
+                <input class="form-check-input" type="radio" name="billingMode" id="mModeMonthly" value="monthly" ${hasMonthly ? '' : 'disabled'}>
+                <label class="form-check-label" for="mModeMonthly">
+                  Cobro mensual ${hasMonthly ? `<strong class="ms-1">Q ${monthlyRateNumber.toFixed(2)}</strong>` : ''}
+                </label>
+                <div class="form-text">${hasMonthly ? 'Se aplicará la tarifa mensual configurada.' : 'Configura una tarifa mensual en Ajustes para habilitar esta opción.'}</div>
+              </div>
+
+              <div class="form-check mt-2">
+                <input class="form-check-input" type="radio" name="billingMode" id="mModeCustom" value="custom">
+                <label class="form-check-label" for="mModeCustom">Cobro personalizado</label>
+                <div class="form-text">Indica el total que deseas facturar manualmente.</div>
+              </div>
+
+              <div class="input-group input-group-sm mt-2">
+                <span class="input-group-text">Q</span>
+                <input type="number" step="0.01" min="0" class="form-control" id="mCustomInput" placeholder="0.00" disabled>
+              </div>
+
+              <!-- NIT (con estado debajo) -->
+              <div class="mt-3">
+                <label class="form-label" for="mNit">NIT</label>
+                <div class="input-group">
+                  <input type="text" class="form-control" name="nit" id="mNit" placeholder="CF o NIT" inputmode="text" pattern="^(?:\\d+|[Cc][Ff])$" autocomplete="off"/>
+                  <button class="btn btn-outline-secondary" type="button" id="btnLookupNit" title="Buscar NIT">
+                    <i class="bi bi-search"></i>
+                  </button>
+                </div>
+                <div class="small mt-1 text-muted" id="mNitStatus" aria-live="polite">Escribe el NIT o “CF”.</div>
+              </div>
+
+            </div>
+            <div class="modal-footer">
+              <button class="btn btn-outline-secondary" type="button" data-bs-dismiss="modal">Cancelar</button>
+              <button class="btn btn-primary" type="submit" id="btnSubmitManualInv">Crear</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  `;
+
+  // ===== Tabla =====
+  async function refreshManualInvoicesTable(){
+    const tbody = document.querySelector('#tblManualInvoices tbody'); if (!tbody) return;
+    tbody.innerHTML = `<tr><td colspan="9" class="text-center py-4">
+      <div class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></div><span class="ms-2">Actualizando…</span></td></tr>`;
+    try{
+      const js = await fetchJSON(api('fel/manual-invoice'));
+      const rows = Array.isArray(js?.data) ? js.data : (Array.isArray(js) ? js : []);
+      if (!rows.length){
+        tbody.innerHTML = `<tr><td colspan="9" class="text-center text-muted py-4">No hay facturas manuales registradas todavía.</td></tr>`;
+        return;
+      }
+      tbody.innerHTML = rows.map(r=>{
+        const canPdf = (String(r?.fel_status||'').trim()==='OK') && !!r?.fel_uuid;
+        const title = r?.receptor_name ? 'Nombre: ' + String(r.receptor_name).replace(/"/g,'&quot;') : '';
+        return `<tr title="${title}">
+          <td>${r.id ?? ''}</td>
+          <td>${r.created_at ?? ''}</td>
+          <td>${r.reason ? escapeHtml(r.reason) : ''}</td>
+          <td>${r.receptor_nit ?? ''}</td>
+          <td>Q ${Number(r.amount ?? 0).toFixed(2)}</td>
+          <td>${r.used_monthly ? 'Sí' : 'No'}</td>
+          <td>${r.fel_status ? escapeHtml(r.fel_status) : ''}</td>
+          <td>${r.fel_uuid ? escapeHtml(r.fel_uuid) : ''}</td>
+          <td class="text-end">
+            <button type="button" class="btn btn-sm ${canPdf?'btn-outline-primary':'btn-outline-secondary'} btnManualPdf"
+              data-id="${r.id ?? ''}" data-uuid="${r.fel_uuid ?? ''}" ${canPdf?'':'disabled'}
+              title="${canPdf ? 'Descargar/abrir PDF' : 'Sin PDF disponible'}">
+              <i class="bi bi-file-pdf"></i>
+            </button>
+          </td>
+        </tr>`;
+      }).join('');
+
+      tbody.onclick = async (ev)=>{
+        const btn = ev.target.closest?.('.btnManualPdf'); if (!btn) return;
+        const id = btn.getAttribute('data-id'); const uuid = btn.getAttribute('data-uuid');
+        const dlg = Dialog.loading({ title:'Obteniendo PDF', message:'Consultando…' });
+        try {
+          const b64 = await fetchPdfForManualInvoice({ id, uuid });
+          downloadBase64Pdf((uuid?`${uuid}.pdf`:`manual-invoice-${id}.pdf`), b64);
+          dlg.close(); Dialog.toast?.('PDF listo', { variant:'success' });
+        } catch(err){
+          dlg.close(); Dialog.alert({ title:'No disponible', message:String(err), variant:'warning' });
+        }
+      };
+    }catch(e){
+      tbody.innerHTML = `<tr><td colspan="9" class="text-center py-4"><div class="text-danger">Error al cargar.</div><div class="small text-muted">${escapeHtml(String(e))}</div></td></tr>`;
+    }
+  }
+  document.getElementById('btnRefreshManualInv')?.addEventListener('click', refreshManualInvoicesTable);
+  await refreshManualInvoicesTable();
+
+  // ===== Abrir modal: radios y monto =====
+  document.getElementById('btnNewManualInv')?.addEventListener('click', () => {
+    manualInvModalRef = bsModal('manualInvModal'); // guarda referencia
+    manualInvModalRef?.show();
+
+    const reasonEl    = document.getElementById('mReason');
+    const modeMonthly = document.getElementById('mModeMonthly');
+    const modeCustom  = document.getElementById('mModeCustom');
+    const customInput = document.getElementById('mCustomInput');
+
+    if (hasMonthly) modeMonthly.removeAttribute('disabled');
+
+    // Estado inicial
+    if (hasMonthly) {
+      modeMonthly.checked = true;
+      customInput.value = monthlyRateNumber.toFixed(2);
+      customInput.disabled = true;
+    } else {
+      modeCustom.checked = true;
+      customInput.value = '';
+      customInput.disabled = false;
+    }
+
+    // Cambios de radio: alternancia y bloqueo del input
+    const sync = () => {
+      if (modeMonthly.checked && hasMonthly) {
+        customInput.value = monthlyRateNumber.toFixed(2);
+        customInput.disabled = true;
+      } else {
+        customInput.disabled = false;
+        if (!customInput.value || customInput.value === '0.00') customInput.value = '';
+      }
+    };
+    modeMonthly.addEventListener('change', sync);
+    modeCustom.addEventListener('change', sync);
+    sync();
+
+    setTimeout(()=>reasonEl?.focus(), 120);
+  });
+
+  // ===== NIT: sanitización + lookup =====
+  const nitInput   = document.getElementById('mNit');
+  const mNitStatus = document.getElementById('mNitStatus');
+
+  function sanitizeNit(raw){
+    const v = (raw || '').trim();
+    if (/^[Cc][Ff]$/.test(v)) return 'CF';
+    return v.replace(/\D+/g,'');
+  }
+  function validateNitInput(){
+    const v = nitInput.value.trim();
+    if (!v) { nitInput.setCustomValidity(''); return; }
+    if (v.toUpperCase()==='CF' || /^\d+$/.test(v)) nitInput.setCustomValidity('');
+    else nitInput.setCustomValidity('Escribe solo números o “CF”.');
+  }
+  function setNitStatus(t, cls='text-muted'){ mNitStatus.className = `small mt-1 ${cls}`; mNitStatus.textContent = t || ''; }
+
+  let nitLookupTimer = null;
+  function debounceNitLookup(fn, ms=600){ clearTimeout(nitLookupTimer); nitLookupTimer = setTimeout(fn, ms); }
+
+  async function tryLookupNit(){
+    const val = nitInput.value.trim();
+    if (!val || val.toUpperCase()==='CF'){ setNitStatus('Consumidor final (CF).'); return; }
+    if (!(val.toUpperCase()==='CF' || /^\d+$/.test(val))) return;
+
+    setNitStatus('Buscando en SAT…', 'text-info');
+    const dlg = Dialog.loading({ title:'Buscando NIT', message:'Consultando…' });
+    try{
+      const res = await fetchJSON(api('g4s/lookup-nit')+'?nit='+encodeURIComponent(val));
+      if (res?.ok !== false){
+        const nombre = (res?.nombre || res?.name || '').trim();
+        const dir = (res?.direccion || res?.address || '').trim();
+        setNitStatus(`Encontrado${nombre ? ': ' + nombre : ''}${dir ? ' — ' + dir : ''}.`, 'text-success');
+      }else{
+        setNitStatus(res?.error ? `No encontrado: ${res.error}` : 'NIT no encontrado.', 'text-warning');
+      }
+    }catch(e){
+      setNitStatus('Error al consultar.', 'text-danger');
+    }finally{ dlg.close(); }
+  }
+
+  nitInput.addEventListener('input', ()=>{
+    const clean = sanitizeNit(nitInput.value);
+    if (clean !== nitInput.value){ nitInput.value = clean; nitInput.setSelectionRange(clean.length, clean.length); }
+    validateNitInput();
+    if (/^\d{6,}$/.test(nitInput.value)) debounceNitLookup(tryLookupNit, 600);
+    else if (nitInput.value.toUpperCase()==='CF') setNitStatus('Consumidor final (CF).');
+    else setNitStatus('Ingresa al menos 6 dígitos para consultar.');
+  });
+  nitInput.addEventListener('blur', ()=>{ validateNitInput(); tryLookupNit(); });
+  document.getElementById('btnLookupNit')?.addEventListener('click', tryLookupNit);
+
+  // ===== Submit =====
+  document.getElementById('manualInvForm')?.addEventListener('submit', async (ev)=>{
+    ev.preventDefault();
+    const modeMonthly = document.getElementById('mModeMonthly');
+    const modeCustom  = document.getElementById('mModeCustom');
+    const customInput = document.getElementById('mCustomInput');
+
+    const reason = document.getElementById('mReason').value.trim();
+    const nitRaw = document.getElementById('mNit').value.trim();
+    const receptor_nit = nitRaw ? sanitizeNit(nitRaw).toUpperCase() : 'CF';
+
+    if (reason.length < 3) { Dialog.alert({ title:'Falta motivo', message:'Escribe un motivo de al menos 3 caracteres.' }); return; }
+    if (!(receptor_nit === 'CF' || /^\d+$/.test(receptor_nit))) { Dialog.alert({ title:'NIT inválido', message:'Escribe solo números o “CF”.' }); return; }
+
+    let amount = 0, used_monthly = false, label = '';
+    if (modeMonthly.checked && hasMonthly){
+      used_monthly = true;
+      amount = monthlyRateNumber;
+      label = `Cobro mensual Q ${amount.toFixed(2)}`;
+    } else {
+      const v = Number(customInput.value);
+      if (!Number.isFinite(v) || v <= 0) { Dialog.alert({ title:'Monto inválido', message:'Ingresa un total personalizado mayor a 0.' }); return; }
+      amount = Math.round(v * 100) / 100;
+      label = `Cobro personalizado Q ${amount.toFixed(2)}`;
+    }
+
+    const payload = { reason, receptor_nit, amount, used_monthly, send_to_fel: true };
+
+    const dlg = Dialog.loading({ title:'Creando', message:'Enviando datos…' });
+    try{
+      let res = await fetchJSON(api('fel/manual-invoice'), {
+        method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
+      });
+      if (res?.ok === false || res == null) {
+        res = await fetchJSON(api('fel/manual-invoice'), {
+          method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
+        });
+      }
+      if (res?.ok){
+        const uuidTxt = res.uuid ? `\nUUID: ${res.uuid}` : '';
+        Dialog.ok(`Factura creada y enviada a FEL.\n${label}${uuidTxt}`, 'Éxito');
+
+        // cierra el modal "que está abierto"
+        try {
+          if (window.bootstrap?.Modal) {
+            const el = document.getElementById('manualInvModal');
+            const inst = bootstrap.Modal.getInstance(el) || manualInvModalRef;
+            inst?.hide?.();
+          } else {
+            manualInvModalRef?.hide?.();
+          }
+          const bd = document.querySelector('.modal-backdrop'); if (bd) bd.remove();
+          document.body.classList.remove('modal-open');
+        } catch {}
+
+        await refreshManualInvoicesTable();
+      } else {
+        throw new Error(res?.error || 'No se pudo crear la factura manual');
+      }
+    }catch(e){
+      Dialog.err(e, 'Error al crear factura');
+    }finally{ dlg.close(); }
+  });
+}
 
   const PAGE_STORAGE_KEY = 'zkt:lastPage';
 

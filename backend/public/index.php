@@ -101,7 +101,7 @@ $router->post('/api/invoice/tickets', function () use ($api) {
      Auth::requireAuth();
     return $api->invoiceClosedTickets();
 });
-$router->get('/api/fel/manual-invoice', function () use ($api) {
+$router->get('/api/fel/manual-invoice-list', function () use ($api) {
      Auth::requireAuth();
     return $api->manualInvoiceList();
 });

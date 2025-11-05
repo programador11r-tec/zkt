@@ -2570,7 +2570,7 @@ async function renderManualInvoiceModule() {
     tbody.innerHTML = `<tr><td colspan="9" class="text-center py-4">
       <div class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></div><span class="ms-2">Actualizando…</span></td></tr>`;
     try{
-      const js = await fetchJSON(api('fel/manual-invoice'));
+      const js = await fetchJSON(api('fel/manual-invoice-list'));
       const rows = Array.isArray(js?.data) ? js.data : (Array.isArray(js) ? js : []);
       if (!rows.length){
         tbody.innerHTML = `<tr><td colspan="9" class="text-center text-muted py-4">No hay facturas manuales registradas todavía.</td></tr>`;
@@ -2709,9 +2709,18 @@ async function renderManualInvoiceModule() {
   nitInput.addEventListener('blur', ()=>{ validateNitInput(); tryLookupNit(); });
   document.getElementById('btnLookupNit')?.addEventListener('click', tryLookupNit);
 
+ // fuera del handler (arriba en el módulo)
+let isSubmittingManual = false;
+
   // ===== Submit =====
-  document.getElementById('manualInvForm')?.addEventListener('submit', async (ev)=>{
+  document.getElementById('manualInvForm')?.addEventListener('submit', async (ev) => {
     ev.preventDefault();
+    if (isSubmittingManual) return;            // guard clause
+    isSubmittingManual = true;
+
+    const btn = document.getElementById('btnSubmitManualInv');
+    btn?.setAttribute('disabled', 'disabled');
+
     const modeMonthly = document.getElementById('mModeMonthly');
     const modeCustom  = document.getElementById('mModeCustom');
     const customInput = document.getElementById('mCustomInput');
@@ -2720,8 +2729,8 @@ async function renderManualInvoiceModule() {
     const nitRaw = document.getElementById('mNit').value.trim();
     const receptor_nit = nitRaw ? sanitizeNit(nitRaw).toUpperCase() : 'CF';
 
-    if (reason.length < 3) { Dialog.alert({ title:'Falta motivo', message:'Escribe un motivo de al menos 3 caracteres.' }); return; }
-    if (!(receptor_nit === 'CF' || /^\d+$/.test(receptor_nit))) { Dialog.alert({ title:'NIT inválido', message:'Escribe solo números o “CF”.' }); return; }
+    if (reason.length < 3) { Dialog.alert({ title:'Falta motivo', message:'Escribe un motivo de al menos 3 caracteres.' }); btn?.removeAttribute('disabled'); isSubmittingManual=false; return; }
+    if (!(receptor_nit === 'CF' || /^\d+$/.test(receptor_nit))) { Dialog.alert({ title:'NIT inválido', message:'Escribe solo números o “CF”.' }); btn?.removeAttribute('disabled'); isSubmittingManual=false; return; }
 
     let amount = 0, used_monthly = false, label = '';
     if (modeMonthly.checked && hasMonthly){
@@ -2730,28 +2739,32 @@ async function renderManualInvoiceModule() {
       label = `Cobro mensual Q ${amount.toFixed(2)}`;
     } else {
       const v = Number(customInput.value);
-      if (!Number.isFinite(v) || v <= 0) { Dialog.alert({ title:'Monto inválido', message:'Ingresa un total personalizado mayor a 0.' }); return; }
+      if (!Number.isFinite(v) || v <= 0) { Dialog.alert({ title:'Monto inválido', message:'Ingresa un total personalizado mayor a 0.' }); btn?.removeAttribute('disabled'); isSubmittingManual=false; return; }
       amount = Math.round(v * 100) / 100;
       label = `Cobro personalizado Q ${amount.toFixed(2)}`;
     }
 
     const payload = { reason, receptor_nit, amount, used_monthly, send_to_fel: true };
 
+    // Idempotencia (el backend debería aceptar y deduplicar por esta llave)
+    const idemKey = (window.crypto?.randomUUID?.() || `mid-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+
     const dlg = Dialog.loading({ title:'Creando', message:'Enviando datos…' });
-    try{
-      let res = await fetchJSON(api('fel/manual-invoice'), {
-        method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
+    try {
+      const res = await fetchJSON(api('fel/manual-invoice'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Idempotency-Key': idemKey,     // <-- clave de idempotencia
+        },
+        body: JSON.stringify(payload),
       });
-      if (res?.ok === false || res == null) {
-        res = await fetchJSON(api('fel/manual-invoice'), {
-          method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
-        });
-      }
-      if (res?.ok){
+
+      if (res?.ok) {
         const uuidTxt = res.uuid ? `\nUUID: ${res.uuid}` : '';
         Dialog.ok(`Factura creada y enviada a FEL.\n${label}${uuidTxt}`, 'Éxito');
 
-        // cierra el modal "que está abierto"
+        // cerrar modal
         try {
           if (window.bootstrap?.Modal) {
             const el = document.getElementById('manualInvModal');
@@ -2760,7 +2773,7 @@ async function renderManualInvoiceModule() {
           } else {
             manualInvModalRef?.hide?.();
           }
-          const bd = document.querySelector('.modal-backdrop'); if (bd) bd.remove();
+          document.querySelector('.modal-backdrop')?.remove();
           document.body.classList.remove('modal-open');
         } catch {}
 
@@ -2768,10 +2781,15 @@ async function renderManualInvoiceModule() {
       } else {
         throw new Error(res?.error || 'No se pudo crear la factura manual');
       }
-    }catch(e){
+    } catch (e) {
       Dialog.err(e, 'Error al crear factura');
-    }finally{ dlg.close(); }
+    } finally {
+      dlg.close();
+      btn?.removeAttribute('disabled');
+      isSubmittingManual = false;
+    }
   });
+
 }
 
   const PAGE_STORAGE_KEY = 'zkt:lastPage';

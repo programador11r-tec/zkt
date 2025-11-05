@@ -2574,215 +2574,250 @@ class ApiController {
         }
     }
 
-    public function manualInvoiceCreate(): void
-    {
-        header('Content-Type: application/json; charset=utf-8');
+public function manualInvoiceCreate(): void
+{
+    header('Content-Type: application/json; charset=utf-8');
 
+    try {
+        $raw  = file_get_contents('php://input') ?: '{}';
+        $body = json_decode($raw, true) ?: [];
+
+        $reason       = trim((string)($body['reason'] ?? ''));                 // motivo OBLIGATORIO
+        $receptorNit  = strtoupper(trim((string)($body['receptor_nit'] ?? 'CF'))); // CF permitido
+        $receptorName = trim((string)($body['receptor_name'] ?? ''));          // opcional (lookup)
+        $mode         = (string)($body['mode'] ?? 'custom');                   // custom | monthly | grace
+        $amountIn     = isset($body['amount']) ? (float)$body['amount'] : null;
+
+        $this->debugLog('fel_manual_invoice_in.txt', ['body' => $body, 'server' => $_SERVER]);
+
+        if ($reason === '') {
+            echo json_encode(['ok' => false, 'error' => 'reason requerido']); return;
+        }
+        if ($receptorNit !== 'CF' && !ctype_digit($receptorNit)) {
+            echo json_encode(['ok' => false, 'error' => 'NIT inválido (use CF o solo dígitos)']); return;
+        }
+
+        $isGrace = ($mode === 'grace');
+
+        // === Config / DB (desde .env con helper)
+        /** @var \Config\Config $cfg */
+        $cfg = $this->config;
+        $pdo = \App\Utils\DB::pdo($cfg);
+        $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
+        $pdo->setAttribute(\PDO::ATTR_DEFAULT_FETCH_MODE, \PDO::FETCH_ASSOC);
+
+        // Detectar driver para SQL específico
+        $driver = (string)$pdo->getAttribute(\PDO::ATTR_DRIVER_NAME);
+        $isSqlite = ($driver === 'sqlite');
+        $createdNowExpr = $isSqlite ? "DATETIME('now','localtime')" : "NOW()";
+
+        // === AUTOFIX estructura solo para manual_invoices (soporta MySQL/SQLite)
         try {
-            $raw  = file_get_contents('php://input') ?: '{}';
-            $body = json_decode($raw, true) ?: [];
-
-            $reason       = trim((string)($body['reason'] ?? ''));                 // motivo OBLIGATORIO
-            $receptorNit  = strtoupper(trim((string)($body['receptor_nit'] ?? 'CF'))); // CF permitido
-            $receptorName = trim((string)($body['receptor_name'] ?? ''));          // opcional (lookup)
-            $mode         = (string)($body['mode'] ?? 'custom');                   // custom | monthly | grace
-            $amountIn     = isset($body['amount']) ? (float)$body['amount'] : null;
-
-            $this->debugLog('fel_manual_invoice_in.txt', ['body' => $body, 'server' => $_SERVER]);
-
-            if ($reason === '') {
-                echo json_encode(['ok' => false, 'error' => 'reason requerido']); return;
-            }
-            if ($receptorNit !== 'CF' && !ctype_digit($receptorNit)) {
-                echo json_encode(['ok' => false, 'error' => 'NIT inválido (use CF o solo dígitos)']); return;
-            }
-
-            $isGrace = ($mode === 'grace');
-
-            // === Config / DB
-            $cfg  = new \Config\Config(__DIR__ . '/../../.env');
-            $dsn  = $cfg->get('DB_DSN',  'mysql:host=127.0.0.1;dbname=zkt;charset=utf8mb4');
-            $user = $cfg->get('DB_USER', 'root');
-            $pass = $cfg->get('DB_PASS', '');
-
-            $pdo = new \PDO($dsn, $user, $pass, [
-                \PDO::ATTR_ERRMODE            => \PDO::ERRMODE_EXCEPTION,
-                \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC,
-            ]);
-
-            // === AUTOFIX estructura solo para manual_invoices (no toca invoices)
-            try {
+            if ($isSqlite) {
+                // Crear tabla si no existe (SQLite)
                 $pdo->exec("
                     CREATE TABLE IF NOT EXISTS manual_invoices (
-                    id             INT AUTO_INCREMENT PRIMARY KEY,
-                    created_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    reason         VARCHAR(255) NOT NULL,
-                    receptor_nit   VARCHAR(32)  NOT NULL,
-                    receptor_name  VARCHAR(255) NULL,
-                    amount         DECIMAL(10,2) NOT NULL DEFAULT 0.00,
-                    used_monthly   TINYINT(1) NOT NULL DEFAULT 0,
-                    send_to_fel    TINYINT(1) NOT NULL DEFAULT 1,
-                    fel_uuid       VARCHAR(64)  NULL,
-                    fel_status     VARCHAR(32)  NULL,
-                    fel_message    VARCHAR(255) NULL,
-                    fel_pdf_base64 MEDIUMTEXT   NULL
+                        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                        created_at     TEXT NOT NULL DEFAULT (DATETIME('now','localtime')),
+                        reason         TEXT NOT NULL,
+                        receptor_nit   TEXT NOT NULL,
+                        receptor_name  TEXT NULL,
+                        amount         REAL NOT NULL DEFAULT 0.00,
+                        used_monthly   INTEGER NOT NULL DEFAULT 0,
+                        send_to_fel    INTEGER NOT NULL DEFAULT 1,
+                        fel_uuid       TEXT NULL,
+                        fel_status     TEXT NULL,
+                        fel_message    TEXT NULL,
+                        fel_pdf_base64 TEXT NULL
+                    );
+                ");
+
+                // Columnas existentes
+                $cols = [];
+                $rs = $pdo->query("PRAGMA table_info(manual_invoices)");
+                foreach ($rs ?: [] as $r) { $cols[$r['name']] = true; }
+
+                // Agregar columnas que falten
+                if (!isset($cols['receptor_name'])) {
+                    $pdo->exec("ALTER TABLE manual_invoices ADD COLUMN receptor_name TEXT NULL;");
+                }
+                if (!isset($cols['fel_pdf_base64'])) {
+                    $pdo->exec("ALTER TABLE manual_invoices ADD COLUMN fel_pdf_base64 TEXT NULL;");
+                }
+            } else {
+                // MySQL/MariaDB
+                $pdo->exec("
+                    CREATE TABLE IF NOT EXISTS manual_invoices (
+                        id             INT AUTO_INCREMENT PRIMARY KEY,
+                        created_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        reason         VARCHAR(255) NOT NULL,
+                        receptor_nit   VARCHAR(32)  NOT NULL,
+                        receptor_name  VARCHAR(255) NULL,
+                        amount         DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+                        used_monthly   TINYINT(1) NOT NULL DEFAULT 0,
+                        send_to_fel    TINYINT(1) NOT NULL DEFAULT 1,
+                        fel_uuid       VARCHAR(64)  NULL,
+                        fel_status     VARCHAR(32)  NULL,
+                        fel_message    VARCHAR(255) NULL,
+                        fel_pdf_base64 MEDIUMTEXT   NULL
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
                 ");
-                // Asegurar columnas si tabla existía previamente
+
+                // Columnas existentes
                 $cols = [];
                 $q = $pdo->query("SHOW COLUMNS FROM manual_invoices");
                 while ($r = $q->fetch(\PDO::FETCH_ASSOC)) { $cols[$r['Field']] = true; }
+
+                // Agregar columnas que falten (sin IF NOT EXISTS para compat. amplia)
                 if (!isset($cols['receptor_name'])) {
                     $pdo->exec("ALTER TABLE manual_invoices ADD COLUMN receptor_name VARCHAR(255) NULL AFTER receptor_nit;");
                 }
                 if (!isset($cols['fel_pdf_base64'])) {
                     $pdo->exec("ALTER TABLE manual_invoices ADD COLUMN fel_pdf_base64 MEDIUMTEXT NULL AFTER fel_message;");
                 }
-            } catch (\Throwable $e) {
-                $this->debugLog('fel_manual_invoice_autofix.txt', ['error' => $e->getMessage()]);
             }
-
-            // === Cargar settings para monthly_rate
-            $settings = [];
-            try { $settings = \App\Utils\Schema::loadAppSettings(); } catch (\Throwable $e) {}
-            $monthlyRateCfg = isset($settings['billing']['monthly_rate']) ? (float)$settings['billing']['monthly_rate'] : null;
-            $monthlyRateNN  = is_numeric($monthlyRateCfg) ? (float)$monthlyRateCfg : 0.00;
-
-            // === Resolver total
-            if ($isGrace) {
-                $total = 0.00;
-            } elseif ($mode === 'monthly') {
-                if (!is_finite($monthlyRateNN) || $monthlyRateNN <= 0) {
-                    echo json_encode(['ok' => false, 'error' => 'monthly_rate no configurado o inválido']); return;
-                }
-                $total = $monthlyRateNN;
-            } else { // custom
-                if (!is_finite($amountIn) || $amountIn <= 0) {
-                    echo json_encode(['ok' => false, 'error' => 'amount inválido (> 0)']); return;
-                }
-                $total = (float)$amountIn;
-            }
-
-            // === FEL (usar la NUEVA función con PDF)
-            $felOk = false; $uuid = null; $felRes = null; $felErr = null; $pdfB64 = null; $pdfSavedPath = null;
-
-            if (!$isGrace) {
-                $client = new \App\Services\G4SClient($cfg);
-                $payloadFel = [
-                    'ticket_no'    => null, // manual
-                    'receptor_nit' => $receptorNit,
-                    'total'        => $total,
-                    'descripcion'  => mb_substr($reason, 0, 120), // se envía la descripción
-                ];
-
-                $this->debugLog('fel_manual_invoice_out.txt', ['request_payload' => $payloadFel]);
-
-                try {
-                    // NUEVO: pedir PDF con POST_DOCUMENT_SAT_PDF
-                    $felRes  = $client->submitInvoiceWithPdf($payloadFel);
-                    $felOk   = (bool)($felRes['ok'] ?? false);
-                    $uuid    = $felRes['uuid']        ?? null;
-                    $pdfB64  = $felRes['pdf_base64']  ?? null;
-                    $felErr  = $felRes['error']       ?? null;
-
-                    // Guardar PDF como archivo si vino
-                    if ($felOk && $pdfB64) {
-                        $tzGT = new \DateTimeZone('America/Guatemala');
-                        $now  = new \DateTime('now', $tzGT);
-                        $dir  = sprintf('%s/fel/%s/%s',
-                            rtrim((string)$cfg->get('STORAGE_PATH', __DIR__.'/../../storage'), '/'),
-                            $now->format('Y'),
-                            $now->format('m')
-                        );
-                        if (!is_dir($dir)) @mkdir($dir, 0775, true);
-
-                        $fname = ($uuid ?: 'DTE-'.$now->format('Ymd-His')).'.pdf';
-                        $pdfSavedPath = $dir.'/'.$fname;
-                        @file_put_contents($pdfSavedPath, base64_decode($pdfB64));
-                    }
-                } catch (\Throwable $e) {
-                    $felOk  = false;
-                    $felErr = $e->getMessage();
-                    $felRes = ['ok'=>false,'error'=>$felErr];
-                }
-            }
-
-            // === Persistir SOLO en manual_invoices
-            $pdo->beginTransaction();
-            $stmtM = $pdo->prepare("
-                INSERT INTO manual_invoices
-                    (reason, receptor_nit, receptor_name, amount, used_monthly, send_to_fel, fel_uuid, fel_status, fel_message, fel_pdf_base64, created_at)
-                VALUES
-                    (:r, :nit, :name, :amt, :um, :send, :uuid, :st, :msg, :pdf, NOW())
-            ");
-            $stmtM->execute([
-                ':r'    => $reason,
-                ':nit'  => $receptorNit,
-                ':name' => ($receptorName !== '' ? $receptorName : null),
-                ':amt'  => $total,
-                ':um'   => ($mode === 'monthly') ? 1 : 0,
-                ':send' => $isGrace ? 0 : 1,
-                ':uuid' => $uuid,
-                ':st'   => $isGrace ? 'SKIPPED' : ($felOk ? 'OK' : 'ERROR'),
-                ':msg'  => $isGrace ? 'no FEL (grace)' : ($felOk ? 'Emitida correctamente' : ($felErr ?: 'Error FEL')),
-                ':pdf'  => ($felOk && $pdfB64) ? $pdfB64 : null, // guarda base64 (opcional)
-            ]);
-            $manualId = (int)$pdo->lastInsertId();
-            $pdo->commit();
-
-            echo json_encode([
-                'ok'               => $isGrace ? true : $felOk,
-                'uuid'             => $uuid,
-                'message'          => $isGrace ? 'Factura de gracia registrada (sin FEL)' : ($felOk ? 'Factura manual certificada' : 'No se pudo certificar (registrada en BD)'),
-                'error'            => $isGrace ? null : $felErr,
-                'billing_amount'   => (float)$total,
-                'manual_id'        => $manualId,
-                'pdf_base64'       => $pdfB64,                 // PDF para descargar en UI
-                'pdf_saved_path'   => $pdfSavedPath,           // ruta guardada (si aplica)
-                'manual_open'      => false,
-                'pay_notify_sent'  => false,
-                'pay_notify_ack'   => false,
-                'pay_notify_error' => null,
-            ], JSON_UNESCAPED_UNICODE);
-
         } catch (\Throwable $e) {
-            if (isset($pdo) && $pdo->inTransaction()) $pdo->rollBack();
-            $this->debugLog('fel_manual_invoice_exc.txt', ['exception' => $e->getMessage()]);
-            echo json_encode(['ok' => false, 'error' => $e->getMessage()]);
+            $this->debugLog('fel_manual_invoice_autofix.txt', ['error' => $e->getMessage()]);
         }
+
+        // === Cargar settings para monthly_rate
+        $settings = [];
+        try { $settings = \App\Utils\Schema::loadAppSettings(); } catch (\Throwable $e) {}
+        $monthlyRateCfg = isset($settings['billing']['monthly_rate']) ? (float)$settings['billing']['monthly_rate'] : null;
+        $monthlyRateNN  = is_numeric($monthlyRateCfg) ? (float)$monthlyRateCfg : 0.00;
+
+        // === Resolver total
+        if ($isGrace) {
+            $total = 0.00;
+        } elseif ($mode === 'monthly') {
+            if (!is_finite($monthlyRateNN) || $monthlyRateNN <= 0) {
+                echo json_encode(['ok' => false, 'error' => 'monthly_rate no configurado o inválido']); return;
+            }
+            $total = $monthlyRateNN;
+        } else { // custom
+            if (!is_finite($amountIn) || $amountIn <= 0) {
+                echo json_encode(['ok' => false, 'error' => 'amount inválido (> 0)']); return;
+            }
+            $total = (float)$amountIn;
+        }
+
+        // === FEL (usar la NUEVA función con PDF)
+        $felOk = false; $uuid = null; $felRes = null; $felErr = null; $pdfB64 = null; $pdfSavedPath = null;
+
+        if (!$isGrace) {
+            $client = new \App\Services\G4SClient($cfg);
+            $payloadFel = [
+                'ticket_no'    => null, // manual
+                'receptor_nit' => $receptorNit,
+                'total'        => $total,
+                'descripcion'  => mb_substr($reason, 0, 120), // se envía la descripción
+            ];
+
+            $this->debugLog('fel_manual_invoice_out.txt', ['request_payload' => $payloadFel]);
+
+            try {
+                // NUEVO: pedir PDF con POST_DOCUMENT_SAT_PDF (implementado en tu G4SClient::submitInvoiceWithPdf)
+                $felRes  = $client->submitInvoiceWithPdf($payloadFel);
+                $felOk   = (bool)($felRes['ok'] ?? false);
+                $uuid    = $felRes['uuid']        ?? null;
+                $pdfB64  = $felRes['pdf_base64']  ?? null;
+                $felErr  = $felRes['error']       ?? null;
+
+                // Guardar PDF como archivo si vino
+                if ($felOk && $pdfB64) {
+                    $tzGT = new \DateTimeZone('America/Guatemala');
+                    $now  = new \DateTime('now', $tzGT);
+                    $dir  = sprintf('%s/fel/%s/%s',
+                        rtrim((string)$cfg->get('STORAGE_PATH', __DIR__.'/../../storage'), '/'),
+                        $now->format('Y'),
+                        $now->format('m')
+                    );
+                    if (!is_dir($dir)) @mkdir($dir, 0775, true);
+
+                    $fname = ($uuid ?: 'DTE-'.$now->format('Ymd-His')).'.pdf';
+                    $pdfSavedPath = $dir.'/'.$fname;
+                    @file_put_contents($pdfSavedPath, base64_decode($pdfB64));
+                }
+            } catch (\Throwable $e) {
+                $felOk  = false;
+                $felErr = $e->getMessage();
+                $felRes = ['ok'=>false,'error'=>$felErr];
+            }
+        }
+
+        // === Persistir SOLO en manual_invoices
+        $pdo->beginTransaction();
+        $stmtM = $pdo->prepare("
+            INSERT INTO manual_invoices
+                (reason, receptor_nit, receptor_name, amount, used_monthly, send_to_fel, fel_uuid, fel_status, fel_message, fel_pdf_base64, created_at)
+            VALUES
+                (:r, :nit, :name, :amt, :um, :send, :uuid, :st, :msg, :pdf, {$createdNowExpr})
+        ");
+        $stmtM->execute([
+            ':r'    => $reason,
+            ':nit'  => $receptorNit,
+            ':name' => ($receptorName !== '' ? $receptorName : null),
+            ':amt'  => $total,
+            ':um'   => ($mode === 'monthly') ? 1 : 0,
+            ':send' => $isGrace ? 0 : 1,
+            ':uuid' => $uuid,
+            ':st'   => $isGrace ? 'SKIPPED' : ($felOk ? 'OK' : 'ERROR'),
+            ':msg'  => $isGrace ? 'no FEL (grace)' : ($felOk ? 'Emitida correctamente' : ($felErr ?: 'Error FEL')),
+            ':pdf'  => ($felOk && $pdfB64) ? $pdfB64 : null, // guarda base64 (opcional)
+        ]);
+        $manualId = (int)$pdo->lastInsertId();
+        $pdo->commit();
+
+        echo json_encode([
+            'ok'               => $isGrace ? true : $felOk,
+            'uuid'             => $uuid,
+            'message'          => $isGrace ? 'Factura de gracia registrada (sin FEL)' : ($felOk ? 'Factura manual certificada' : 'No se pudo certificar (registrada en BD)'),
+            'error'            => $isGrace ? null : $felErr,
+            'billing_amount'   => (float)$total,
+            'manual_id'        => $manualId,
+            'pdf_base64'       => $pdfB64,                 // PDF para descargar en UI
+            'pdf_saved_path'   => $pdfSavedPath,           // ruta guardada (si aplica)
+            'manual_open'      => false,
+            'pay_notify_sent'  => false,
+            'pay_notify_ack'   => false,
+            'pay_notify_error' => null,
+        ], JSON_UNESCAPED_UNICODE);
+
+    } catch (\Throwable $e) {
+        if (isset($pdo) && $pdo->inTransaction()) $pdo->rollBack();
+        $this->debugLog('fel_manual_invoice_exc.txt', ['exception' => $e->getMessage()]);
+        echo json_encode(['ok' => false, 'error' => $e->getMessage()]);
     }
+}
 
-    public function manualInvoiceList(): void
-    {
-        header('Content-Type: application/json; charset=utf-8');
+public function manualInvoiceList(): void
+{
+    header('Content-Type: application/json; charset=utf-8');
 
-        try {
-            // Usa la misma fuente de verdad que manualInvoiceCreate()
-            $cfg  = new \Config\Config(__DIR__ . '/../../.env');
-            $dsn  = $cfg->get('DB_DSN',  'mysql:host=127.0.0.1;dbname=zkt;charset=utf8mb4');
-            $user = $cfg->get('DB_USER', 'root');
-            $pass = $cfg->get('DB_PASS', '');
+    try {
+        // DB desde .env con helper
+        /** @var \Config\Config $cfg */
+        $cfg = $this->config;
+        $pdo = \App\Utils\DB::pdo($cfg);
+        $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
+        $pdo->setAttribute(\PDO::ATTR_DEFAULT_FETCH_MODE, \PDO::FETCH_ASSOC);
 
-            $pdo = new \PDO($dsn, $user, $pass, [
-                \PDO::ATTR_ERRMODE            => \PDO::ERRMODE_EXCEPTION,
-                \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC,
-            ]);
-
-            $stmt = $pdo->query("
-                SELECT
+        $stmt = $pdo->query("
+            SELECT
                 id, created_at, reason, receptor_nit, receptor_name, amount,
                 used_monthly, send_to_fel, fel_uuid, fel_status, fel_message
-                FROM manual_invoices
-                ORDER BY id DESC
-                LIMIT 100
-            ");
-            $rows = $stmt->fetchAll();
+            FROM manual_invoices
+            ORDER BY id DESC
+            LIMIT 100
+        ");
+        $rows = $stmt->fetchAll();
 
-            echo json_encode(['ok' => true, 'data' => $rows], JSON_UNESCAPED_UNICODE);
-        } catch (\Throwable $e) {
-            echo json_encode(['ok' => false, 'error' => 'manualInvoiceList: '.$e->getMessage()]);
-        }
+        echo json_encode(['ok' => true, 'data' => $rows], JSON_UNESCAPED_UNICODE);
+    } catch (\Throwable $e) {
+        echo json_encode(['ok' => false, 'error' => 'manualInvoiceList: '.$e->getMessage()]);
     }
+}
+
 
     public function getFelDocumentPdfByUuid(): void
     {
@@ -2826,21 +2861,19 @@ class ApiController {
     public function getManualInvoicePdf(): void
     {
         header('Content-Type: application/json; charset=utf-8');
+
         try {
             $id = (int)($_GET['id'] ?? 0);
             if ($id <= 0) { echo json_encode(['ok'=>false,'error'=>'id requerido']); return; }
 
-            $cfg  = new \Config\Config(__DIR__ . '/../../.env');
-            $dsn  = $cfg->get('DB_DSN',  'mysql:host=127.0.0.1;dbname=zkt;charset=utf8mb4');
-            $user = $cfg->get('DB_USER', 'root');
-            $pass = $cfg->get('DB_PASS', '');
+            // Usa la config del controlador (.env) y el helper DB::pdo
+            /** @var \Config\Config $cfg */
+            $cfg = $this->config;
+            $pdo = \App\Utils\DB::pdo($cfg);
+            $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
+            $pdo->setAttribute(\PDO::ATTR_DEFAULT_FETCH_MODE, \PDO::FETCH_ASSOC);
 
-            $pdo = new \PDO($dsn, $user, $pass, [
-                \PDO::ATTR_ERRMODE            => \PDO::ERRMODE_EXCEPTION,
-                \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC,
-            ]);
-
-            $row = null;
+            // Busca la factura
             $st  = $pdo->prepare("SELECT * FROM manual_invoices WHERE id = :i LIMIT 1");
             $st->execute([':i'=>$id]);
             $row = $st->fetch();
@@ -2850,9 +2883,10 @@ class ApiController {
             $pdfB64 = (string)($row['fel_pdf_base64'] ?? '');
             $uuid   = (string)($row['fel_uuid'] ?? '');
 
-            // Si no hay PDF guardado pero sí UUID, intenta descargarlo y persistirlo
+            // Si no hay PDF guardado pero sí UUID y fue enviada a FEL con estado OK, intenta descargar y persistir
             if ($pdfB64 === '' && $uuid !== '' && (int)$row['send_to_fel'] === 1 && strtoupper((string)$row['fel_status']) === 'OK') {
                 $client = new \App\Services\G4SClient($cfg);
+
                 $pdfB64 = $client->fetchPdfByGuid($uuid, 'GET_DOCUMENT_SAT_PDF');
                 if (!$client->isBase64Pdf($pdfB64)) {
                     $pdfB64 = $client->fetchPdfByGuid($uuid, 'GET_DOCUMENT_PDF');
@@ -2862,16 +2896,18 @@ class ApiController {
                 }
 
                 if ($client->isBase64Pdf($pdfB64)) {
-                    // guardar en BD
+                    // Guardar en BD
                     $up = $pdo->prepare("UPDATE manual_invoices SET fel_pdf_base64 = :p WHERE id = :i");
                     $up->execute([':p'=>$pdfB64, ':i'=>$id]);
 
-                    // y en disco
+                    // Guardar en disco
                     $tzGT = new \DateTimeZone('America/Guatemala');
                     $now  = new \DateTime('now', $tzGT);
-                    $dir  = sprintf('%s/fel/%s/%s',
+                    $dir  = sprintf(
+                        '%s/fel/%s/%s',
                         rtrim((string)$cfg->get('STORAGE_PATH', __DIR__.'/../../storage'), '/'),
-                        $now->format('Y'), $now->format('m')
+                        $now->format('Y'),
+                        $now->format('m')
                     );
                     if (!is_dir($dir)) @mkdir($dir, 0775, true);
                     @file_put_contents($dir.'/'.$uuid.'.pdf', base64_decode($pdfB64));
@@ -2888,19 +2924,17 @@ class ApiController {
     public function getManualInvoiceOne(): void
     {
         header('Content-Type: application/json; charset=utf-8');
+
         try {
             $id = (int)($_GET['id'] ?? 0);
             if ($id <= 0) { echo json_encode(['ok'=>false,'error'=>'id requerido']); return; }
 
-            $cfg  = new \Config\Config(__DIR__ . '/../../.env');
-            $dsn  = $cfg->get('DB_DSN',  'mysql:host=127.0.0.1;dbname=zkt;charset=utf8mb4');
-            $user = $cfg->get('DB_USER', 'root');
-            $pass = $cfg->get('DB_PASS', '');
-
-            $pdo = new \PDO($dsn, $user, $pass, [
-                \PDO::ATTR_ERRMODE            => \PDO::ERRMODE_EXCEPTION,
-                \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC,
-            ]);
+            // Usa la config del controlador (.env) y el helper DB::pdo
+            /** @var \Config\Config $cfg */
+            $cfg = $this->config;
+            $pdo = \App\Utils\DB::pdo($cfg);
+            $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
+            $pdo->setAttribute(\PDO::ATTR_DEFAULT_FETCH_MODE, \PDO::FETCH_ASSOC);
 
             $st = $pdo->prepare("SELECT * FROM manual_invoices WHERE id = :i LIMIT 1");
             $st->execute([':i'=>$id]);

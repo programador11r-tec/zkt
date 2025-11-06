@@ -463,340 +463,340 @@ async function loadSettings(quiet = false) {
    Tickets safe + normalización
    =================================== */
 
-async function getTicketsSafe() {
-  try {
-    const res = await fetch(api('tickets'), { headers: { Accept:'application/json' }});
-    if (!res.ok) throw new Error('tickets http '+res.status);
-    return await safeJson(res);
-  } catch (e) {
-    console.warn('[tickets] error:', e);
-    return { data: [] };
+  async function getTicketsSafe() {
+    try {
+      const res = await fetch(api('tickets'), { headers: { Accept:'application/json' }});
+      if (!res.ok) throw new Error('tickets http '+res.status);
+      return await safeJson(res);
+    } catch (e) {
+      console.warn('[tickets] error:', e);
+      return { data: [] };
+    }
   }
-}
 
-function normalizeTickets(resp) {
-  const arr = Array.isArray(resp?.data)
-    ? resp.data
-    : Array.isArray(resp?.rows)
-    ? resp.rows
-    : Array.isArray(resp)
-    ? resp
-    : [];
+  function normalizeTickets(resp) {
+    const arr = Array.isArray(resp?.data)
+      ? resp.data
+      : Array.isArray(resp?.rows)
+      ? resp.rows
+      : Array.isArray(resp)
+      ? resp
+      : [];
 
-  return arr.map(r => ({
-    // muestra algo útil aunque no haya nombre
-    name:  r.name || r.person_name || r.plate || r.ticket_no || '(sin nombre)',
-    checkIn:  r.checkIn || r.check_in || r.entry_at || r.in_time || r.fecha_entrada || null,
-    checkOut: r.checkOut || r.check_out || r.exit_at  || r.out_time || r.fecha_salida  || null,
-  }));
-}
+    return arr.map(r => ({
+      // muestra algo útil aunque no haya nombre
+      name:  r.name || r.person_name || r.plate || r.ticket_no || '(sin nombre)',
+      checkIn:  r.checkIn || r.check_in || r.entry_at || r.in_time || r.fecha_entrada || null,
+      checkOut: r.checkOut || r.check_out || r.exit_at  || r.out_time || r.fecha_salida  || null,
+    }));
+  }
 
-// Si tienes un buildTimeline propio, úsalo; si no, deja un fallback
-function buildTimeline(activity) {
-  const items = Array.isArray(activity) ? activity : [];
-  if (!items.length) return '';
-  return `
-    <div class="list-group list-group-flush">
-      ${items.slice(0,15).map(it => `
-        <div class="list-group-item d-flex align-items-start gap-2">
-          <div class="flex-grow-1">
-            <div class="small">${escapeHtml(it.title || it.event || 'Evento')}</div>
-            <div class="text-muted small">${escapeHtml(it.detail || '')}</div>
+  // Si tienes un buildTimeline propio, úsalo; si no, deja un fallback
+  function buildTimeline(activity) {
+    const items = Array.isArray(activity) ? activity : [];
+    if (!items.length) return '';
+    return `
+      <div class="list-group list-group-flush">
+        ${items.slice(0,15).map(it => `
+          <div class="list-group-item d-flex align-items-start gap-2">
+            <div class="flex-grow-1">
+              <div class="small">${escapeHtml(it.title || it.event || 'Evento')}</div>
+              <div class="text-muted small">${escapeHtml(it.detail || '')}</div>
+            </div>
+            <div class="text-nowrap text-muted small">${escapeHtml(formatRelativeTime(it.when || it.date || it.at || new Date()))}</div>
           </div>
-          <div class="text-nowrap text-muted small">${escapeHtml(formatRelativeTime(it.when || it.date || it.at || new Date()))}</div>
-        </div>
-      `).join('')}
-    </div>
-  `;
-}
+        `).join('')}
+      </div>
+    `;
+  }
 
 /* ============================
    DASHBOARD (Bootstrap)
    ============================ */
 
-async function renderDashboard() {
-  try {
-    // ¡No usar Promise.all con fetchJSON(settings), porque caseta no puede!
-    const [ticketsResp, settings] = await Promise.all([
-      getTicketsSafe(),
-      loadSettings(),
-    ]);
+  async function renderDashboard() {
+    try {
+      // ¡No usar Promise.all con fetchJSON(settings), porque caseta no puede!
+      const [ticketsResp, settings] = await Promise.all([
+        getTicketsSafe(),
+        loadSettings(),
+      ]);
 
-    const data = normalizeTickets(ticketsResp);
-    const state = { search: '', page: 1 };
-    const pageSize = 20;
+      const data = normalizeTickets(ticketsResp);
+      const state = { search: '', page: 1 };
+      const pageSize = 20;
 
-    const metrics = settings?.database?.metrics ?? {};
-    const pending = Number(metrics.pending_invoices ?? 0);
+      const metrics = settings?.database?.metrics ?? {};
+      const pending = Number(metrics.pending_invoices ?? 0);
 
-    const summaryCards = [
-      {
-        title: 'Asistencias de hoy',
-        badge: { text: 'En vivo', variant: 'primary' },
-        value: formatNumber(data.length),
-        detail: 'Lecturas registradas en el día',
-        accent: 'primary',
-        icon: 'bi-people-fill',
-      },
-      {
-        title: 'Tickets en base de datos',
-        badge: { text: 'Histórico', variant: 'info' },
-        value: formatNumber(metrics.tickets_total),
-        detail: metrics.tickets_last_sync
-          ? `Último registro ${formatRelativeTime(metrics.tickets_last_sync)}`
-          : 'Sin registros almacenados',
-        accent: 'info',
-        icon: 'bi-database-fill',
-      },
-      {
-        title: 'Facturas emitidas',
-        badge: { text: 'FEL', variant: 'success' },
-        value: formatNumber(metrics.invoices_total),
-        detail: metrics.invoices_last_sync
-          ? `Última emisión ${formatRelativeTime(metrics.invoices_last_sync)}`
-          : 'Sin facturas emitidas',
-        accent: 'success',
-        icon: 'bi-receipt-cutoff',
-      },
-      {
-        title: 'Pendientes por facturar',
-        badge: { text: pending > 0 ? 'Atención' : 'Al día', variant: pending > 0 ? 'warning' : 'secondary' },
-        value: formatNumber(pending),
-        detail: pending > 0 ? 'Genera FEL desde Facturación' : 'Sin pendientes',
-        accent: pending > 0 ? 'warning' : 'secondary',
-        icon: pending > 0 ? 'bi-exclamation-triangle-fill' : 'bi-check-circle-fill',
-      },
-    ];
+      const summaryCards = [
+        {
+          title: 'Asistencias de hoy',
+          badge: { text: 'En vivo', variant: 'primary' },
+          value: formatNumber(data.length),
+          detail: 'Lecturas registradas en el día',
+          accent: 'primary',
+          icon: 'bi-people-fill',
+        },
+        {
+          title: 'Tickets en base de datos',
+          badge: { text: 'Histórico', variant: 'info' },
+          value: formatNumber(metrics.tickets_total),
+          detail: metrics.tickets_last_sync
+            ? `Último registro ${formatRelativeTime(metrics.tickets_last_sync)}`
+            : 'Sin registros almacenados',
+          accent: 'info',
+          icon: 'bi-database-fill',
+        },
+        {
+          title: 'Facturas emitidas',
+          badge: { text: 'FEL', variant: 'success' },
+          value: formatNumber(metrics.invoices_total),
+          detail: metrics.invoices_last_sync
+            ? `Última emisión ${formatRelativeTime(metrics.invoices_last_sync)}`
+            : 'Sin facturas emitidas',
+          accent: 'success',
+          icon: 'bi-receipt-cutoff',
+        },
+        {
+          title: 'Pendientes por facturar',
+          badge: { text: pending > 0 ? 'Atención' : 'Al día', variant: pending > 0 ? 'warning' : 'secondary' },
+          value: formatNumber(pending),
+          detail: pending > 0 ? 'Genera FEL desde Facturación' : 'Sin pendientes',
+          accent: pending > 0 ? 'warning' : 'secondary',
+          icon: pending > 0 ? 'bi-exclamation-triangle-fill' : 'bi-check-circle-fill',
+        },
+      ];
 
-    const summaryHtml = summaryCards
-      .map((c) => `
-        <div class="col">
-          <div class="card h-100 border-0 shadow-sm">
-            <div class="card-body d-flex flex-column">
-              <div class="d-flex align-items-start justify-content-between">
-                <span class="badge bg-${c.badge.variant}">${escapeHtml(c.badge.text)}</span>
-                <i class="bi ${c.icon} fs-4 text-${c.accent}"></i>
+      const summaryHtml = summaryCards
+        .map((c) => `
+          <div class="col">
+            <div class="card h-100 border-0 shadow-sm">
+              <div class="card-body d-flex flex-column">
+                <div class="d-flex align-items-start justify-content-between">
+                  <span class="badge bg-${c.badge.variant}">${escapeHtml(c.badge.text)}</span>
+                  <i class="bi ${c.icon} fs-4 text-${c.accent}"></i>
+                </div>
+                <h6 class="mt-2 mb-1 text-muted">${escapeHtml(c.title)}</h6>
+                <div class="fs-3 fw-semibold mb-1 text-${c.accent}">${escapeHtml(c.value)}</div>
+                <div class="text-muted small">${escapeHtml(c.detail)}</div>
               </div>
-              <h6 class="mt-2 mb-1 text-muted">${escapeHtml(c.title)}</h6>
-              <div class="fs-3 fw-semibold mb-1 text-${c.accent}">${escapeHtml(c.value)}</div>
-              <div class="text-muted small">${escapeHtml(c.detail)}</div>
             </div>
           </div>
-        </div>
-      `).join('');
+        `).join('');
 
-    // Layout principal (solo Bootstrap)
-    const app = document.getElementById('app') || document.body;
-    app.innerHTML = `
-      <div class="container-fluid px-0">
-        <!-- Resumen -->
-        <div class="row row-cols-1 row-cols-sm-2 row-cols-xxl-4 g-3 mb-4">
-          ${summaryHtml}
-        </div>
+      // Layout principal (solo Bootstrap)
+      const app = document.getElementById('app') || document.body;
+      app.innerHTML = `
+        <div class="container-fluid px-0">
+          <!-- Resumen -->
+          <div class="row row-cols-1 row-cols-sm-2 row-cols-xxl-4 g-3 mb-4">
+            ${summaryHtml}
+          </div>
 
-        <div class="row g-4 align-items-stretch">
-          <!-- Tabla -->
-          <div class="col-xl-8">
-            <div class="card h-100 shadow-sm">
-              <div class="card-body d-flex flex-column gap-3 h-100">
-                <div class="d-flex flex-wrap gap-2 align-items-start justify-content-between">
-                  <div>
-                    <h5 class="card-title mb-1">Asistencias registradas</h5>
-                    <p class="text-muted small mb-0">Información consolidada desde la base de datos.</p>
+          <div class="row g-4 align-items-stretch">
+            <!-- Tabla -->
+            <div class="col-xl-8">
+              <div class="card h-100 shadow-sm">
+                <div class="card-body d-flex flex-column gap-3 h-100">
+                  <div class="d-flex flex-wrap gap-2 align-items-start justify-content-between">
+                    <div>
+                      <h5 class="card-title mb-1">Asistencias registradas</h5>
+                      <p class="text-muted small mb-0">Información consolidada desde la base de datos.</p>
+                    </div>
+                    <div class="ms-auto" style="max-width: 260px;">
+                      <input type="search" id="dashSearch" class="form-control form-control-sm"
+                            placeholder="Buscar ticket, placa o nombre..." aria-label="Buscar asistencia">
+                    </div>
                   </div>
-                  <div class="ms-auto" style="max-width: 260px;">
-                    <input type="search" id="dashSearch" class="form-control form-control-sm"
-                          placeholder="Buscar ticket, placa o nombre..." aria-label="Buscar asistencia">
+
+                  <div class="table-responsive flex-grow-1">
+                    <table class="table table-sm table-hover align-middle mb-0">
+                      <thead class="table-light">
+                        <tr>
+                          <th style="width:72px">#</th>
+                          <th>Nombre</th>
+                          <th>Entrada</th>
+                          <th>Salida</th>
+                        </tr>
+                      </thead>
+                      <tbody id="dashBody">
+                        <tr>
+                          <td colspan="4" class="text-center text-muted py-4">
+                            Cargando registros…
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div class="d-flex flex-wrap gap-2 align-items-center justify-content-between pt-2">
+                    <small class="text-muted" id="dashMeta"></small>
+                    <div class="btn-group btn-group-sm" role="group" aria-label="Paginación de asistencias">
+                      <button type="button" class="btn btn-outline-secondary" id="dashPrev">
+                        <i class="bi bi-chevron-left"></i> Anterior
+                      </button>
+                      <button type="button" class="btn btn-outline-secondary" id="dashNext">
+                        Siguiente <i class="bi bi-chevron-right"></i>
+                      </button>
+                    </div>
                   </div>
                 </div>
+              </div>
+            </div>
 
-                <div class="table-responsive flex-grow-1">
-                  <table class="table table-sm table-hover align-middle mb-0">
-                    <thead class="table-light">
-                      <tr>
-                        <th style="width:72px">#</th>
-                        <th>Nombre</th>
-                        <th>Entrada</th>
-                        <th>Salida</th>
-                      </tr>
-                    </thead>
-                    <tbody id="dashBody">
-                      <tr>
-                        <td colspan="4" class="text-center text-muted py-4">
-                          Cargando registros…
-                        </td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-
-                <div class="d-flex flex-wrap gap-2 align-items-center justify-content-between pt-2">
-                  <small class="text-muted" id="dashMeta"></small>
-                  <div class="btn-group btn-group-sm" role="group" aria-label="Paginación de asistencias">
-                    <button type="button" class="btn btn-outline-secondary" id="dashPrev">
-                      <i class="bi bi-chevron-left"></i> Anterior
+            <!-- Actividad -->
+            <div class="col-xl-4">
+              <div class="card h-100 shadow-sm">
+                <div class="card-body d-flex flex-column gap-3">
+                  <div class="d-flex align-items-start justify-content-between gap-2">
+                    <div>
+                      <h5 class="card-title mb-1">Actividad reciente</h5>
+                      <p class="text-muted small mb-0">Últimos eventos sincronizados.</p>
+                    </div>
+                    <button class="btn btn-link btn-sm p-0" id="timelineRefresh">
+                      <i class="bi bi-arrow-clockwise"></i> Actualizar
                     </button>
-                    <button type="button" class="btn btn-outline-secondary" id="dashNext">
-                      Siguiente <i class="bi bi-chevron-right"></i>
-                    </button>
+                  </div>
+
+                  <div id="activityTimeline">
+                    <div class="text-muted small">Cargando actividad…</div>
                   </div>
                 </div>
               </div>
             </div>
           </div>
+        </div>`;
 
-          <!-- Actividad -->
-          <div class="col-xl-4">
-            <div class="card h-100 shadow-sm">
-              <div class="card-body d-flex flex-column gap-3">
-                <div class="d-flex align-items-start justify-content-between gap-2">
-                  <div>
-                    <h5 class="card-title mb-1">Actividad reciente</h5>
-                    <p class="text-muted small mb-0">Últimos eventos sincronizados.</p>
-                  </div>
-                  <button class="btn btn-link btn-sm p-0" id="timelineRefresh">
-                    <i class="bi bi-arrow-clockwise"></i> Actualizar
-                  </button>
-                </div>
+      // Timeline
+      const timelineContainer = document.getElementById('activityTimeline');
+      if (timelineContainer) {
+        const tl = buildTimeline(settings?.activity);
+        timelineContainer.innerHTML = tl || `<div class="text-muted small">Sin actividad reciente.</div>`;
+      }
 
-                <div id="activityTimeline">
-                  <div class="text-muted small">Cargando actividad…</div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>`;
-
-    // Timeline
-    const timelineContainer = document.getElementById('activityTimeline');
-    if (timelineContainer) {
-      const tl = buildTimeline(settings?.activity);
-      timelineContainer.innerHTML = tl || `<div class="text-muted small">Sin actividad reciente.</div>`;
-    }
-
-    // Botón de refresco de actividad
-    const timelineRefresh = document.getElementById('timelineRefresh');
-    if (timelineRefresh) {
-      timelineRefresh.addEventListener('click', async () => {
-        const original = timelineRefresh.innerHTML;
-        timelineRefresh.disabled = true;
-        timelineRefresh.innerHTML = `<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span> Actualizando…`;
-        let hadError = false;
-        try {
-          await loadSettings(true);
-          await renderDashboard();
-        } catch (err) {
-          hadError = true;
-          console.error(err);
-          timelineRefresh.disabled = false;
-          timelineRefresh.innerHTML = `<i class="bi bi-exclamation-triangle me-1"></i> Reintentar`;
-        } finally {
-          if (!hadError && timelineRefresh.isConnected) {
-            timelineRefresh.innerHTML = original;
+      // Botón de refresco de actividad
+      const timelineRefresh = document.getElementById('timelineRefresh');
+      if (timelineRefresh) {
+        timelineRefresh.addEventListener('click', async () => {
+          const original = timelineRefresh.innerHTML;
+          timelineRefresh.disabled = true;
+          timelineRefresh.innerHTML = `<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span> Actualizando…`;
+          let hadError = false;
+          try {
+            await loadSettings(true);
+            await renderDashboard();
+          } catch (err) {
+            hadError = true;
+            console.error(err);
+            timelineRefresh.disabled = false;
+            timelineRefresh.innerHTML = `<i class="bi bi-exclamation-triangle me-1"></i> Reintentar`;
+          } finally {
+            if (!hadError && timelineRefresh.isConnected) {
+              timelineRefresh.innerHTML = original;
+            }
           }
-        }
-      });
-    }
+        });
+      }
 
-    // Tabla + paginación
-    const tbody = document.getElementById('dashBody');
-    const meta = document.getElementById('dashMeta');
-    const searchInput = document.getElementById('dashSearch');
-    const prevBtn = document.getElementById('dashPrev');
-    const nextBtn = document.getElementById('dashNext');
+      // Tabla + paginación
+      const tbody = document.getElementById('dashBody');
+      const meta = document.getElementById('dashMeta');
+      const searchInput = document.getElementById('dashSearch');
+      const prevBtn = document.getElementById('dashPrev');
+      const nextBtn = document.getElementById('dashNext');
 
-    function filterData() {
-      if (!state.search) return data;
-      const term = state.search.toLowerCase();
-      return data.filter((row) =>
-        Object.values(row).some((value) => String(value ?? '').toLowerCase().includes(term))
-      );
-    }
+      function filterData() {
+        if (!state.search) return data;
+        const term = state.search.toLowerCase();
+        return data.filter((row) =>
+          Object.values(row).some((value) => String(value ?? '').toLowerCase().includes(term))
+        );
+      }
 
-    function renderTable() {
-      const filtered = filterData();
-      const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
-      if (state.page > totalPages) state.page = totalPages;
+      function renderTable() {
+        const filtered = filterData();
+        const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+        if (state.page > totalPages) state.page = totalPages;
 
-      const start = (state.page - 1) * pageSize;
-      const pageItems = filtered.slice(start, start + pageSize);
+        const start = (state.page - 1) * pageSize;
+        const pageItems = filtered.slice(start, start + pageSize);
 
-      if (pageItems.length) {
-        tbody.innerHTML = pageItems
-          .map((row, index) => `
+        if (pageItems.length) {
+          tbody.innerHTML = pageItems
+            .map((row, index) => `
+              <tr>
+                <td>${escapeHtml(start + index + 1)}</td>
+                <td>${escapeHtml(row.name)}</td>
+                <td>${escapeHtml(row.checkIn || '-')}</td>
+                <td>${escapeHtml(row.checkOut || '-')}</td>
+              </tr>
+            `)
+            .join('');
+        } else {
+          const message =
+            data.length && !filtered.length ? 'No se encontraron resultados' : 'Sin registros disponibles';
+          tbody.innerHTML = `
             <tr>
-              <td>${escapeHtml(start + index + 1)}</td>
-              <td>${escapeHtml(row.name)}</td>
-              <td>${escapeHtml(row.checkIn || '-')}</td>
-              <td>${escapeHtml(row.checkOut || '-')}</td>
+              <td colspan="4" class="text-center text-muted py-4">
+                ${escapeHtml(message)}
+              </td>
             </tr>
-          `)
-          .join('');
-      } else {
-        const message =
-          data.length && !filtered.length ? 'No se encontraron resultados' : 'Sin registros disponibles';
-        tbody.innerHTML = `
-          <tr>
-            <td colspan="4" class="text-center text-muted py-4">
-              ${escapeHtml(message)}
-            </td>
-          </tr>
-        `;
+          `;
+        }
+
+        if (filtered.length) {
+          meta.textContent = `Mostrando ${start + 1} - ${Math.min(start + pageItems.length, filtered.length)} de ${filtered.length} registros`;
+        } else if (data.length) {
+          meta.textContent = 'No se encontraron resultados para la búsqueda actual';
+        } else {
+          meta.textContent = 'Sin registros para mostrar';
+        }
+
+        prevBtn.disabled = state.page <= 1 || !filtered.length;
+        nextBtn.disabled = state.page >= totalPages || !filtered.length;
       }
 
-      if (filtered.length) {
-        meta.textContent = `Mostrando ${start + 1} - ${Math.min(start + pageItems.length, filtered.length)} de ${filtered.length} registros`;
-      } else if (data.length) {
-        meta.textContent = 'No se encontraron resultados para la búsqueda actual';
-      } else {
-        meta.textContent = 'Sin registros para mostrar';
+      if (searchInput) {
+        searchInput.addEventListener('input', (event) => {
+          state.search = event.target.value.trim();
+          state.page = 1;
+          renderTable();
+        });
       }
 
-      prevBtn.disabled = state.page <= 1 || !filtered.length;
-      nextBtn.disabled = state.page >= totalPages || !filtered.length;
-    }
+      if (prevBtn) {
+        prevBtn.addEventListener('click', () => {
+          if (state.page > 1) {
+            state.page -= 1;
+            renderTable();
+          }
+        });
+      }
 
-    if (searchInput) {
-      searchInput.addEventListener('input', (event) => {
-        state.search = event.target.value.trim();
-        state.page = 1;
-        renderTable();
-      });
-    }
+      if (nextBtn) {
+        nextBtn.addEventListener('click', () => {
+          const totalPages = Math.max(1, Math.ceil(filterData().length / pageSize));
+          if (state.page < totalPages) {
+            state.page += 1;
+            renderTable();
+          }
+        });
+      }
 
-    if (prevBtn) {
-      prevBtn.addEventListener('click', () => {
-        if (state.page > 1) {
-          state.page -= 1;
-          renderTable();
-        }
-      });
+      renderTable();
+    } catch (e) {
+      const app = document.getElementById('app') || document.body;
+      app.innerHTML = `
+        <div class="card shadow-sm">
+          <div class="card-body">
+            <h5 class="card-title text-danger mb-2">No se pudo cargar el dashboard</h5>
+            <p class="text-muted">Intenta nuevamente en unos segundos. Si el problema persiste, revisa la conexión con la base de datos y las credenciales.</p>
+            <pre class="small mb-0">${escapeHtml(String(e))}</pre>
+          </div>
+        </div>`;
     }
-
-    if (nextBtn) {
-      nextBtn.addEventListener('click', () => {
-        const totalPages = Math.max(1, Math.ceil(filterData().length / pageSize));
-        if (state.page < totalPages) {
-          state.page += 1;
-          renderTable();
-        }
-      });
-    }
-
-    renderTable();
-  } catch (e) {
-    const app = document.getElementById('app') || document.body;
-    app.innerHTML = `
-      <div class="card shadow-sm">
-        <div class="card-body">
-          <h5 class="card-title text-danger mb-2">No se pudo cargar el dashboard</h5>
-          <p class="text-muted">Intenta nuevamente en unos segundos. Si el problema persiste, revisa la conexión con la base de datos y las credenciales.</p>
-          <pre class="small mb-0">${escapeHtml(String(e))}</pre>
-        </div>
-      </div>`;
   }
-}
 
 /* ============================
    Boot de la SPA

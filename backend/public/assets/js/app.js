@@ -364,6 +364,13 @@ async function fetchJSON(url, opts = {}) {
     }).join('');
   }
 
+  async function safeLoadSettings(force = false) {
+    const payload = await loadSettings(force); // puede devolver { ok, settings } o solo settings
+    return payload && typeof payload === 'object' && 'settings' in payload
+      ? payload.settings
+      : payload;
+  }
+  
   startHamachiSyncPolling();
   loadSettings().catch(() => {});
 
@@ -436,8 +443,6 @@ function api(path=''){
   path = String(path || '').replace(/^\/+/, '');
   return `/api/${path}`;
 }
-
-
 
 /* ===================================
    Settings tolerante (caseta/admin)
@@ -514,20 +519,32 @@ async function loadSettings(quiet = false) {
    DASHBOARD (Bootstrap)
    ============================ */
 
-  async function renderDashboard() {
+  async function renderDashboard() { 
     try {
-      // ¡No usar Promise.all con fetchJSON(settings), porque caseta no puede!
-      const [ticketsResp, settings] = await Promise.all([
-        getTicketsSafe(),
-        loadSettings(),
-      ]);
-
+      // 1) Primero tickets (caseta sufre si paralelizamos con settings)
+      const ticketsResp = await getTicketsSafe();
       const data = normalizeTickets(ticketsResp);
+
+      // 2) Luego settings, desempaquetado
+      let settings = null;
+      try {
+        settings = await safeLoadSettings(); // <<— aquí va el wrapper
+      } catch (_) {
+        settings = null; // si falla, seguimos con defaults
+      }
+
       const state = { search: '', page: 1 };
       const pageSize = 20;
 
+      // 3) Métricas con defaults/fallbacks
       const metrics = settings?.database?.metrics ?? {};
-      const pending = Number(metrics.pending_invoices ?? 0);
+      const pending = Number.isFinite(Number(metrics.pending_invoices)) ? Number(metrics.pending_invoices) : 0;
+
+      // Fallback para tickets_total si el backend no lo manda
+      const ticketsTotal =
+        Number.isFinite(Number(metrics.tickets_total))
+          ? Number(metrics.tickets_total)
+          : (Number(ticketsResp?.meta?.total) || data.length || 0);
 
       const summaryCards = [
         {
@@ -541,17 +558,19 @@ async function loadSettings(quiet = false) {
         {
           title: 'Tickets en base de datos',
           badge: { text: 'Histórico', variant: 'info' },
-          value: formatNumber(metrics.tickets_total),
+          value: formatNumber(ticketsTotal),
           detail: metrics.tickets_last_sync
             ? `Último registro ${formatRelativeTime(metrics.tickets_last_sync)}`
-            : 'Sin registros almacenados',
+            : (ticketsTotal > 0 ? 'Conteo local' : 'Sin registros almacenados'),
           accent: 'info',
           icon: 'bi-database-fill',
         },
         {
           title: 'Facturas emitidas',
           badge: { text: 'FEL', variant: 'success' },
-          value: formatNumber(metrics.invoices_total),
+          value: formatNumber(
+            Number.isFinite(Number(metrics.invoices_total)) ? Number(metrics.invoices_total) : 0
+          ),
           detail: metrics.invoices_last_sync
             ? `Última emisión ${formatRelativeTime(metrics.invoices_last_sync)}`
             : 'Sin facturas emitidas',
@@ -585,7 +604,7 @@ async function loadSettings(quiet = false) {
           </div>
         `).join('');
 
-      // Layout principal (solo Bootstrap)
+      // Layout principal (igual al tuyo)
       const app = document.getElementById('app') || document.body;
       app.innerHTML = `
         <div class="container-fluid px-0">
@@ -668,14 +687,14 @@ async function loadSettings(quiet = false) {
           </div>
         </div>`;
 
-      // Timeline
+      // Timeline (usa settings desempaquetado)
       const timelineContainer = document.getElementById('activityTimeline');
       if (timelineContainer) {
         const tl = buildTimeline(settings?.activity);
         timelineContainer.innerHTML = tl || `<div class="text-muted small">Sin actividad reciente.</div>`;
       }
 
-      // Botón de refresco de actividad
+      // Botón refrescar actividad
       const timelineRefresh = document.getElementById('timelineRefresh');
       if (timelineRefresh) {
         timelineRefresh.addEventListener('click', async () => {
@@ -684,7 +703,7 @@ async function loadSettings(quiet = false) {
           timelineRefresh.innerHTML = `<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span> Actualizando…`;
           let hadError = false;
           try {
-            await loadSettings(true);
+            await safeLoadSettings(true);
             await renderDashboard();
           } catch (err) {
             hadError = true;
@@ -699,7 +718,7 @@ async function loadSettings(quiet = false) {
         });
       }
 
-      // Tabla + paginación
+      // Tabla + paginación (igual que tu versión)
       const tbody = document.getElementById('dashBody');
       const meta = document.getElementById('dashMeta');
       const searchInput = document.getElementById('dashSearch');
@@ -723,19 +742,16 @@ async function loadSettings(quiet = false) {
         const pageItems = filtered.slice(start, start + pageSize);
 
         if (pageItems.length) {
-          tbody.innerHTML = pageItems
-            .map((row, index) => `
-              <tr>
-                <td>${escapeHtml(start + index + 1)}</td>
-                <td>${escapeHtml(row.name)}</td>
-                <td>${escapeHtml(row.checkIn || '-')}</td>
-                <td>${escapeHtml(row.checkOut || '-')}</td>
-              </tr>
-            `)
-            .join('');
+          tbody.innerHTML = pageItems.map((row, index) => `
+            <tr>
+              <td>${escapeHtml(start + index + 1)}</td>
+              <td>${escapeHtml(row.name)}</td>
+              <td>${escapeHtml(row.checkIn || '-')}</td>
+              <td>${escapeHtml(row.checkOut || '-')}</td>
+            </tr>
+          `).join('');
         } else {
-          const message =
-            data.length && !filtered.length ? 'No se encontraron resultados' : 'Sin registros disponibles';
+          const message = data.length && !filtered.length ? 'No se encontraron resultados' : 'Sin registros disponibles';
           tbody.innerHTML = `
             <tr>
               <td colspan="4" class="text-center text-muted py-4">
@@ -764,23 +780,15 @@ async function loadSettings(quiet = false) {
           renderTable();
         });
       }
-
       if (prevBtn) {
         prevBtn.addEventListener('click', () => {
-          if (state.page > 1) {
-            state.page -= 1;
-            renderTable();
-          }
+          if (state.page > 1) { state.page -= 1; renderTable(); }
         });
       }
-
       if (nextBtn) {
         nextBtn.addEventListener('click', () => {
           const totalPages = Math.max(1, Math.ceil(filterData().length / pageSize));
-          if (state.page < totalPages) {
-            state.page += 1;
-            renderTable();
-          }
+          if (state.page < totalPages) { state.page += 1; renderTable(); }
         });
       }
 

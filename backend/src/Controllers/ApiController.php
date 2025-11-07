@@ -1349,410 +1349,410 @@ class ApiController {
         return array_keys($arr) !== range(0, count($arr) - 1);
     }
 
-public function invoiceOne(): void 
-{
-    header('Content-Type: application/json; charset=utf-8');
+    public function invoiceOne(): void 
+    {
+        header('Content-Type: application/json; charset=utf-8');
 
-    try {
-        $raw  = file_get_contents('php://input') ?: '{}';
-        $body = json_decode($raw, true) ?: [];
-
-        $ticketNo    = trim((string)($body['ticket_no'] ?? ''));
-        $receptorNit = strtoupper(trim((string)($body['receptor_nit'] ?? 'CF'))); // CF permitido
-        $mode        = (string)($body['mode'] ?? 'hourly'); // hourly | custom | grace
-        $customTotal = isset($body['custom_total']) ? (float)$body['custom_total'] : null;
-
-        $this->debugLog('fel_invoice_in.txt', ['body' => $body, 'server' => $_SERVER]);
-
-        if ($ticketNo === '') {
-            echo json_encode(['ok' => false, 'error' => 'ticket_no requerido']); return;
-        }
-        if ($mode === 'custom' && (!is_finite($customTotal) || $customTotal <= 0)) {
-            echo json_encode(['ok' => false, 'error' => 'custom_total inválido']); return;
-        }
-        if ($receptorNit !== 'CF' && !ctype_digit($receptorNit)) {
-            echo json_encode(['ok' => false, 'error' => 'NIT inválido (use CF o solo dígitos)']); return;
-        }
-
-        $isGrace = ($mode === 'grace');
-
-        // 0) Fuerza TZ en PHP
-        @date_default_timezone_set('America/Guatemala');
-        $phpTz   = @date_default_timezone_get();
-        $phpNow  = date('Y-m-d H:i:s'); // ahora según PHP/GT
-        $nowGT   = (new \DateTime('now', new \DateTimeZone('America/Guatemala')))->format('Y-m-d H:i:s');
-
-        // 1) Calcular montos: en gracia obtenemos tiempos, pero total forzado 0.00
-        $calc = $this->resolveTicketAmount($ticketNo, $isGrace ? 'hourly' : $mode, $customTotal);
-        $hours   = (float)($calc[0] ?? 0);
-        $minutes = (int)  ($calc[1] ?? 0);
-        $total   = $isGrace ? 0.00 : (float)($calc[2] ?? 0);
-        $extra   = is_array($calc[3] ?? null) ? $calc[3] : [];
-
-        $durationMin  = (int) max(0, $hours * 60 + $minutes);
-        $hoursBilled  = (int) ceil($durationMin / 60);
-        $billingAmount= $isGrace ? 0.00 : (isset($extra['billing_amount']) ? (float)$extra['billing_amount'] : $total);
-
-        // 2) Config/DB
-        $cfg = new \Config\Config(__DIR__ . '/../../.env');
-        $pdo = \App\Utils\DB::pdo($this->config);
-        $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
-
-        // 2.1) Fuerza TZ en MySQL/MariaDB (sesión). Si es SQLite, se omite.
-        $mysqlTzDiag = null;
         try {
-            $drv = strtolower((string)$pdo->getAttribute(\PDO::ATTR_DRIVER_NAME));
-            if ($drv === 'mysql') {
-                // Forzamos offset fijo (no depende de tablas tz)
-                $pdo->exec("SET time_zone = '-06:00'");
-                // Diagnóstico
-                $stmt = $pdo->query("
-                    SELECT
-                        @@global.time_zone   AS global_tz,
-                        @@session.time_zone  AS session_tz,
-                        NOW()                AS now_local,
-                        UTC_TIMESTAMP()      AS now_utc,
-                        TIMEDIFF(NOW(), UTC_TIMESTAMP()) AS offset
-                ");
-                $mysqlTzDiag = $stmt->fetch(\PDO::FETCH_ASSOC);
-            } else {
-                $mysqlTzDiag = ['note' => 'non-mysql driver', 'driver' => $drv, 'php_now' => $phpNow];
+            $raw  = file_get_contents('php://input') ?: '{}';
+            $body = json_decode($raw, true) ?: [];
+
+            $ticketNo    = trim((string)($body['ticket_no'] ?? ''));
+            $receptorNit = strtoupper(trim((string)($body['receptor_nit'] ?? 'CF'))); // CF permitido
+            $mode        = (string)($body['mode'] ?? 'hourly'); // hourly | custom | grace
+            $customTotal = isset($body['custom_total']) ? (float)$body['custom_total'] : null;
+
+            $this->debugLog('fel_invoice_in.txt', ['body' => $body, 'server' => $_SERVER]);
+
+            if ($ticketNo === '') {
+                echo json_encode(['ok' => false, 'error' => 'ticket_no requerido']); return;
             }
-        } catch (\Throwable $e) {
-            $mysqlTzDiag = ['error' => $e->getMessage(), 'php_now' => $phpNow];
-        }
-        $this->debugLog('tz_diag_invoice_one.txt', ['php_tz'=>$phpTz, 'php_now'=>$phpNow, 'mysql'=>$mysqlTzDiag]);
-
-        // Leer info del ticket
-        $entryAt = $exitAt = $plate = null;
-        try {
-            $q = $pdo->prepare("SELECT entry_at, exit_at, plate FROM tickets WHERE ticket_no = :t LIMIT 1");
-            $q->execute([':t' => $ticketNo]);
-            if ($row = $q->fetch()) {
-                $entryAt = $row['entry_at'] ?? null;
-                $exitAt  = $row['exit_at']  ?? null;
-                $plate   = $row['plate']    ?? null;
+            if ($mode === 'custom' && (!is_finite($customTotal) || $customTotal <= 0)) {
+                echo json_encode(['ok' => false, 'error' => 'custom_total inválido']); return;
             }
-        } catch (\Throwable $e) { /* columnas faltantes: ignorar */ }
-
-        // Rates nunca NULL (por constraints)
-        $hourlyRate   = is_numeric($extra['hourly_rate']  ?? null) ? (float)$extra['hourly_rate']  : 0.00;
-        $monthlyRate  = is_numeric($extra['monthly_rate'] ?? null) ? (float)$extra['monthly_rate'] : 0.00;
-
-        // Para payNotify
-        $payBillin   = 0.0;
-        $payRecordId = '0';
-        $payPlate    = $plate;
-        try {
-            $qp = $pdo->prepare("SELECT billin, billin_json, plate FROM payments WHERE ticket_no = :t LIMIT 1");
-            $qp->execute([':t' => $ticketNo]);
-            if ($pr = $qp->fetch()) {
-                if (isset($pr['billin']) && is_numeric($pr['billin'])) $payBillin = (float)$pr['billin'];
-                if (!empty($pr['billin_json'])) $payRecordId = (string)$pr['billin_json']; // recordId o "0"
-                if (!empty($pr['plate'])) $payPlate = $pr['plate'];
+            if ($receptorNit !== 'CF' && !ctype_digit($receptorNit)) {
+                echo json_encode(['ok' => false, 'error' => 'NIT inválido (use CF o solo dígitos)']); return;
             }
-        } catch (\Throwable $e) {}
 
-        // 3) G4S solo si NO es gracia
-        $felOk = false;
-        $uuid  = null;
-        $felRes = null;
-        $felErr = null;
-        $pdfBase64 = null;
+            $isGrace = ($mode === 'grace');
 
-        if (!$isGrace) {
-            $client = new \App\Services\G4SClient($cfg);
-            $payloadFel = [
-                'ticket_no'    => $ticketNo,
-                'receptor_nit' => $receptorNit,
-                'total'        => $total,
-                'hours'        => $hours,
-                'minutes'      => $minutes,
-                'mode'         => $mode,
-            ];
+            // 0) Fuerza TZ en PHP
+            @date_default_timezone_set('America/Guatemala');
+            $phpTz   = @date_default_timezone_get();
+            $phpNow  = date('Y-m-d H:i:s'); // ahora según PHP/GT
+            $nowGT   = (new \DateTime('now', new \DateTimeZone('America/Guatemala')))->format('Y-m-d H:i:s');
 
-            $felRes = $client->submitInvoice($payloadFel);
-            $this->debugLog('fel_invoice_out.txt', [
-                'request_payload' => $payloadFel,
-                'g4s_response'    => $felRes,
-            ]);
+            // 1) Calcular montos: en gracia obtenemos tiempos, pero total forzado 0.00
+            $calc = $this->resolveTicketAmount($ticketNo, $isGrace ? 'hourly' : $mode, $customTotal);
+            $hours   = (float)($calc[0] ?? 0);
+            $minutes = (int)  ($calc[1] ?? 0);
+            $total   = $isGrace ? 0.00 : (float)($calc[2] ?? 0);
+            $extra   = is_array($calc[3] ?? null) ? $calc[3] : [];
 
-            $felOk  = (bool)($felRes['ok'] ?? false);
-            $uuid   = $felRes['uuid']  ?? null;
-            $felErr = $felRes['error'] ?? null;
+            $durationMin  = (int) max(0, $hours * 60 + $minutes);
+            $hoursBilled  = (int) ceil($durationMin / 60);
+            $billingAmount= $isGrace ? 0.00 : (isset($extra['billing_amount']) ? (float)$extra['billing_amount'] : $total);
 
-            if ($felOk && $uuid) {
-                if (!empty($felRes['pdf_base64'])) {
-                    $pdfBase64 = (string)$felRes['pdf_base64'];
-                } else {
-                    $pdfBase64 = $this->pdfFromUuidViaG4S($uuid);
-                    if (!$pdfBase64 && isset($felRes['raw'])) {
-                        $xmlDte = @file_get_contents(__DIR__ . '/../../storage/last_dte.xml') ?: '';
-                        if ($xmlDte !== '') $pdfBase64 = $this->pdfFromXmlViaG4S($xmlDte);
-                    }
-                }
-            }
-        }
+            // 2) Config/DB
+            $cfg = new \Config\Config(__DIR__ . '/../../.env');
+            $pdo = \App\Utils\DB::pdo($this->config);
+            $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
 
-        // 4) Persistir en BD + cerrar ticket
-        $pdo->beginTransaction();
-
-        try { $this->ensureInvoicePdfColumn($pdo); }
-        catch (\Throwable $e) { $this->debugLog('ensure_invoice_pdf_col_err.txt', ['error'=>$e->getMessage()]); }
-
-        // >>> Cambiamos NOW() por :created_at (valor calculado en PHP con TZ GT)
-        $stmt = $pdo->prepare("
-            INSERT INTO invoices
-            (
-                ticket_no, total, uuid, status,
-                request_json, response_json, created_at,
-                receptor_nit, entry_at, exit_at,
-                duration_min, hours_billed, billing_mode,
-                hourly_rate, monthly_rate
-            )
-            VALUES
-            (
-                :ticket_no, :total, :uuid, :status,
-                :request_json, :response_json, :created_at,
-                :receptor_nit, :entry_at, :exit_at,
-                :duration_min, :hours_billed, :billing_mode,
-                :hourly_rate, :monthly_rate
-            )
-        ");
-
-        $status = $isGrace ? 'GRATIS' : ($felOk ? 'CERTIFIED' : 'FAILED');
-
-        $stmt->execute([
-            ':ticket_no'     => $ticketNo,
-            ':total'         => $total, // en gracia = 0.00
-            ':uuid'          => $uuid,  // en gracia NULL
-            ':status'        => $status,
-            ':request_json'  => json_encode(
-                $isGrace
-                    ? ['mode'=>'grace','ticket_no'=>$ticketNo,'receptor_nit'=>$receptorNit,'total'=>0]
-                    : ['mode'=>$mode,'ticket_no'=>$ticketNo,'receptor_nit'=>$receptorNit,'total'=>$total],
-                JSON_UNESCAPED_UNICODE
-            ),
-            ':response_json' => json_encode($isGrace ? ['ok'=>true,'note'=>'no FEL (grace)'] : $felRes, JSON_UNESCAPED_UNICODE),
-            ':created_at'    => $nowGT,
-            ':receptor_nit'  => $receptorNit,
-            ':entry_at'      => $entryAt,
-            ':exit_at'       => $exitAt,
-            ':duration_min'  => $durationMin,
-            ':hours_billed'  => $hoursBilled,
-            ':billing_mode'  => $isGrace ? 'grace' : $mode,
-            ':hourly_rate'   => $hourlyRate,
-            ':monthly_rate'  => $monthlyRate,
-        ]);
-
-        if (!$isGrace && $pdfBase64) {
+            // 2.1) Fuerza TZ en MySQL/MariaDB (sesión). Si es SQLite, se omite.
+            $mysqlTzDiag = null;
             try {
                 $drv = strtolower((string)$pdo->getAttribute(\PDO::ATTR_DRIVER_NAME));
                 if ($drv === 'mysql') {
-                    $pdo->exec("UPDATE invoices SET pdf_base64 = " . $pdo->quote($pdfBase64) . " WHERE ticket_no = " . $pdo->quote($ticketNo) . " LIMIT 1");
+                    // Forzamos offset fijo (no depende de tablas tz)
+                    $pdo->exec("SET time_zone = '-06:00'");
+                    // Diagnóstico
+                    $stmt = $pdo->query("
+                        SELECT
+                            @@global.time_zone   AS global_tz,
+                            @@session.time_zone  AS session_tz,
+                            NOW()                AS now_local,
+                            UTC_TIMESTAMP()      AS now_utc,
+                            TIMEDIFF(NOW(), UTC_TIMESTAMP()) AS offset
+                    ");
+                    $mysqlTzDiag = $stmt->fetch(\PDO::FETCH_ASSOC);
                 } else {
-                    $pdo->exec("UPDATE invoices SET pdf_base64 = " . $pdo->quote($pdfBase64) . " WHERE ticket_no = " . $pdo->quote($ticketNo));
+                    $mysqlTzDiag = ['note' => 'non-mysql driver', 'driver' => $drv, 'php_now' => $phpNow];
                 }
             } catch (\Throwable $e) {
-                $this->debugLog('save_pdf_base64_err.txt', ['ticket'=>$ticketNo, 'error'=>$e->getMessage()]);
+                $mysqlTzDiag = ['error' => $e->getMessage(), 'php_now' => $phpNow];
             }
-        }
+            $this->debugLog('tz_diag_invoice_one.txt', ['php_tz'=>$phpTz, 'php_now'=>$phpNow, 'mysql'=>$mysqlTzDiag]);
 
-        // Sellar salida si no existía — reemplazamos NOW() por :now_exit
-        $up = $pdo->prepare("UPDATE tickets SET status = 'CLOSED', exit_at = COALESCE(exit_at, :now_exit) WHERE ticket_no = :t");
-        $up->execute([':now_exit' => $nowGT, ':t' => $ticketNo]);
+            // Leer info del ticket
+            $entryAt = $exitAt = $plate = null;
+            try {
+                $q = $pdo->prepare("SELECT entry_at, exit_at, plate FROM tickets WHERE ticket_no = :t LIMIT 1");
+                $q->execute([':t' => $ticketNo]);
+                if ($row = $q->fetch()) {
+                    $entryAt = $row['entry_at'] ?? null;
+                    $exitAt  = $row['exit_at']  ?? null;
+                    $plate   = $row['plate']    ?? null;
+                }
+            } catch (\Throwable $e) { /* columnas faltantes: ignorar */ }
 
-        $pdo->commit();
+            // Rates nunca NULL (por constraints)
+            $hourlyRate   = is_numeric($extra['hourly_rate']  ?? null) ? (float)$extra['hourly_rate']  : 0.00;
+            $monthlyRate  = is_numeric($extra['monthly_rate'] ?? null) ? (float)$extra['monthly_rate'] : 0.00;
 
-        // 5) payNotify (igual que tenías)
-        $manualOpen     = false;
-        $payNotifySent  = false;
-        $payNotifyAck   = false;
-        $payNotifyError = null;
-        $payNotifyRaw   = null;
-        $payNotifyType  = null;
+            // Para payNotify
+            $payBillin   = 0.0;
+            $payRecordId = '0';
+            $payPlate    = $plate;
+            try {
+                $qp = $pdo->prepare("SELECT billin, billin_json, plate FROM payments WHERE ticket_no = :t LIMIT 1");
+                $qp->execute([':t' => $ticketNo]);
+                if ($pr = $qp->fetch()) {
+                    if (isset($pr['billin']) && is_numeric($pr['billin'])) $payBillin = (float)$pr['billin'];
+                    if (!empty($pr['billin_json'])) $payRecordId = (string)$pr['billin_json']; // recordId o "0"
+                    if (!empty($pr['plate'])) $payPlate = $pr['plate'];
+                }
+            } catch (\Throwable $e) {}
 
-        $effectiveBilling = ($payBillin > 0) ? $payBillin : (float)$billingAmount;
-        $shouldNotify     = $isGrace ? true : ($felOk && $effectiveBilling > 0);
+            // 3) G4S solo si NO es gracia
+            $felOk = false;
+            $uuid  = null;
+            $felRes = null;
+            $felErr = null;
+            $pdfBase64 = null;
 
-        if ($shouldNotify) {
-            $cid = $this->newCorrelationId('paynotify');
+            if (!$isGrace) {
+                $client = new \App\Services\G4SClient($cfg);
+                $payloadFel = [
+                    'ticket_no'    => $ticketNo,
+                    'receptor_nit' => $receptorNit,
+                    'total'        => $total,
+                    'hours'        => $hours,
+                    'minutes'      => $minutes,
+                    'mode'         => $mode,
+                ];
 
-            $baseUrl = rtrim((string) $this->config->get('HAMACHI_PARK_BASE_URL', ''), '/');
-            if ($baseUrl === '') {
-                //Logger::error('paynotify.no_base_url', ['cid' => $cid]);
-                $payNotifyError = 'HAMACHI_PARK_BASE_URL no está configurado.';
-                $manualOpen = true;
-            } else {
-                $carNumber = $payPlate ?: ($plate ?: ($extra['plate'] ?? ''));
-                $recordId  = $payRecordId;
+                $felRes = $client->submitInvoice($payloadFel);
+                $this->debugLog('fel_invoice_out.txt', [
+                    'request_payload' => $payloadFel,
+                    'g4s_response'    => $felRes,
+                ]);
 
-                if ($recordId === '0' || $recordId === '' || $carNumber === '') {
-                    //Logger::error('paynotify.missing_data', ['cid'=>$cid, 'carNumber'=>$carNumber, 'recordId'=>$recordId]);
-                    $payNotifyError = 'Faltan carNumber/recordId para payNotify';
-                    $manualOpen = true;
-                } else {
-                    $endpoint = $baseUrl . '/api/v1/parkCost/payNotify';
-                    $accessToken = (string)($this->config->get('HAMACHI_PARK_ACCESS_TOKEN', ''));
-                    if ($accessToken !== '') {
-                        $endpoint .= (strpos($endpoint, '?') === false ? '?' : '&') . 'access_token=' . urlencode($accessToken);
-                    }
+                $felOk  = (bool)($felRes['ok'] ?? false);
+                $uuid   = $felRes['uuid']  ?? null;
+                $felErr = $felRes['error'] ?? null;
 
-                    $headers = ['Accept: application/json', 'Content-Type: application/json'];
-                    $hostHeader = trim((string) $this->config->get('HAMACHI_PARK_HOST_HEADER', ''));
-                    if ($hostHeader !== '') $headers[] = 'Host: ' . $hostHeader;
-
-                    $verifySsl = strtolower((string) $this->config->get('HAMACHI_PARK_VERIFY_SSL', 'false')) === 'true';
-                    $connectTo = trim((string) $this->config->get('HAMACHI_PARK_CONNECT_TO', ''));
-
-                    $paymentType = $isGrace ? 'free' : (string)$this->config->get('HAMACHI_PARK_PAYMENT_TYPE', 'cash');
-
-                    $notifyPayload = [
-                        'carNumber'   => $carNumber,
-                        'paymentType' => $paymentType,
-                        'recordId'    => $recordId,
-                    ];
-
-                    /*Logger::debug('paynotify.req', [
-                        'cid'        => $cid,
-                        'endpoint'   => $endpoint,
-                        'headers'    => $headers,
-                        'verify_ssl' => $verifySsl,
-                        'connect_to' => $connectTo ?: null,
-                        'payload'    => $notifyPayload,
-                    ]);*/
-
-                    try {
-                        $ch = curl_init($endpoint);
-                        curl_setopt_array($ch, [
-                            CURLOPT_RETURNTRANSFER => true,
-                            CURLOPT_CONNECTTIMEOUT => 15,
-                            CURLOPT_TIMEOUT        => 20,
-                            CURLOPT_HTTPHEADER     => $headers,
-                            CURLOPT_NOSIGNAL       => true,
-                            CURLOPT_TCP_KEEPALIVE  => 1,
-                            CURLOPT_TCP_KEEPIDLE   => 30,
-                            CURLOPT_TCP_KEEPINTVL  => 10,
-                            CURLOPT_HTTP_VERSION   => CURL_HTTP_VERSION_1_1,
-                            CURLOPT_POST           => true,
-                            CURLOPT_POSTFIELDS     => json_encode($notifyPayload, JSON_UNESCAPED_UNICODE),
-                            CURLOPT_HEADER         => true,
-                        ]);
-                        if (!$verifySsl) {
-                            curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-                            curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+                if ($felOk && $uuid) {
+                    if (!empty($felRes['pdf_base64'])) {
+                        $pdfBase64 = (string)$felRes['pdf_base64'];
+                    } else {
+                        $pdfBase64 = $this->pdfFromUuidViaG4S($uuid);
+                        if (!$pdfBase64 && isset($felRes['raw'])) {
+                            $xmlDte = @file_get_contents(__DIR__ . '/../../storage/last_dte.xml') ?: '';
+                            if ($xmlDte !== '') $pdfBase64 = $this->pdfFromXmlViaG4S($xmlDte);
                         }
-                        if ($connectTo !== '') {
-                            curl_setopt($ch, CURLOPT_CONNECT_TO, [$connectTo]);
-                            //Logger::debug('http.connect_to', ['cid' => $cid, 'connect_to' => $connectTo]);
-                        }
-
-                        $resp = curl_exec($ch);
-                        if ($resp === false) {
-                            $err  = curl_error($ch) ?: 'Error desconocido';
-                            $info = curl_getinfo($ch) ?: [];
-                            curl_close($ch);
-
-                            //Logger::error('paynotify.http_failed', ['cid'=>$cid, 'endpoint'=>$endpoint, 'error'=>$err, 'curl_info'=>$info]);
-                            $payNotifyError = $err;
-                            $manualOpen = true;
-                        } else {
-                            $info   = curl_getinfo($ch) ?: [];
-                            $status = (int)($info['http_code'] ?? 0);
-                            $hsize  = (int)($info['header_size'] ?? 0);
-                            curl_close($ch);
-
-                            $body  = substr($resp, $hsize) ?: '';
-                            $ctype = (string)($info['content_type'] ?? '');
-                            $payNotifyRaw  = $body;
-                            $payNotifyType = $ctype;
-
-                            $payNotifySent = ($status >= 200 && $status < 300);
-
-                            $json = null;
-                            $looksJson = stripos($ctype, 'application/json') !== false
-                                    || (strlen($body) && ($body[0] === '{' || $body[0] === '['));
-                            if ($looksJson) {
-                                $tmp = json_decode($body, true);
-                                if (json_last_error() === JSON_ERROR_NONE) $json = $tmp;
-                            }
-
-                            if ($payNotifySent && is_array($json)) {
-                                $payNotifyAck = (isset($json['code']) && (int)$json['code'] === 0);
-                                if (!$payNotifyAck) {
-                                    $payNotifyError = isset($json['message']) ? (string)$json['message'] : 'ACK inválido';
-                                }
-                            } else if (!$payNotifySent) {
-                                $payNotifyError = "HTTP $status";
-                            }
-
-                            if (!$payNotifySent || !$payNotifyAck) {
-                                $manualOpen = true;
-                                /*Logger::error('paynotify.nack', [
-                                    'cid'=>$cid, 'status'=>$status, 'ack'=>$payNotifyAck,
-                                    'body_preview'=>mb_substr($body, 0, 500),
-                                    'error'=>$payNotifyError
-                                ]);*/
-                            } else {
-                                Logger::info('paynotify.ok', ['cid'=>$cid, 'status'=>$status]);
-                            }
-                        }
-
-                        /*Logger::debug('paynotify.resp', [
-                            'cid'   => $cid,
-                            'sent'  => $payNotifySent,
-                            'ack'   => $payNotifyAck,
-                            'ctype' => $payNotifyType,
-                            'raw'   => $payNotifyRaw ? mb_substr($payNotifyRaw, 0, 4000) : null,
-                            'error' => $payNotifyError,
-                        ]);*/
-
-                    } catch (\Throwable $e) {
-                        $payNotifyError = $e->getMessage();
-                        $manualOpen = true;
-                        Logger::error('paynotify.exception', ['cid'=>$cid, 'error'=>$payNotifyError]);
                     }
                 }
             }
-        } else {
-            // Gracia pero sin datos suficientes para notificar -> abrir manual
-            $manualOpen = true;
+
+            // 4) Persistir en BD + cerrar ticket
+            $pdo->beginTransaction();
+
+            try { $this->ensureInvoicePdfColumn($pdo); }
+            catch (\Throwable $e) { $this->debugLog('ensure_invoice_pdf_col_err.txt', ['error'=>$e->getMessage()]); }
+
+            // >>> Cambiamos NOW() por :created_at (valor calculado en PHP con TZ GT)
+            $stmt = $pdo->prepare("
+                INSERT INTO invoices
+                (
+                    ticket_no, total, uuid, status,
+                    request_json, response_json, created_at,
+                    receptor_nit, entry_at, exit_at,
+                    duration_min, hours_billed, billing_mode,
+                    hourly_rate, monthly_rate
+                )
+                VALUES
+                (
+                    :ticket_no, :total, :uuid, :status,
+                    :request_json, :response_json, :created_at,
+                    :receptor_nit, :entry_at, :exit_at,
+                    :duration_min, :hours_billed, :billing_mode,
+                    :hourly_rate, :monthly_rate
+                )
+            ");
+
+            $status = $isGrace ? 'GRATIS' : ($felOk ? 'CERTIFIED' : 'FAILED');
+
+            $stmt->execute([
+                ':ticket_no'     => $ticketNo,
+                ':total'         => $total, // en gracia = 0.00
+                ':uuid'          => $uuid,  // en gracia NULL
+                ':status'        => $status,
+                ':request_json'  => json_encode(
+                    $isGrace
+                        ? ['mode'=>'grace','ticket_no'=>$ticketNo,'receptor_nit'=>$receptorNit,'total'=>0]
+                        : ['mode'=>$mode,'ticket_no'=>$ticketNo,'receptor_nit'=>$receptorNit,'total'=>$total],
+                    JSON_UNESCAPED_UNICODE
+                ),
+                ':response_json' => json_encode($isGrace ? ['ok'=>true,'note'=>'no FEL (grace)'] : $felRes, JSON_UNESCAPED_UNICODE),
+                ':created_at'    => $nowGT,
+                ':receptor_nit'  => $receptorNit,
+                ':entry_at'      => $entryAt,
+                ':exit_at'       => $exitAt,
+                ':duration_min'  => $durationMin,
+                ':hours_billed'  => $hoursBilled,
+                ':billing_mode'  => $isGrace ? 'grace' : $mode,
+                ':hourly_rate'   => $hourlyRate,
+                ':monthly_rate'  => $monthlyRate,
+            ]);
+
+            if (!$isGrace && $pdfBase64) {
+                try {
+                    $drv = strtolower((string)$pdo->getAttribute(\PDO::ATTR_DRIVER_NAME));
+                    if ($drv === 'mysql') {
+                        $pdo->exec("UPDATE invoices SET pdf_base64 = " . $pdo->quote($pdfBase64) . " WHERE ticket_no = " . $pdo->quote($ticketNo) . " LIMIT 1");
+                    } else {
+                        $pdo->exec("UPDATE invoices SET pdf_base64 = " . $pdo->quote($pdfBase64) . " WHERE ticket_no = " . $pdo->quote($ticketNo));
+                    }
+                } catch (\Throwable $e) {
+                    $this->debugLog('save_pdf_base64_err.txt', ['ticket'=>$ticketNo, 'error'=>$e->getMessage()]);
+                }
+            }
+
+            // Sellar salida si no existía — reemplazamos NOW() por :now_exit
+            $up = $pdo->prepare("UPDATE tickets SET status = 'CLOSED', exit_at = COALESCE(exit_at, :now_exit) WHERE ticket_no = :t");
+            $up->execute([':now_exit' => $nowGT, ':t' => $ticketNo]);
+
+            $pdo->commit();
+
+            // 5) payNotify (igual que tenías)
+            $manualOpen     = false;
+            $payNotifySent  = false;
+            $payNotifyAck   = false;
+            $payNotifyError = null;
+            $payNotifyRaw   = null;
+            $payNotifyType  = null;
+
+            $effectiveBilling = ($payBillin > 0) ? $payBillin : (float)$billingAmount;
+            $shouldNotify     = $isGrace ? true : ($felOk && $effectiveBilling > 0);
+
+            if ($shouldNotify) {
+                $cid = $this->newCorrelationId('paynotify');
+
+                $baseUrl = rtrim((string) $this->config->get('HAMACHI_PARK_BASE_URL', ''), '/');
+                if ($baseUrl === '') {
+                    //Logger::error('paynotify.no_base_url', ['cid' => $cid]);
+                    $payNotifyError = 'HAMACHI_PARK_BASE_URL no está configurado.';
+                    $manualOpen = true;
+                } else {
+                    $carNumber = $payPlate ?: ($plate ?: ($extra['plate'] ?? ''));
+                    $recordId  = $payRecordId;
+
+                    if ($recordId === '0' || $recordId === '' || $carNumber === '') {
+                        //Logger::error('paynotify.missing_data', ['cid'=>$cid, 'carNumber'=>$carNumber, 'recordId'=>$recordId]);
+                        $payNotifyError = 'Faltan carNumber/recordId para payNotify';
+                        $manualOpen = true;
+                    } else {
+                        $endpoint = $baseUrl . '/api/v1/parkCost/payNotify';
+                        $accessToken = (string)($this->config->get('HAMACHI_PARK_ACCESS_TOKEN', ''));
+                        if ($accessToken !== '') {
+                            $endpoint .= (strpos($endpoint, '?') === false ? '?' : '&') . 'access_token=' . urlencode($accessToken);
+                        }
+
+                        $headers = ['Accept: application/json', 'Content-Type: application/json'];
+                        $hostHeader = trim((string) $this->config->get('HAMACHI_PARK_HOST_HEADER', ''));
+                        if ($hostHeader !== '') $headers[] = 'Host: ' . $hostHeader;
+
+                        $verifySsl = strtolower((string) $this->config->get('HAMACHI_PARK_VERIFY_SSL', 'false')) === 'true';
+                        $connectTo = trim((string) $this->config->get('HAMACHI_PARK_CONNECT_TO', ''));
+
+                        $paymentType = $isGrace ? 'free' : (string)$this->config->get('HAMACHI_PARK_PAYMENT_TYPE', 'cash');
+
+                        $notifyPayload = [
+                            'carNumber'   => $carNumber,
+                            'paymentType' => $paymentType,
+                            'recordId'    => $recordId,
+                        ];
+
+                        /*Logger::debug('paynotify.req', [
+                            'cid'        => $cid,
+                            'endpoint'   => $endpoint,
+                            'headers'    => $headers,
+                            'verify_ssl' => $verifySsl,
+                            'connect_to' => $connectTo ?: null,
+                            'payload'    => $notifyPayload,
+                        ]);*/
+
+                        try {
+                            $ch = curl_init($endpoint);
+                            curl_setopt_array($ch, [
+                                CURLOPT_RETURNTRANSFER => true,
+                                CURLOPT_CONNECTTIMEOUT => 15,
+                                CURLOPT_TIMEOUT        => 20,
+                                CURLOPT_HTTPHEADER     => $headers,
+                                CURLOPT_NOSIGNAL       => true,
+                                CURLOPT_TCP_KEEPALIVE  => 1,
+                                CURLOPT_TCP_KEEPIDLE   => 30,
+                                CURLOPT_TCP_KEEPINTVL  => 10,
+                                CURLOPT_HTTP_VERSION   => CURL_HTTP_VERSION_1_1,
+                                CURLOPT_POST           => true,
+                                CURLOPT_POSTFIELDS     => json_encode($notifyPayload, JSON_UNESCAPED_UNICODE),
+                                CURLOPT_HEADER         => true,
+                            ]);
+                            if (!$verifySsl) {
+                                curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+                                curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+                            }
+                            if ($connectTo !== '') {
+                                curl_setopt($ch, CURLOPT_CONNECT_TO, [$connectTo]);
+                                //Logger::debug('http.connect_to', ['cid' => $cid, 'connect_to' => $connectTo]);
+                            }
+
+                            $resp = curl_exec($ch);
+                            if ($resp === false) {
+                                $err  = curl_error($ch) ?: 'Error desconocido';
+                                $info = curl_getinfo($ch) ?: [];
+                                curl_close($ch);
+
+                                //Logger::error('paynotify.http_failed', ['cid'=>$cid, 'endpoint'=>$endpoint, 'error'=>$err, 'curl_info'=>$info]);
+                                $payNotifyError = $err;
+                                $manualOpen = true;
+                            } else {
+                                $info   = curl_getinfo($ch) ?: [];
+                                $status = (int)($info['http_code'] ?? 0);
+                                $hsize  = (int)($info['header_size'] ?? 0);
+                                curl_close($ch);
+
+                                $body  = substr($resp, $hsize) ?: '';
+                                $ctype = (string)($info['content_type'] ?? '');
+                                $payNotifyRaw  = $body;
+                                $payNotifyType = $ctype;
+
+                                $payNotifySent = ($status >= 200 && $status < 300);
+
+                                $json = null;
+                                $looksJson = stripos($ctype, 'application/json') !== false
+                                        || (strlen($body) && ($body[0] === '{' || $body[0] === '['));
+                                if ($looksJson) {
+                                    $tmp = json_decode($body, true);
+                                    if (json_last_error() === JSON_ERROR_NONE) $json = $tmp;
+                                }
+
+                                if ($payNotifySent && is_array($json)) {
+                                    $payNotifyAck = (isset($json['code']) && (int)$json['code'] === 0);
+                                    if (!$payNotifyAck) {
+                                        $payNotifyError = isset($json['message']) ? (string)$json['message'] : 'ACK inválido';
+                                    }
+                                } else if (!$payNotifySent) {
+                                    $payNotifyError = "HTTP $status";
+                                }
+
+                                if (!$payNotifySent || !$payNotifyAck) {
+                                    $manualOpen = true;
+                                    /*Logger::error('paynotify.nack', [
+                                        'cid'=>$cid, 'status'=>$status, 'ack'=>$payNotifyAck,
+                                        'body_preview'=>mb_substr($body, 0, 500),
+                                        'error'=>$payNotifyError
+                                    ]);*/
+                                } else {
+                                    Logger::info('paynotify.ok', ['cid'=>$cid, 'status'=>$status]);
+                                }
+                            }
+
+                            /*Logger::debug('paynotify.resp', [
+                                'cid'   => $cid,
+                                'sent'  => $payNotifySent,
+                                'ack'   => $payNotifyAck,
+                                'ctype' => $payNotifyType,
+                                'raw'   => $payNotifyRaw ? mb_substr($payNotifyRaw, 0, 4000) : null,
+                                'error' => $payNotifyError,
+                            ]);*/
+
+                        } catch (\Throwable $e) {
+                            $payNotifyError = $e->getMessage();
+                            $manualOpen = true;
+                            Logger::error('paynotify.exception', ['cid'=>$cid, 'error'=>$payNotifyError]);
+                        }
+                    }
+                }
+            } else {
+                // Gracia pero sin datos suficientes para notificar -> abrir manual
+                $manualOpen = true;
+            }
+
+            echo json_encode([
+                'ok'               => $isGrace ? true : $felOk,
+                'uuid'             => $uuid,
+                'message'          => $isGrace ? 'Ticket de gracia registrado (sin FEL)' : ($felOk ? 'Factura certificada' : 'No se pudo certificar (registrada en BD)'),
+                'error'            => $isGrace ? null : $felErr,
+                'billing_amount'   => $isGrace ? 0.00 : ($payBillin > 0 ? $payBillin : (float)$billingAmount),
+                'manual_open'      => $manualOpen,
+                'pay_notify_sent'  => $payNotifySent,
+                'pay_notify_ack'   => $payNotifyAck,
+                'pay_notify_error' => $payNotifyError,
+                'has_pdf_base64'   => (bool)$pdfBase64,
+
+                // >>> Resultado de la apertura en modo gracia <<<
+                'grace_gate_open_ok'  => $isGrace ? $graceGateOpenOk   : null,
+                'grace_gate_open_msg' => $isGrace ? $graceGateOpenMsg  : null,
+                'grace_gate_channel'  => $isGrace ? $graceGateChannel  : null,
+
+                // >>> Diagnóstico de zona horaria <<<
+                'tz' => [
+                    'php_timezone' => $phpTz,
+                    'php_now'      => $phpNow,
+                    'now_gt'       => $nowGT,
+                    'mysql'        => $mysqlTzDiag,
+                ],
+            ], JSON_UNESCAPED_UNICODE);
+
+        } catch (\Throwable $e) {
+            if (isset($pdo) && $pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            $this->debugLog('fel_invoice_exc.txt', ['exception' => $e->getMessage()]);
+            echo json_encode(['ok' => false, 'error' => $e->getMessage()]);
         }
-
-        echo json_encode([
-            'ok'               => $isGrace ? true : $felOk,
-            'uuid'             => $uuid,
-            'message'          => $isGrace ? 'Ticket de gracia registrado (sin FEL)' : ($felOk ? 'Factura certificada' : 'No se pudo certificar (registrada en BD)'),
-            'error'            => $isGrace ? null : $felErr,
-            'billing_amount'   => $isGrace ? 0.00 : ($payBillin > 0 ? $payBillin : (float)$billingAmount),
-            'manual_open'      => $manualOpen,
-            'pay_notify_sent'  => $payNotifySent,
-            'pay_notify_ack'   => $payNotifyAck,
-            'pay_notify_error' => $payNotifyError,
-            'has_pdf_base64'   => (bool)$pdfBase64,
-
-            // >>> Resultado de la apertura en modo gracia <<<
-            'grace_gate_open_ok'  => $isGrace ? $graceGateOpenOk   : null,
-            'grace_gate_open_msg' => $isGrace ? $graceGateOpenMsg  : null,
-            'grace_gate_channel'  => $isGrace ? $graceGateChannel  : null,
-
-            // >>> Diagnóstico de zona horaria <<<
-            'tz' => [
-                'php_timezone' => $phpTz,
-                'php_now'      => $phpNow,
-                'now_gt'       => $nowGT,
-                'mysql'        => $mysqlTzDiag,
-            ],
-        ], JSON_UNESCAPED_UNICODE);
-
-    } catch (\Throwable $e) {
-        if (isset($pdo) && $pdo->inTransaction()) {
-            $pdo->rollBack();
-        }
-        $this->debugLog('fel_invoice_exc.txt', ['exception' => $e->getMessage()]);
-        echo json_encode(['ok' => false, 'error' => $e->getMessage()]);
     }
-}
 
     /**
      * Garantiza que exista la columna invoices.pdf_base64
@@ -2570,221 +2570,238 @@ public function invoiceOne(): void
         }
     }
 
-    public function manualInvoiceCreate(): void
-    {
-        header('Content-Type: application/json; charset=utf-8');
+public function manualInvoiceCreate(): void
+{
+    header('Content-Type: application/json; charset=utf-8');
 
+    try {
+        $raw  = file_get_contents('php://input') ?: '{}';
+        $body = json_decode($raw, true) ?: [];
+
+        $reason       = trim((string)($body['reason'] ?? ''));                 // motivo OBLIGATORIO
+        $receptorNit  = strtoupper(trim((string)($body['receptor_nit'] ?? 'CF'))); // CF permitido
+        $receptorName = trim((string)($body['receptor_name'] ?? ''));          // opcional (lookup)
+        $mode         = (string)($body['mode'] ?? 'custom');                   // custom | monthly | grace
+        $amountIn     = isset($body['amount']) ? (float)$body['amount'] : null;
+
+        $this->debugLog('fel_manual_invoice_in.txt', ['body' => $body, 'server' => $_SERVER]);
+
+        if ($reason === '') {
+            echo json_encode(['ok' => false, 'error' => 'reason requerido']); return;
+        }
+        if ($receptorNit !== 'CF' && !ctype_digit($receptorNit)) {
+            echo json_encode(['ok' => false, 'error' => 'NIT inválido (use CF o solo dígitos)']); return;
+        }
+
+        $isGrace = ($mode === 'grace');
+
+        // === Config / DB
+        /** @var \Config\Config $cfg */
+        $cfg = $this->config;
+        $pdo = \App\Utils\DB::pdo($cfg);
+        $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
+        $pdo->setAttribute(\PDO::ATTR_DEFAULT_FETCH_MODE, \PDO::FETCH_ASSOC);
+
+        // Detectar driver (para SQL específico) y fijar TZ de sesión si es MySQL/MariaDB
+        $driver   = (string)$pdo->getAttribute(\PDO::ATTR_DRIVER_NAME);
+        $isSqlite = ($driver === 'sqlite');
+        if (!$isSqlite) {
+            // Guatemala no tiene horario de verano; fijamos UTC-06:00 confiablemente
+            try { $pdo->exec("SET time_zone = '-06:00'"); } catch (\Throwable $e) {
+                // No detenemos el flujo si falla; de todos modos insertamos created_at desde app
+                $this->debugLog('fel_manual_invoice_tz_warn.txt', ['error' => $e->getMessage()]);
+            }
+        }
+
+        // === AUTOFIX estructura solo para manual_invoices (soporta MySQL/SQLite)
         try {
-            $raw  = file_get_contents('php://input') ?: '{}';
-            $body = json_decode($raw, true) ?: [];
+            if ($isSqlite) {
+                // Crear tabla si no existe (SQLite)
+                $pdo->exec("
+                    CREATE TABLE IF NOT EXISTS manual_invoices (
+                        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                        created_at     TEXT NOT NULL,
+                        reason         TEXT NOT NULL,
+                        receptor_nit   TEXT NOT NULL,
+                        receptor_name  TEXT NULL,
+                        amount         REAL NOT NULL DEFAULT 0.00,
+                        used_monthly   INTEGER NOT NULL DEFAULT 0,
+                        send_to_fel    INTEGER NOT NULL DEFAULT 1,
+                        fel_uuid       TEXT NULL,
+                        fel_status     TEXT NULL,
+                        fel_message    TEXT NULL,
+                        fel_pdf_base64 TEXT NULL
+                    );
+                ");
 
-            $reason       = trim((string)($body['reason'] ?? ''));                 // motivo OBLIGATORIO
-            $receptorNit  = strtoupper(trim((string)($body['receptor_nit'] ?? 'CF'))); // CF permitido
-            $receptorName = trim((string)($body['receptor_name'] ?? ''));          // opcional (lookup)
-            $mode         = (string)($body['mode'] ?? 'custom');                   // custom | monthly | grace
-            $amountIn     = isset($body['amount']) ? (float)$body['amount'] : null;
+                // Columnas existentes
+                $cols = [];
+                $rs = $pdo->query("PRAGMA table_info(manual_invoices)");
+                foreach ($rs ?: [] as $r) { $cols[$r['name']] = true; }
 
-            $this->debugLog('fel_manual_invoice_in.txt', ['body' => $body, 'server' => $_SERVER]);
+                if (!isset($cols['receptor_name'])) {
+                    $pdo->exec("ALTER TABLE manual_invoices ADD COLUMN receptor_name TEXT NULL;");
+                }
+                if (!isset($cols['fel_pdf_base64'])) {
+                    $pdo->exec("ALTER TABLE manual_invoices ADD COLUMN fel_pdf_base64 TEXT NULL;");
+                }
+                if (!isset($cols['created_at'])) {
+                    $pdo->exec("ALTER TABLE manual_invoices ADD COLUMN created_at TEXT NOT NULL DEFAULT '';");
+                }
+            } else {
+                // MySQL/MariaDB
+                $pdo->exec("
+                    CREATE TABLE IF NOT EXISTS manual_invoices (
+                        id             INT AUTO_INCREMENT PRIMARY KEY,
+                        created_at     DATETIME NOT NULL,
+                        reason         VARCHAR(255) NOT NULL,
+                        receptor_nit   VARCHAR(32)  NOT NULL,
+                        receptor_name  VARCHAR(255) NULL,
+                        amount         DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+                        used_monthly   TINYINT(1) NOT NULL DEFAULT 0,
+                        send_to_fel    TINYINT(1) NOT NULL DEFAULT 1,
+                        fel_uuid       VARCHAR(64)  NULL,
+                        fel_status     VARCHAR(32)  NULL,
+                        fel_message    VARCHAR(255) NULL,
+                        fel_pdf_base64 MEDIUMTEXT   NULL
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+                ");
 
-            if ($reason === '') {
-                echo json_encode(['ok' => false, 'error' => 'reason requerido']); return;
+                // Columnas existentes
+                $cols = [];
+                $q = $pdo->query("SHOW COLUMNS FROM manual_invoices");
+                while ($r = $q->fetch(\PDO::FETCH_ASSOC)) { $cols[$r['Field']] = true; }
+
+                if (!isset($cols['receptor_name'])) {
+                    $pdo->exec("ALTER TABLE manual_invoices ADD COLUMN receptor_name VARCHAR(255) NULL AFTER receptor_nit;");
+                }
+                if (!isset($cols['fel_pdf_base64'])) {
+                    $pdo->exec("ALTER TABLE manual_invoices ADD COLUMN fel_pdf_base64 MEDIUMTEXT NULL AFTER fel_message;");
+                }
+                if (!isset($cols['created_at'])) {
+                    $pdo->exec("ALTER TABLE manual_invoices ADD COLUMN created_at DATETIME NOT NULL AFTER id;");
+                }
             }
-            if ($receptorNit !== 'CF' && !ctype_digit($receptorNit)) {
-                echo json_encode(['ok' => false, 'error' => 'NIT inválido (use CF o solo dígitos)']); return;
+        } catch (\Throwable $e) {
+            $this->debugLog('fel_manual_invoice_autofix.txt', ['error' => $e->getMessage()]);
+        }
+
+        // === Cargar settings para monthly_rate
+        $settings = [];
+        try { $settings = \App\Utils\Schema::loadAppSettings(); } catch (\Throwable $e) {}
+        $monthlyRateCfg = isset($settings['billing']['monthly_rate']) ? (float)$settings['billing']['monthly_rate'] : null;
+        $monthlyRateNN  = is_numeric($monthlyRateCfg) ? (float)$monthlyRateCfg : 0.00;
+
+        // === Resolver total
+        if ($isGrace) {
+            $total = 0.00;
+        } elseif ($mode === 'monthly') {
+            if (!is_finite($monthlyRateNN) || $monthlyRateNN <= 0) {
+                echo json_encode(['ok' => false, 'error' => 'monthly_rate no configurado o inválido']); return;
             }
+            $total = $monthlyRateNN;
+        } else { // custom
+            if (!is_finite($amountIn) || $amountIn <= 0) {
+                echo json_encode(['ok' => false, 'error' => 'amount inválido (> 0)']); return;
+            }
+            $total = (float)$amountIn;
+        }
 
-            $isGrace = ($mode === 'grace');
+        // === FEL (usar la NUEVA función con PDF)
+        $felOk = false; $uuid = null; $felRes = null; $felErr = null; $pdfB64 = null; $pdfSavedPath = null;
 
-            // === Config / DB (desde .env con helper)
-            /** @var \Config\Config $cfg */
-            $cfg = $this->config;
-            $pdo = \App\Utils\DB::pdo($cfg);
-            $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
-            $pdo->setAttribute(\PDO::ATTR_DEFAULT_FETCH_MODE, \PDO::FETCH_ASSOC);
+        if (!$isGrace) {
+            $client = new \App\Services\G4SClient($cfg);
+            $payloadFel = [
+                'ticket_no'    => null, // manual
+                'receptor_nit' => $receptorNit,
+                'total'        => $total,
+                'descripcion'  => mb_substr($reason, 0, 120),
+            ];
 
-            // Detectar driver para SQL específico
-            $driver = (string)$pdo->getAttribute(\PDO::ATTR_DRIVER_NAME);
-            $isSqlite = ($driver === 'sqlite');
-            $createdNowExpr = $isSqlite ? "DATETIME('now','localtime')" : "NOW()";
+            $this->debugLog('fel_manual_invoice_out.txt', ['request_payload' => $payloadFel]);
 
-            // === AUTOFIX estructura solo para manual_invoices (soporta MySQL/SQLite)
             try {
-                if ($isSqlite) {
-                    // Crear tabla si no existe (SQLite)
-                    $pdo->exec("
-                        CREATE TABLE IF NOT EXISTS manual_invoices (
-                            id             INTEGER PRIMARY KEY AUTOINCREMENT,
-                            created_at     TEXT NOT NULL DEFAULT (DATETIME('now','localtime')),
-                            reason         TEXT NOT NULL,
-                            receptor_nit   TEXT NOT NULL,
-                            receptor_name  TEXT NULL,
-                            amount         REAL NOT NULL DEFAULT 0.00,
-                            used_monthly   INTEGER NOT NULL DEFAULT 0,
-                            send_to_fel    INTEGER NOT NULL DEFAULT 1,
-                            fel_uuid       TEXT NULL,
-                            fel_status     TEXT NULL,
-                            fel_message    TEXT NULL,
-                            fel_pdf_base64 TEXT NULL
-                        );
-                    ");
+                // NUEVO: pedir PDF con método que retorna uuid y pdf_base64
+                $felRes  = $client->submitInvoiceWithPdf($payloadFel);
+                $felOk   = (bool)($felRes['ok'] ?? false);
+                $uuid    = $felRes['uuid']        ?? null;
+                $pdfB64  = $felRes['pdf_base64']  ?? null;
+                $felErr  = $felRes['error']       ?? null;
 
-                    // Columnas existentes
-                    $cols = [];
-                    $rs = $pdo->query("PRAGMA table_info(manual_invoices)");
-                    foreach ($rs ?: [] as $r) { $cols[$r['name']] = true; }
+                // Guardar PDF como archivo si vino
+                if ($felOk && $pdfB64) {
+                    $tzGT = new \DateTimeZone('America/Guatemala');
+                    $now  = new \DateTime('now', $tzGT);
+                    $dir  = sprintf('%s/fel/%s/%s',
+                        rtrim((string)$cfg->get('STORAGE_PATH', __DIR__.'/../../storage'), '/'),
+                        $now->format('Y'),
+                        $now->format('m')
+                    );
+                    if (!is_dir($dir)) @mkdir($dir, 0775, true);
 
-                    // Agregar columnas que falten
-                    if (!isset($cols['receptor_name'])) {
-                        $pdo->exec("ALTER TABLE manual_invoices ADD COLUMN receptor_name TEXT NULL;");
-                    }
-                    if (!isset($cols['fel_pdf_base64'])) {
-                        $pdo->exec("ALTER TABLE manual_invoices ADD COLUMN fel_pdf_base64 TEXT NULL;");
-                    }
-                } else {
-                    // MySQL/MariaDB
-                    $pdo->exec("
-                        CREATE TABLE IF NOT EXISTS manual_invoices (
-                            id             INT AUTO_INCREMENT PRIMARY KEY,
-                            created_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                            reason         VARCHAR(255) NOT NULL,
-                            receptor_nit   VARCHAR(32)  NOT NULL,
-                            receptor_name  VARCHAR(255) NULL,
-                            amount         DECIMAL(10,2) NOT NULL DEFAULT 0.00,
-                            used_monthly   TINYINT(1) NOT NULL DEFAULT 0,
-                            send_to_fel    TINYINT(1) NOT NULL DEFAULT 1,
-                            fel_uuid       VARCHAR(64)  NULL,
-                            fel_status     VARCHAR(32)  NULL,
-                            fel_message    VARCHAR(255) NULL,
-                            fel_pdf_base64 MEDIUMTEXT   NULL
-                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-                    ");
-
-                    // Columnas existentes
-                    $cols = [];
-                    $q = $pdo->query("SHOW COLUMNS FROM manual_invoices");
-                    while ($r = $q->fetch(\PDO::FETCH_ASSOC)) { $cols[$r['Field']] = true; }
-
-                    // Agregar columnas que falten (sin IF NOT EXISTS para compat. amplia)
-                    if (!isset($cols['receptor_name'])) {
-                        $pdo->exec("ALTER TABLE manual_invoices ADD COLUMN receptor_name VARCHAR(255) NULL AFTER receptor_nit;");
-                    }
-                    if (!isset($cols['fel_pdf_base64'])) {
-                        $pdo->exec("ALTER TABLE manual_invoices ADD COLUMN fel_pdf_base64 MEDIUMTEXT NULL AFTER fel_message;");
-                    }
+                    $fname = ($uuid ?: 'DTE-'.$now->format('Ymd-His')).'.pdf';
+                    $pdfSavedPath = $dir.'/'.$fname;
+                    @file_put_contents($pdfSavedPath, base64_decode($pdfB64));
                 }
             } catch (\Throwable $e) {
-                $this->debugLog('fel_manual_invoice_autofix.txt', ['error' => $e->getMessage()]);
+                $felOk  = false;
+                $felErr = $e->getMessage();
+                $felRes = ['ok'=>false,'error'=>$felErr];
             }
-
-            // === Cargar settings para monthly_rate
-            $settings = [];
-            try { $settings = \App\Utils\Schema::loadAppSettings(); } catch (\Throwable $e) {}
-            $monthlyRateCfg = isset($settings['billing']['monthly_rate']) ? (float)$settings['billing']['monthly_rate'] : null;
-            $monthlyRateNN  = is_numeric($monthlyRateCfg) ? (float)$monthlyRateCfg : 0.00;
-
-            // === Resolver total
-            if ($isGrace) {
-                $total = 0.00;
-            } elseif ($mode === 'monthly') {
-                if (!is_finite($monthlyRateNN) || $monthlyRateNN <= 0) {
-                    echo json_encode(['ok' => false, 'error' => 'monthly_rate no configurado o inválido']); return;
-                }
-                $total = $monthlyRateNN;
-            } else { // custom
-                if (!is_finite($amountIn) || $amountIn <= 0) {
-                    echo json_encode(['ok' => false, 'error' => 'amount inválido (> 0)']); return;
-                }
-                $total = (float)$amountIn;
-            }
-
-            // === FEL (usar la NUEVA función con PDF)
-            $felOk = false; $uuid = null; $felRes = null; $felErr = null; $pdfB64 = null; $pdfSavedPath = null;
-
-            if (!$isGrace) {
-                $client = new \App\Services\G4SClient($cfg);
-                $payloadFel = [
-                    'ticket_no'    => null, // manual
-                    'receptor_nit' => $receptorNit,
-                    'total'        => $total,
-                    'descripcion'  => mb_substr($reason, 0, 120), // se envía la descripción
-                ];
-
-                $this->debugLog('fel_manual_invoice_out.txt', ['request_payload' => $payloadFel]);
-
-                try {
-                    // NUEVO: pedir PDF con POST_DOCUMENT_SAT_PDF (implementado en tu G4SClient::submitInvoiceWithPdf)
-                    $felRes  = $client->submitInvoiceWithPdf($payloadFel);
-                    $felOk   = (bool)($felRes['ok'] ?? false);
-                    $uuid    = $felRes['uuid']        ?? null;
-                    $pdfB64  = $felRes['pdf_base64']  ?? null;
-                    $felErr  = $felRes['error']       ?? null;
-
-                    // Guardar PDF como archivo si vino
-                    if ($felOk && $pdfB64) {
-                        $tzGT = new \DateTimeZone('America/Guatemala');
-                        $now  = new \DateTime('now', $tzGT);
-                        $dir  = sprintf('%s/fel/%s/%s',
-                            rtrim((string)$cfg->get('STORAGE_PATH', __DIR__.'/../../storage'), '/'),
-                            $now->format('Y'),
-                            $now->format('m')
-                        );
-                        if (!is_dir($dir)) @mkdir($dir, 0775, true);
-
-                        $fname = ($uuid ?: 'DTE-'.$now->format('Ymd-His')).'.pdf';
-                        $pdfSavedPath = $dir.'/'.$fname;
-                        @file_put_contents($pdfSavedPath, base64_decode($pdfB64));
-                    }
-                } catch (\Throwable $e) {
-                    $felOk  = false;
-                    $felErr = $e->getMessage();
-                    $felRes = ['ok'=>false,'error'=>$felErr];
-                }
-            }
-
-            // === Persistir SOLO en manual_invoices
-            $pdo->beginTransaction();
-            $stmtM = $pdo->prepare("
-                INSERT INTO manual_invoices
-                    (reason, receptor_nit, receptor_name, amount, used_monthly, send_to_fel, fel_uuid, fel_status, fel_message, fel_pdf_base64, created_at)
-                VALUES
-                    (:r, :nit, :name, :amt, :um, :send, :uuid, :st, :msg, :pdf, {$createdNowExpr})
-            ");
-            $stmtM->execute([
-                ':r'    => $reason,
-                ':nit'  => $receptorNit,
-                ':name' => ($receptorName !== '' ? $receptorName : null),
-                ':amt'  => $total,
-                ':um'   => ($mode === 'monthly') ? 1 : 0,
-                ':send' => $isGrace ? 0 : 1,
-                ':uuid' => $uuid,
-                ':st'   => $isGrace ? 'SKIPPED' : ($felOk ? 'OK' : 'ERROR'),
-                ':msg'  => $isGrace ? 'no FEL (grace)' : ($felOk ? 'Emitida correctamente' : ($felErr ?: 'Error FEL')),
-                ':pdf'  => ($felOk && $pdfB64) ? $pdfB64 : null, // guarda base64 (opcional)
-            ]);
-            $manualId = (int)$pdo->lastInsertId();
-            $pdo->commit();
-
-            echo json_encode([
-                'ok'               => $isGrace ? true : $felOk,
-                'uuid'             => $uuid,
-                'message'          => $isGrace ? 'Factura de gracia registrada (sin FEL)' : ($felOk ? 'Factura manual certificada' : 'No se pudo certificar (registrada en BD)'),
-                'error'            => $isGrace ? null : $felErr,
-                'billing_amount'   => (float)$total,
-                'manual_id'        => $manualId,
-                'pdf_base64'       => $pdfB64,                 // PDF para descargar en UI
-                'pdf_saved_path'   => $pdfSavedPath,           // ruta guardada (si aplica)
-                'manual_open'      => false,
-                'pay_notify_sent'  => false,
-                'pay_notify_ack'   => false,
-                'pay_notify_error' => null,
-            ], JSON_UNESCAPED_UNICODE);
-
-        } catch (\Throwable $e) {
-            if (isset($pdo) && $pdo->inTransaction()) $pdo->rollBack();
-            $this->debugLog('fel_manual_invoice_exc.txt', ['exception' => $e->getMessage()]);
-            echo json_encode(['ok' => false, 'error' => $e->getMessage()]);
         }
+
+        // === Timestamp Guatemala forzado (para el INSERT)
+        $tzGT      = new \DateTimeZone('America/Guatemala');
+        $createdDT = new \DateTime('now', $tzGT);
+        $createdAt = $createdDT->format('Y-m-d H:i:s'); // siempre UTC-6 en texto
+
+        // === Persistir SOLO en manual_invoices
+        $pdo->beginTransaction();
+        $stmtM = $pdo->prepare("
+            INSERT INTO manual_invoices
+                (created_at, reason, receptor_nit, receptor_name, amount, used_monthly, send_to_fel, fel_uuid, fel_status, fel_message, fel_pdf_base64)
+            VALUES
+                (:created_at, :r, :nit, :name, :amt, :um, :send, :uuid, :st, :msg, :pdf)
+        ");
+        $stmtM->execute([
+            ':created_at' => $createdAt,
+            ':r'          => $reason,
+            ':nit'        => $receptorNit,
+            ':name'       => ($receptorName !== '' ? $receptorName : null),
+            ':amt'        => $total,
+            ':um'         => ($mode === 'monthly') ? 1 : 0,
+            ':send'       => $isGrace ? 0 : 1,
+            ':uuid'       => $uuid,
+            ':st'         => $isGrace ? 'SKIPPED' : ($felOk ? 'OK' : 'ERROR'),
+            ':msg'        => $isGrace ? 'no FEL (grace)' : ($felOk ? 'Emitida correctamente' : ($felErr ?: 'Error FEL')),
+            ':pdf'        => ($felOk && $pdfB64) ? $pdfB64 : null,
+        ]);
+        $manualId = (int)$pdo->lastInsertId();
+        $pdo->commit();
+
+        echo json_encode([
+            'ok'               => $isGrace ? true : $felOk,
+            'uuid'             => $uuid,
+            'message'          => $isGrace ? 'Factura de gracia registrada (sin FEL)' : ($felOk ? 'Factura manual certificada' : 'No se pudo certificar (registrada en BD)'),
+            'error'            => $isGrace ? null : $felErr,
+            'billing_amount'   => (float)$total,
+            'manual_id'        => $manualId,
+            'created_at_gt'    => $createdAt,              // devuelvo la fecha/hora GT usada
+            'pdf_base64'       => $pdfB64,                 // PDF para descargar en UI
+            'pdf_saved_path'   => $pdfSavedPath,           // ruta guardada (si aplica)
+            'manual_open'      => false,
+            'pay_notify_sent'  => false,
+            'pay_notify_ack'   => false,
+            'pay_notify_error' => null,
+        ], JSON_UNESCAPED_UNICODE);
+
+    } catch (\Throwable $e) {
+        if (isset($pdo) && $pdo->inTransaction()) $pdo->rollBack();
+        $this->debugLog('fel_manual_invoice_exc.txt', ['exception' => $e->getMessage()]);
+        echo json_encode(['ok' => false, 'error' => $e->getMessage()]);
     }
+}
 
     public function manualInvoiceList(): void
     {

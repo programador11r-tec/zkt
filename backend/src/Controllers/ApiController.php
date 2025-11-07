@@ -713,10 +713,10 @@ class ApiController {
                     ':billin_json' => $recordIdRef, // ← SOLO recordId o "0"
                 ]);
 
-                Logger::info('billing.insert.ok', [
+                /*Logger::info('billing.insert.ok', [
                     'cid' => $cid, 'ticket_no' => $ticketNo, 'billin' => $billValue,
                     'plate' => $plate, 'billin_ref' => $recordIdRef, 'row_count' => $ins->rowCount()
-                ]);
+                ]);*/
             } else {
                 $limitClause = ($driver === 'mysql') ? ' LIMIT 1' : '';
 
@@ -746,15 +746,15 @@ class ApiController {
                     ':t' => $ticketNo,
                 ]);
 
-                Logger::info('billing.update.ok', [
+                /*Logger::info('billing.update.ok', [
                     'cid' => $cid, 'ticket_no' => $ticketNo, 'billin' => $billValue,
                     'plate' => $plate, 'billin_ref' => $recordIdRef,
                     'row_count_bill' => $upBill->rowCount(), 'row_count_plate' => $stPlate->rowCount(), 'row_count_json' => $stJson->rowCount()
-                ]);
+                ]);*/
             }
 
 
-            Logger::info('billing.stub.done', ['cid' => $cid, 'ticket_no' => $ticketNo, 'ms' => $this->msSince($t0)]);
+            //Logger::info('billing.stub.done', ['cid' => $cid, 'ticket_no' => $ticketNo, 'ms' => $this->msSince($t0)]);
         } catch (\PDOException $e) {
             Logger::error('billing.stub.sql_failed', [
                 'cid' => $cid, 'ticket_no' => $t['ticket_no'] ?? null, 'sqlstate' => $e->getCode(), 'error' => $e->getMessage()
@@ -811,7 +811,7 @@ class ApiController {
     private function ensurePaymentsTableHasBillin(PDO $pdo): void {
         $cid = $this->newCorrelationId('schema');
         try {
-            Logger::debug('payments.ensure_billin.check', ['cid' => $cid]);
+            //Logger::debug('payments.ensure_billin.check', ['cid' => $cid]);
             $columns = $this->getTableColumns($pdo, 'payments');
 
             if (!isset($columns['billin'])) {
@@ -823,14 +823,14 @@ class ApiController {
 
                 if ($driver === 'sqlite') {
                     $sql = "ALTER TABLE payments ADD COLUMN billin TEXT";
-                    Logger::info('payments.ensure_billin.alter', ['cid' => $cid, 'driver' => $driver, 'sql' => $sql]);
+                    //Logger::info('payments.ensure_billin.alter', ['cid' => $cid, 'driver' => $driver, 'sql' => $sql]);
                     $pdo->exec($sql);
                 } else {
                     $sql = "ALTER TABLE payments ADD COLUMN billin LONGTEXT NULL";
-                    Logger::info('payments.ensure_billin.alter', ['cid' => $cid, 'driver' => $driver, 'sql' => $sql]);
+                   // Logger::info('payments.ensure_billin.alter', ['cid' => $cid, 'driver' => $driver, 'sql' => $sql]);
                     $pdo->exec($sql);
                 }
-                Logger::info('payments.ensure_billin.created', ['cid' => $cid, 'driver' => $driver]);
+                //Logger::info('payments.ensure_billin.created', ['cid' => $cid, 'driver' => $driver]);
             } else {
                 Logger::debug('payments.ensure_billin.exists', ['cid' => $cid]);
             }
@@ -918,7 +918,7 @@ class ApiController {
 
         $json = json_decode($raw, true);
         if (!is_array($json)) {
-            Logger::warning('billing.http.non_json', ['cid' => $cid, 'status' => $status, 'body_preview' => substr($raw,0,300)]);
+            //Logger::warning('billing.http.non_json', ['cid' => $cid, 'status' => $status, 'body_preview' => substr($raw,0,300)]);
             return ['ok' => false, 'status' => $status, 'body_raw' => $raw, 'json' => null, 'bill_value' => 0, 'record_id' => null];
         }
 
@@ -964,10 +964,10 @@ class ApiController {
 
         try {
             $keys = isset($json['data']) && is_array($json['data']) ? implode(',', array_keys($json['data'])) : '';
-            Logger::debug('billing.http.data_keys', ['cid' => $cid, 'keys' => $keys]);
+            //Logger::debug('billing.http.data_keys', ['cid' => $cid, 'keys' => $keys]);
         } catch (\Throwable $e) { /* ignore */ }
 
-        Logger::info('billing.http.ok', [
+       /* Logger::info('billing.http.ok', [
             'cid' => $cid,
             'status' => $status,
             'ok' => $ok,
@@ -975,7 +975,7 @@ class ApiController {
             'record_id' => $recordId,
             'endpoint' => $endpoint,
             'body_preview' => substr($raw, 0, 400)
-        ]);
+        ]);*/
 
         return [
             'ok'         => $ok,
@@ -1012,13 +1012,13 @@ class ApiController {
         $st  = $pdo->prepare($sql);
         $st->execute([':billin' => $billinValue, ':t' => $ticketNo]);
 
-        Logger::info('payments.billin.update.ok', [
+        /*Logger::info('payments.billin.update.ok', [
             'cid' => $cid,
             'ticket_no' => $ticketNo,
             'billin' => $billinValue,
             'affected' => $st->rowCount(),
             'duration_ms' => $this->msSince($t0),
-        ]);
+        ]);*/
     }
 
 
@@ -1580,7 +1580,7 @@ public function invoiceOne(): void
 
             $baseUrl = rtrim((string) $this->config->get('HAMACHI_PARK_BASE_URL', ''), '/');
             if ($baseUrl === '') {
-                Logger::error('paynotify.no_base_url', ['cid' => $cid]);
+                //Logger::error('paynotify.no_base_url', ['cid' => $cid]);
                 $payNotifyError = 'HAMACHI_PARK_BASE_URL no está configurado.';
                 $manualOpen = true;
             } else {
@@ -1588,7 +1588,7 @@ public function invoiceOne(): void
                 $recordId  = $payRecordId;
 
                 if ($recordId === '0' || $recordId === '' || $carNumber === '') {
-                    Logger::error('paynotify.missing_data', ['cid'=>$cid, 'carNumber'=>$carNumber, 'recordId'=>$recordId]);
+                    //Logger::error('paynotify.missing_data', ['cid'=>$cid, 'carNumber'=>$carNumber, 'recordId'=>$recordId]);
                     $payNotifyError = 'Faltan carNumber/recordId para payNotify';
                     $manualOpen = true;
                 } else {
@@ -1613,14 +1613,14 @@ public function invoiceOne(): void
                         'recordId'    => $recordId,
                     ];
 
-                    Logger::debug('paynotify.req', [
+                    /*Logger::debug('paynotify.req', [
                         'cid'        => $cid,
                         'endpoint'   => $endpoint,
                         'headers'    => $headers,
                         'verify_ssl' => $verifySsl,
                         'connect_to' => $connectTo ?: null,
                         'payload'    => $notifyPayload,
-                    ]);
+                    ]);*/
 
                     try {
                         $ch = curl_init($endpoint);
@@ -1644,7 +1644,7 @@ public function invoiceOne(): void
                         }
                         if ($connectTo !== '') {
                             curl_setopt($ch, CURLOPT_CONNECT_TO, [$connectTo]);
-                            Logger::debug('http.connect_to', ['cid' => $cid, 'connect_to' => $connectTo]);
+                            //Logger::debug('http.connect_to', ['cid' => $cid, 'connect_to' => $connectTo]);
                         }
 
                         $resp = curl_exec($ch);
@@ -1653,7 +1653,7 @@ public function invoiceOne(): void
                             $info = curl_getinfo($ch) ?: [];
                             curl_close($ch);
 
-                            Logger::error('paynotify.http_failed', ['cid'=>$cid, 'endpoint'=>$endpoint, 'error'=>$err, 'curl_info'=>$info]);
+                            //Logger::error('paynotify.http_failed', ['cid'=>$cid, 'endpoint'=>$endpoint, 'error'=>$err, 'curl_info'=>$info]);
                             $payNotifyError = $err;
                             $manualOpen = true;
                         } else {
@@ -1688,24 +1688,24 @@ public function invoiceOne(): void
 
                             if (!$payNotifySent || !$payNotifyAck) {
                                 $manualOpen = true;
-                                Logger::error('paynotify.nack', [
+                                /*Logger::error('paynotify.nack', [
                                     'cid'=>$cid, 'status'=>$status, 'ack'=>$payNotifyAck,
                                     'body_preview'=>mb_substr($body, 0, 500),
                                     'error'=>$payNotifyError
-                                ]);
+                                ]);*/
                             } else {
                                 Logger::info('paynotify.ok', ['cid'=>$cid, 'status'=>$status]);
                             }
                         }
 
-                        Logger::debug('paynotify.resp', [
+                        /*Logger::debug('paynotify.resp', [
                             'cid'   => $cid,
                             'sent'  => $payNotifySent,
                             'ack'   => $payNotifyAck,
                             'ctype' => $payNotifyType,
                             'raw'   => $payNotifyRaw ? mb_substr($payNotifyRaw, 0, 4000) : null,
                             'error' => $payNotifyError,
-                        ]);
+                        ]);*/
 
                     } catch (\Throwable $e) {
                         $payNotifyError = $e->getMessage();

@@ -2258,7 +2258,7 @@ async function loadSettings(quiet = false) {
 
   // ===== facturacion manual ======
   async function renderManualInvoiceModule() {
-    // ===== Bootstrap-friendly Dialog shim (mezcla y garantiza métodos) =====
+    // ===== Bootstrap-friendly Dialog shim =====
     const Dialog = (() => {
       function ensureHost() {
         let host = document.getElementById('app-toast-host');
@@ -2272,7 +2272,6 @@ async function loadSettings(quiet = false) {
         }
         return host;
       }
-
       function bsToast(message, { title, variant = 'primary', delay = 4000 } = {}) {
         const host = ensureHost();
         const wrap = document.createElement('div');
@@ -2302,7 +2301,6 @@ async function loadSettings(quiet = false) {
           setTimeout(() => wrap.remove(), delay);
         }
       }
-
       function bsAlert({ title, message, variant = 'warning' } = {}) {
         const host = ensureHost();
         const div = document.createElement('div');
@@ -2314,12 +2312,8 @@ async function loadSettings(quiet = false) {
           <div>${message ?? ''}</div>
           <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>`;
         host.appendChild(div);
-        return {
-          close: () => div.remove(),
-          el: div,
-        };
+        return { close: () => div.remove(), el: div };
       }
-
       function loading({ title, message } = {}) {
         const wrap = document.createElement('div');
         wrap.innerHTML = `
@@ -2341,16 +2335,13 @@ async function loadSettings(quiet = false) {
         document.body.appendChild(el);
         return { close() { el.remove(); } };
       }
-
       const base = {
         loading,
         toast: (msg, opts) => bsToast(msg, opts),
         alert: (opts) => bsAlert(opts),
         ok: (message, title = 'Listo') => bsToast(message, { title, variant: 'success' }),
-        err: (e, title = 'Error') =>
-          bsAlert({ title, message: (e?.message ?? String(e)), variant: 'danger' }),
+        err: (e, title = 'Error') => bsAlert({ title, message: (e?.message ?? String(e)), variant: 'danger' }),
       };
-
       const ext = window.Dialog || {};
       return {
         ...base,
@@ -2367,35 +2358,6 @@ async function loadSettings(quiet = false) {
       String(v ?? '')
         .replace(/&/g,'&amp;').replace(/</g,'&lt;')
         .replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-
-    // Mantén una referencia al modal actual para cerrarlo luego
-    let manualInvModalRef = null;
-
-    function bsModal(id){
-      const el = document.getElementById(id);
-      if (!el) return null;
-      if (window.bootstrap?.Modal) {
-        const inst = bootstrap.Modal.getInstance(el) || new bootstrap.Modal(el);
-        return inst;
-      }
-      // Fallback mínimo sin Bootstrap JS
-      return {
-        show(){
-          el.classList.add('show'); el.style.display='block'; el.removeAttribute('aria-hidden');
-          document.body.classList.add('modal-open');
-          if (!document.querySelector('.modal-backdrop')) {
-            const bd = document.createElement('div');
-            bd.className = 'modal-backdrop fade show';
-            document.body.appendChild(bd);
-          }
-        },
-        hide(){
-          el.classList.remove('show'); el.style.display='none'; el.setAttribute('aria-hidden','true');
-          document.body.classList.remove('modal-open');
-          const bd = document.querySelector('.modal-backdrop'); if (bd) bd.remove();
-        },
-      };
-    }
 
     // ===== PDF helpers =====
     function b64ToBlobPdf(b64){
@@ -2427,7 +2389,7 @@ async function loadSettings(quiet = false) {
       throw new Error('No se pudo obtener el PDF.');
     }
 
-    // ===== Parse dinero + settings (SOLO loadSettings) =====
+    // ===== Helpers dinero =====
     function parseMoneyLike(x){
       if (x == null) return null;
       if (typeof x === 'number') return Number.isFinite(x) ? x : null;
@@ -2437,29 +2399,29 @@ async function loadSettings(quiet = false) {
       return Number.isFinite(n) ? n : null;
     }
 
-    const settings = await loadSettings();
-    const rawMonthly =
-      settings?.billing?.monthly_rate ??
-      settings?.billing?.monthlyRate ??
-      settings?.monthly_rate ??
-      settings?.monthlyRate ?? null;
-
-    // ===== Tarifa mensual desde /api/settings/overview =====
+    // ===== Cargar settings (tarifa mensual) =====
+    const settings = await loadSettings().catch(()=>null);
     async function getMonthlyRateFromOverview(){
       try {
         const res = await fetchJSON(api('settings'));
         const raw = res?.settings?.billing?.monthly_rate ?? null;
         const v = parseMoneyLike(raw);
         return (v && v > 0) ? v : null;
-      } catch {
-        return null;
-      }
+      } catch { return null; }
     }
-
     const monthlyRateNumber = await getMonthlyRateFromOverview();
     const hasMonthly = monthlyRateNumber != null && monthlyRateNumber > 0;
 
-    // ===== Render =====
+    // ===== State para paginado =====
+    const state = {
+      rows: [],
+      page: 1,
+      perPage: 25,
+      pages: 1,
+    };
+
+    // ===== Render estático =====
+    const app = document.getElementById('app') || document.body;
     app.innerHTML = `
       <div class="card p-3">
         <div class="d-flex flex-wrap align-items-start gap-3 mb-3">
@@ -2497,6 +2459,11 @@ async function loadSettings(quiet = false) {
             </tbody>
           </table>
         </div>
+
+        <!-- Paginación -->
+        <nav class="mt-3" aria-label="Paginación facturas">
+          <ul class="pagination pagination-sm mb-0" id="manualInvPager"></ul>
+        </nav>
       </div>
 
       <!-- Modal -->
@@ -2560,7 +2527,7 @@ async function loadSettings(quiet = false) {
               </div>
               <div class="modal-footer">
                 <button class="btn btn-outline-secondary" type="button" data-bs-dismiss="modal">Cancelar</button>
-                <button class="btn btn-primary" type="submit" id="btnSubmitManualInv">Crear</button>
+                <button class="btn btn-primary" type="button" id="btnSubmitManualInv">Crear</button>
               </div>
             </form>
           </div>
@@ -2568,62 +2535,79 @@ async function loadSettings(quiet = false) {
       </div>
     `;
 
-    // ===== Tabla =====
-    async function refreshManualInvoicesTable(){
-      const tbody = document.querySelector('#tblManualInvoices tbody'); if (!tbody) return;
-      tbody.innerHTML = `<tr><td colspan="9" class="text-center py-4">
-        <div class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></div><span class="ms-2">Actualizando…</span></td></tr>`;
-      try{
-        const js = await fetchJSON(api('fel/manual-invoice-list'));
-        const rows = Array.isArray(js?.data) ? js.data : (Array.isArray(js) ? js : []);
-        if (!rows.length){
-          tbody.innerHTML = `<tr><td colspan="9" class="text-center text-muted py-4">No hay facturas manuales registradas todavía.</td></tr>`;
-          return;
-        }
-        tbody.innerHTML = rows.map(r=>{
-          const canPdf = (String(r?.fel_status||'').trim()==='OK') && !!r?.fel_uuid;
-          const title = r?.receptor_name ? 'Nombre: ' + String(r.receptor_name).replace(/"/g,'&quot;') : '';
-          return `<tr title="${title}">
-            <td>${r.id ?? ''}</td>
-            <td>${r.created_at ?? ''}</td>
-            <td>${r.reason ? escapeHtml(r.reason) : ''}</td>
-            <td>${r.receptor_nit ?? ''}</td>
-            <td>Q ${Number(r.amount ?? 0).toFixed(2)}</td>
-            <td>${r.used_monthly ? 'Sí' : 'No'}</td>
-            <td>${r.fel_status ? escapeHtml(r.fel_status) : ''}</td>
-            <td>${r.fel_uuid ? escapeHtml(r.fel_uuid) : ''}</td>
-            <td class="text-end">
-              <button type="button" class="btn btn-sm ${canPdf?'btn-outline-primary':'btn-outline-secondary'} btnManualPdf"
-                data-id="${r.id ?? ''}" data-uuid="${r.fel_uuid ?? ''}" ${canPdf?'':'disabled'}
-                title="${canPdf ? 'Descargar/abrir PDF' : 'Sin PDF disponible'}">
-                <i class="bi bi-file-pdf"></i>
-              </button>
-            </td>
-          </tr>`;
-        }).join('');
-
-        tbody.onclick = async (ev)=>{
-          const btn = ev.target.closest?.('.btnManualPdf'); if (!btn) return;
-          const id = btn.getAttribute('data-id'); const uuid = btn.getAttribute('data-uuid');
-          const dlg = Dialog.loading({ title:'Obteniendo PDF', message:'Consultando…' });
-          try {
-            const b64 = await fetchPdfForManualInvoice({ id, uuid });
-            downloadBase64Pdf((uuid?`${uuid}.pdf`:`manual-invoice-${id}.pdf`), b64);
-            dlg.close(); Dialog.toast?.('PDF listo', { variant:'success' });
-          } catch(err){
-            dlg.close(); Dialog.alert({ title:'No disponible', message:String(err), variant:'warning' });
-          }
-        };
-      }catch(e){
-        tbody.innerHTML = `<tr><td colspan="9" class="text-center py-4"><div class="text-danger">Error al cargar.</div><div class="small text-muted">${escapeHtml(String(e))}</div></td></tr>`;
+    // ===== Modal helper =====
+    let manualInvModalRef = null;
+    function bsModal(id){
+      const el = document.getElementById(id);
+      if (!el) return null;
+      if (window.bootstrap?.Modal) {
+        const inst = bootstrap.Modal.getInstance(el) || new bootstrap.Modal(el);
+        return inst;
       }
+      return {
+        show(){
+          el.classList.add('show'); el.style.display='block'; el.removeAttribute('aria-hidden');
+          document.body.classList.add('modal-open');
+          if (!document.querySelector('.modal-backdrop')) {
+            const bd = document.createElement('div');
+            bd.className = 'modal-backdrop fade show';
+            document.body.appendChild(bd);
+          }
+        },
+        hide(){
+          el.classList.remove('show'); el.style.display='none'; el.setAttribute('aria-hidden','true');
+          document.body.classList.remove('modal-open');
+          const bd = document.querySelector('.modal-backdrop'); if (bd) bd.remove();
+        },
+      };
     }
-    document.getElementById('btnRefreshManualInv')?.addEventListener('click', refreshManualInvoicesTable);
-    await refreshManualInvoicesTable();
 
-    // ===== Abrir modal: radios y monto =====
+    // ===== NIT: sanitización + lookup =====
+    const nitInput   = document.getElementById('mNit');
+    const mNitStatus = document.getElementById('mNitStatus');
+    function sanitizeNit(raw){
+      const v = (raw || '').trim();
+      if (/^[Cc][Ff]$/.test(v)) return 'CF';
+      return v.replace(/\D+/g,'');
+    }
+    function validateNitInput(){
+      const v = nitInput.value.trim();
+      if (!v) { nitInput.setCustomValidity(''); return; }
+      if (v.toUpperCase()==='CF' || /^\d+$/.test(v)) nitInput.setCustomValidity('');
+      else nitInput.setCustomValidity('Escribe solo números o “CF”.');
+    }
+    function setNitStatus(t, cls='text-muted'){ mNitStatus.className = `small mt-1 ${cls}`; mNitStatus.textContent = t || ''; }
+    async function tryLookupNit(){
+      const val = nitInput.value.trim();
+      if (!val || val.toUpperCase()==='CF'){ setNitStatus('Consumidor final (CF).'); return; }
+      if (!(val.toUpperCase()==='CF' || /^\d+$/.test(val))) return;
+      const dlg = Dialog.loading({ title:'Buscando NIT', message:'Consultando…' });
+      try{
+        const res = await fetchJSON(api('g4s/lookup-nit')+'?nit='+encodeURIComponent(val));
+        if (res?.ok !== false){
+          const nombre = (res?.nombre || res?.name || '').trim();
+          const dir = (res?.direccion || res?.address || '').trim();
+          setNitStatus(`Encontrado${nombre ? ': ' + nombre : ''}${dir ? ' — ' + dir : ''}.`, 'text-success');
+        }else{
+          setNitStatus(res?.error ? `No encontrado: ${res.error}` : 'NIT no encontrado.', 'text-warning');
+        }
+      }catch{ setNitStatus('Error al consultar.', 'text-danger'); }
+      finally{ dlg.close(); }
+    }
+    nitInput.addEventListener('input', ()=>{
+      const clean = sanitizeNit(nitInput.value);
+      if (clean !== nitInput.value){ nitInput.value = clean; nitInput.setSelectionRange(clean.length, clean.length); }
+      validateNitInput();
+      if (/^\d{6,}$/.test(nitInput.value)) { setTimeout(tryLookupNit, 600); }
+      else if (nitInput.value.toUpperCase()==='CF') setNitStatus('Consumidor final (CF).');
+      else setNitStatus('Ingresa al menos 6 dígitos para consultar.');
+    });
+    nitInput.addEventListener('blur', ()=>{ validateNitInput(); tryLookupNit(); });
+    document.getElementById('btnLookupNit')?.addEventListener('click', tryLookupNit);
+
+    // ===== Abrir modal =====
     document.getElementById('btnNewManualInv')?.addEventListener('click', () => {
-      manualInvModalRef = bsModal('manualInvModal'); // guarda referencia
+      manualInvModalRef = bsModal('manualInvModal');
       manualInvModalRef?.show();
 
       const reasonEl    = document.getElementById('mReason');
@@ -2644,7 +2628,7 @@ async function loadSettings(quiet = false) {
         customInput.disabled = false;
       }
 
-      // Cambios de radio: alternancia y bloqueo del input
+      // Sync radios
       const sync = () => {
         if (modeMonthly.checked && hasMonthly) {
           customInput.value = monthlyRateNumber.toFixed(2);
@@ -2661,69 +2645,13 @@ async function loadSettings(quiet = false) {
       setTimeout(()=>reasonEl?.focus(), 120);
     });
 
-    // ===== NIT: sanitización + lookup =====
-    const nitInput   = document.getElementById('mNit');
-    const mNitStatus = document.getElementById('mNitStatus');
-
-    function sanitizeNit(raw){
-      const v = (raw || '').trim();
-      if (/^[Cc][Ff]$/.test(v)) return 'CF';
-      return v.replace(/\D+/g,'');
-    }
-    function validateNitInput(){
-      const v = nitInput.value.trim();
-      if (!v) { nitInput.setCustomValidity(''); return; }
-      if (v.toUpperCase()==='CF' || /^\d+$/.test(v)) nitInput.setCustomValidity('');
-      else nitInput.setCustomValidity('Escribe solo números o “CF”.');
-    }
-    function setNitStatus(t, cls='text-muted'){ mNitStatus.className = `small mt-1 ${cls}`; mNitStatus.textContent = t || ''; }
-
-    let nitLookupTimer = null;
-    function debounceNitLookup(fn, ms=600){ clearTimeout(nitLookupTimer); nitLookupTimer = setTimeout(fn, ms); }
-
-    async function tryLookupNit(){
-      const val = nitInput.value.trim();
-      if (!val || val.toUpperCase()==='CF'){ setNitStatus('Consumidor final (CF).'); return; }
-      if (!(val.toUpperCase()==='CF' || /^\d+$/.test(val))) return;
-
-      setNitStatus('Buscando en SAT…', 'text-info');
-      const dlg = Dialog.loading({ title:'Buscando NIT', message:'Consultando…' });
-      try{
-        const res = await fetchJSON(api('g4s/lookup-nit')+'?nit='+encodeURIComponent(val));
-        if (res?.ok !== false){
-          const nombre = (res?.nombre || res?.name || '').trim();
-          const dir = (res?.direccion || res?.address || '').trim();
-          setNitStatus(`Encontrado${nombre ? ': ' + nombre : ''}${dir ? ' — ' + dir : ''}.`, 'text-success');
-        }else{
-          setNitStatus(res?.error ? `No encontrado: ${res.error}` : 'NIT no encontrado.', 'text-warning');
-        }
-      }catch(e){
-        setNitStatus('Error al consultar.', 'text-danger');
-      }finally{ dlg.close(); }
-    }
-
-    nitInput.addEventListener('input', ()=>{
-      const clean = sanitizeNit(nitInput.value);
-      if (clean !== nitInput.value){ nitInput.value = clean; nitInput.setSelectionRange(clean.length, clean.length); }
-      validateNitInput();
-      if (/^\d{6,}$/.test(nitInput.value)) debounceNitLookup(tryLookupNit, 600);
-      else if (nitInput.value.toUpperCase()==='CF') setNitStatus('Consumidor final (CF).');
-      else setNitStatus('Ingresa al menos 6 dígitos para consultar.');
-    });
-    nitInput.addEventListener('blur', ()=>{ validateNitInput(); tryLookupNit(); });
-    document.getElementById('btnLookupNit')?.addEventListener('click', tryLookupNit);
-
-  // fuera del handler (arriba en el módulo)
-  let isSubmittingManual = false;
-
-    // ===== Submit =====
-    document.getElementById('manualInvForm')?.addEventListener('submit', async (ev) => {
-      ev.preventDefault();
-      if (isSubmittingManual) return;            // guard clause
-      isSubmittingManual = true;
-
-      const btn = document.getElementById('btnSubmitManualInv');
-      btn?.setAttribute('disabled', 'disabled');
+    // ===== Submit único (sin duplicados): onsubmit =====
+    const submitBtn = document.getElementById('btnSubmitManualInv');
+    submitBtn.onclick = async () => {
+      const form = document.getElementById('manualInvForm');
+      if (form.dataset.busy === '1') return;        // guard contra doble clic
+      form.dataset.busy = '1';
+      submitBtn.setAttribute('disabled', 'disabled');
 
       const modeMonthly = document.getElementById('mModeMonthly');
       const modeCustom  = document.getElementById('mModeCustom');
@@ -2733,8 +2661,8 @@ async function loadSettings(quiet = false) {
       const nitRaw = document.getElementById('mNit').value.trim();
       const receptor_nit = nitRaw ? sanitizeNit(nitRaw).toUpperCase() : 'CF';
 
-      if (reason.length < 3) { Dialog.alert({ title:'Falta motivo', message:'Escribe un motivo de al menos 3 caracteres.' }); btn?.removeAttribute('disabled'); isSubmittingManual=false; return; }
-      if (!(receptor_nit === 'CF' || /^\d+$/.test(receptor_nit))) { Dialog.alert({ title:'NIT inválido', message:'Escribe solo números o “CF”.' }); btn?.removeAttribute('disabled'); isSubmittingManual=false; return; }
+      if (reason.length < 3) { Dialog.alert({ title:'Falta motivo', message:'Escribe un motivo de al menos 3 caracteres.' }); submitBtn.removeAttribute('disabled'); delete form.dataset.busy; return; }
+      if (!(receptor_nit === 'CF' || /^\d+$/.test(receptor_nit))) { Dialog.alert({ title:'NIT inválido', message:'Escribe solo números o “CF”.' }); submitBtn.removeAttribute('disabled'); delete form.dataset.busy; return; }
 
       let amount = 0, used_monthly = false, label = '';
       if (modeMonthly.checked && hasMonthly){
@@ -2743,44 +2671,34 @@ async function loadSettings(quiet = false) {
         label = `Cobro mensual Q ${amount.toFixed(2)}`;
       } else {
         const v = Number(customInput.value);
-        if (!Number.isFinite(v) || v <= 0) { Dialog.alert({ title:'Monto inválido', message:'Ingresa un total personalizado mayor a 0.' }); btn?.removeAttribute('disabled'); isSubmittingManual=false; return; }
+        if (!Number.isFinite(v) || v <= 0) { Dialog.alert({ title:'Monto inválido', message:'Ingresa un total personalizado mayor a 0.' }); submitBtn.removeAttribute('disabled'); delete form.dataset.busy; return; }
         amount = Math.round(v * 100) / 100;
         label = `Cobro personalizado Q ${amount.toFixed(2)}`;
       }
 
       const payload = { reason, receptor_nit, amount, used_monthly, send_to_fel: true };
-
-      // Idempotencia (el backend debería aceptar y deduplicar por esta llave)
       const idemKey = (window.crypto?.randomUUID?.() || `mid-${Date.now()}-${Math.random().toString(16).slice(2)}`);
 
       const dlg = Dialog.loading({ title:'Creando', message:'Enviando datos…' });
       try {
         const res = await fetchJSON(api('fel/manual-invoice'), {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Idempotency-Key': idemKey,     // <-- clave de idempotencia
-          },
+          headers: { 'Content-Type': 'application/json', 'X-Idempotency-Key': idemKey },
           body: JSON.stringify(payload),
         });
 
         if (res?.ok) {
           const uuidTxt = res.uuid ? `\nUUID: ${res.uuid}` : '';
           Dialog.ok(`Factura creada y enviada a FEL.\n${label}${uuidTxt}`, 'Éxito');
-
-          // cerrar modal
           try {
             if (window.bootstrap?.Modal) {
               const el = document.getElementById('manualInvModal');
               const inst = bootstrap.Modal.getInstance(el) || manualInvModalRef;
               inst?.hide?.();
-            } else {
-              manualInvModalRef?.hide?.();
-            }
+            } else { manualInvModalRef?.hide?.(); }
             document.querySelector('.modal-backdrop')?.remove();
             document.body.classList.remove('modal-open');
           } catch {}
-
           await refreshManualInvoicesTable();
         } else {
           throw new Error(res?.error || 'No se pudo crear la factura manual');
@@ -2789,11 +2707,130 @@ async function loadSettings(quiet = false) {
         Dialog.err(e, 'Error al crear factura');
       } finally {
         dlg.close();
-        btn?.removeAttribute('disabled');
-        isSubmittingManual = false;
+        submitBtn.removeAttribute('disabled');
+        delete form.dataset.busy;
       }
-    });
+    };
 
+    // ===== Tabla + paginación =====
+    const tbody = document.querySelector('#tblManualInvoices tbody');
+    const pager = document.getElementById('manualInvPager');
+
+    function renderPager() {
+      const { page, pages } = state;
+      if (!pager) return;
+      if (pages <= 1) { pager.innerHTML = ''; return; }
+
+      const mkPageItem = (p, label = p, active = false, disabled = false) => `
+        <li class="page-item ${active ? 'active' : ''} ${disabled ? 'disabled' : ''}">
+          <a class="page-link" href="#" data-page="${p}">${label}</a>
+        </li>
+      `;
+
+      const items = [];
+      items.push(mkPageItem(Math.max(1, page - 1), 'Anterior', false, page === 1));
+
+      // ventana de páginas (máx 7 links numerados)
+      const windowSize = 7;
+      let start = Math.max(1, page - Math.floor(windowSize/2));
+      let end = Math.min(pages, start + windowSize - 1);
+      if (end - start + 1 < windowSize) start = Math.max(1, end - windowSize + 1);
+
+      if (start > 1) items.push(mkPageItem(1, '1', false, false));
+      if (start > 2) items.push(`<li class="page-item disabled"><span class="page-link">…</span></li>`);
+
+      for (let p = start; p <= end; p++) {
+        items.push(mkPageItem(p, String(p), p === page, false));
+      }
+
+      if (end < pages - 1) items.push(`<li class="page-item disabled"><span class="page-link">…</span></li>`);
+      if (end < pages) items.push(mkPageItem(pages, String(pages), false, false));
+
+      items.push(mkPageItem(Math.min(pages, page + 1), 'Siguiente', false, page === pages));
+
+      pager.innerHTML = items.join('');
+
+      pager.onclick = (ev) => {
+        const a = ev.target.closest('a.page-link');
+        if (!a) return;
+        ev.preventDefault();
+        const target = Number(a.dataset.page);
+        if (!Number.isFinite(target) || target < 1 || target > state.pages || target === state.page) return;
+        state.page = target;
+        renderTablePage();
+        renderPager();
+      };
+    }
+
+    function renderTablePage() {
+      const { rows, page, perPage } = state;
+      if (!tbody) return;
+
+      if (!rows.length) {
+        tbody.innerHTML = `<tr><td colspan="9" class="text-center text-muted py-4">No hay facturas manuales registradas todavía.</td></tr>`;
+        return;
+      }
+
+      const startIdx = (page - 1) * perPage;
+      const slice = rows.slice(startIdx, startIdx + perPage);
+
+      tbody.innerHTML = slice.map(r=>{
+        const canPdf = (String(r?.fel_status||'').trim()==='OK') && !!r?.fel_uuid;
+        const title = r?.receptor_name ? 'Nombre: ' + String(r.receptor_name).replace(/"/g,'&quot;') : '';
+        return `<tr title="${title}">
+          <td>${r.id ?? ''}</td>
+          <td>${r.created_at ?? ''}</td>
+          <td>${r.reason ? escapeHtml(r.reason) : ''}</td>
+          <td>${r.receptor_nit ?? ''}</td>
+          <td>Q ${Number(r.amount ?? 0).toFixed(2)}</td>
+          <td>${r.used_monthly ? 'Sí' : 'No'}</td>
+          <td>${r.fel_status ? escapeHtml(r.fel_status) : ''}</td>
+          <td>${r.fel_uuid ? escapeHtml(r.fel_uuid) : ''}</td>
+          <td class="text-end">
+            <button type="button" class="btn btn-sm ${canPdf?'btn-outline-primary':'btn-outline-secondary'} btnManualPdf"
+              data-id="${r.id ?? ''}" data-uuid="${r.fel_uuid ?? ''}" ${canPdf?'':'disabled'}
+              title="${canPdf ? 'Descargar/abrir PDF' : 'Sin PDF disponible'}">
+              <i class="bi bi-file-pdf"></i>
+            </button>
+          </td>
+        </tr>`;
+      }).join('');
+
+      // Delegación para botón PDF (una vez)
+      tbody.onclick = async (ev)=>{
+        const btn = ev.target.closest?.('.btnManualPdf'); if (!btn) return;
+        const id = btn.getAttribute('data-id'); const uuid = btn.getAttribute('data-uuid');
+        const dlg = Dialog.loading({ title:'Obteniendo PDF', message:'Consultando…' });
+        try {
+          const b64 = await fetchPdfForManualInvoice({ id, uuid });
+          downloadBase64Pdf((uuid?`${uuid}.pdf`:`manual-invoice-${id}.pdf`), b64);
+          dlg.close(); Dialog.toast?.('PDF listo', { variant:'success' });
+        } catch(err){
+          dlg.close(); Dialog.alert({ title:'No disponible', message:String(err), variant:'warning' });
+        }
+      };
+    }
+
+    async function refreshManualInvoicesTable(){
+      if (!tbody) return;
+      tbody.innerHTML = `<tr><td colspan="9" class="text-center py-4">
+        <div class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></div><span class="ms-2">Actualizando…</span></td></tr>`;
+      try{
+        const js = await fetchJSON(api('fel/manual-invoice-list'));
+        const rows = Array.isArray(js?.data) ? js.data : (Array.isArray(js) ? js : []);
+        state.rows = rows;
+        state.page = 1;
+        state.pages = Math.max(1, Math.ceil((rows.length || 0) / state.perPage));
+        renderTablePage();
+        renderPager();
+      }catch(e){
+        tbody.innerHTML = `<tr><td colspan="9" class="text-center py-4"><div class="text-danger">Error al cargar.</div><div class="small text-muted">${escapeHtml(String(e))}</div></td></tr>`;
+        pager.innerHTML = '';
+      }
+    }
+
+    document.getElementById('btnRefreshManualInv')?.addEventListener('click', refreshManualInvoicesTable);
+    await refreshManualInvoicesTable();
   }
 
   const PAGE_STORAGE_KEY = 'zkt:lastPage';

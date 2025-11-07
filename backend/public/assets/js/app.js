@@ -818,7 +818,6 @@ async function loadSettings(quiet = false) {
     // === Carga de settings + helpers ===
     const settings = await loadSettings();
 
-    // Intenta leer del overview (/api/settings) primero y luego de loadSettings()
     function parseMoneyLike(x){
       if (x == null) return null;
       if (typeof x === 'number') return Number.isFinite(x) ? x : null;
@@ -830,29 +829,23 @@ async function loadSettings(quiet = false) {
 
     async function getHourlyRateFromOverview(){
       try {
-        const res = await fetchJSON(api('settings')); // { ok:true, settings: { billing: { hourly_rate: <num|null> } } }
+        const res = await fetchJSON(api('settings'));
         const raw = res?.settings?.billing?.hourly_rate ?? null;
         const v = parseMoneyLike(raw);
         return (v && v > 0) ? v : null;
-      } catch {
-        return null;
-      }
+      } catch { return null; }
     }
 
-    // Resuelve la tarifa por hora: overview -> loadSettings()
     const hourlyFromOverview = await getHourlyRateFromOverview();
     const hourlyFromLoad     = parseMoneyLike(settings?.billing?.hourly_rate ?? null);
-    const hourlyRateResolved = hourlyFromOverview ?? hourlyFromLoad; // puede ser null si no está configurado
+    const hourlyRateResolved = hourlyFromOverview ?? hourlyFromLoad; // puede ser null
 
-    // ——— helpers (mínimos) ———
     const debounce = (fn, ms = 500) => { let t; return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); }; };
 
     async function lookupNit(nitRaw) {
-      // Acepta dígitos o "CF"
       const nit = (nitRaw ?? '').toString().trim().toUpperCase();
-      const q = nit === 'CF' ? 'CF' : nit.replace(/\D+/g, ''); // solo dígitos si no es CF
-      const url = api(`g4s/lookup-nit?nit=${encodeURIComponent(q)}`);
-      return await fetchJSON(url, { method: 'GET' });
+      const q = nit === 'CF' ? 'CF' : nit.replace(/\D+/g, '');
+      return await fetchJSON(api(`g4s/lookup-nit?nit=${encodeURIComponent(q)}`), { method: 'GET' });
     }
 
     const escapeHtml = (v) => String(v ?? '')
@@ -883,6 +876,7 @@ async function loadSettings(quiet = false) {
       } catch { return ''; }
     };
 
+    const app = document.getElementById('app') || document.body;
     app.innerHTML = `
       <div class="card shadow-sm">
         <div class="card-body">
@@ -894,12 +888,12 @@ async function loadSettings(quiet = false) {
             </div>
 
             <div class="ms-auto d-flex flex-wrap align-items-center gap-2" style="max-width: 520px;">
-              <input type="search" id="invSearch" class="form-control form-control-sm" placeholder="Buscar ticket..." aria-label="Buscar ticket pendiente" />
-              <div class="btn-group btn-group-sm" role="group" aria-label="Aperturas manuales">
-                <button type="button" class="btn btn-outline-warning" id="btnManualOpen" title="Abrir barrera de SALIDA (Apertura manual)">
+              <input type="search" id="invSearch" class="form-control form-control-sm" placeholder="Buscar ticket..." />
+              <div class="btn-group btn-group-sm" role="group">
+                <button type="button" class="btn btn-outline-warning" id="btnManualOpen" title="Abrir SALIDA">
                   <i class="bi bi-box-arrow-right me-1"></i> Salida
                 </button>
-                <button type="button" class="btn btn-outline-primary" id="btnManualOpenIn" title="Abrir barrera de ENTRADA (Apertura manual)">
+                <button type="button" class="btn btn-outline-primary" id="btnManualOpenIn" title="Abrir ENTRADA">
                   <i class="bi bi-box-arrow-in-left me-1"></i> Entrada
                 </button>
               </div>
@@ -930,7 +924,7 @@ async function loadSettings(quiet = false) {
 
           <div class="d-flex flex-wrap gap-2 align-items-center justify-content-between mt-3">
             <small class="text-muted" id="invMeta"></small>
-            <div class="btn-group btn-group-sm" role="group" aria-label="Paginación de facturas">
+            <div class="btn-group btn-group-sm" role="group">
               <button type="button" class="btn btn-outline-secondary" id="invPrev"><i class="bi bi-chevron-left"></i> Anterior</button>
               <button type="button" class="btn btn-outline-secondary" id="invNext">Siguiente <i class="bi bi-chevron-right"></i></button>
             </div>
@@ -950,9 +944,8 @@ async function loadSettings(quiet = false) {
               <div class="border rounded p-2 mb-3 bg-light">
                 <div class="d-flex justify-content-between small mb-1"><span class="text-muted">Ticket</span><span id="mSumTicket">—</span></div>
                 <div class="d-flex justify-content-between small mb-1"><span class="text-muted">Fecha</span><span id="mSumFecha">—</span></div>
-                <div class="d-flex justify-content-between small mb-1"><span class="text-muted">Horas registradas</span><span id="mSumHoras">—</span></div>
-                <div class="d-flex justify-content-between small"><span class="text-muted">Total en BD</span><span id="mSumTotalDb">—</span></div>
-                <div class="d-flex justify-content-between small mt-1" id="mSumTotalHourlyRow" hidden>
+                <div class="d-flex justify-content-between small mb-1"><span class="text-muted">Tiempo computado</span><span id="mSumHoras">—</span></div>
+                <div class="d-flex justify-content-between small" id="mSumTotalHourlyRow" hidden>
                   <span class="text-muted">Total por hora</span><span id="mSumTotalHourly">—</span>
                 </div>
               </div>
@@ -962,23 +955,18 @@ async function loadSettings(quiet = false) {
                 <label class="form-check-label" for="mModeHourly">
                   Cobro por hora <strong class="ms-1" id="mHourlyLabel"></strong>
                 </label>
-                <div class="form-text" id="mHourlyHelp">Define una tarifa por hora en Ajustes para habilitar esta opción.</div>
+                <div class="form-text" id="mHourlyHelp">Tarifa × horas (ceil de minutos/60).</div>
               </div>
 
               <div class="form-check mt-2">
                 <input class="form-check-input" type="radio" name="billingMode" id="mModeGrace" value="grace">
-                <label class="form-check-label" for="mModeGrace">
-                  Ticket de gracia <strong class="ms-1">Q0.00</strong>
-                </label>
-                <div class="form-text">No se cobra, no se envía a FEL; se registra en BD y se notifica a PayNotify.</div>
+                <label class="form-check-label" for="mModeGrace">Ticket de gracia <strong class="ms-1">Q0.00</strong></label>
+                <div class="form-text">No se cobra ni se envía a FEL; se notifica a PayNotify.</div>
               </div>
 
               <div class="form-check mt-2">
                 <input class="form-check-input" type="radio" name="billingMode" id="mModeCustom" value="custom">
-                <label class="form-check-label" for="mModeCustom">
-                  Cobro personalizado
-                </label>
-                <div class="form-text">Indica el total que deseas facturar manualmente.</div>
+                <label class="form-check-label" for="mModeCustom">Cobro personalizado</label>
               </div>
 
               <div class="input-group input-group-sm mt-2">
@@ -988,17 +976,8 @@ async function loadSettings(quiet = false) {
 
               <div class="mt-3">
                 <label for="mNit" class="form-label mb-1">NIT del cliente</label>
-                <input
-                  type="text"
-                  id="mNit"
-                  class="form-control"
-                  placeholder='Escribe el NIT o "CF"'
-                  value="CF"
-                  autocomplete="off"
-                  inputmode="numeric"
-                  aria-describedby="mNitHelp mNitStatus"
-                >
-                <div class="form-text" id="mNitHelp">Escribe el NIT o “CF” (consumidor final). Si ingresas NIT, se consultará en SAT (G4S).</div>
+                <input type="text" id="mNit" class="form-control" placeholder='Escribe el NIT o "CF"' value="CF" autocomplete="off" inputmode="numeric" aria-describedby="mNitHelp mNitStatus">
+                <div class="form-text" id="mNitHelp">Escribe el NIT o “CF”. Si ingresas NIT, se consultará en SAT (G4S).</div>
                 <div class="small mt-1 text-muted" id="mNitStatus" aria-live="polite"></div>
               </div>
 
@@ -1013,7 +992,6 @@ async function loadSettings(quiet = false) {
       </div>
     `;
 
-    // --------- refs
     const tbody = document.getElementById('invRows');
     const searchInput = document.getElementById('invSearch');
     const meta = document.getElementById('invMeta');
@@ -1025,9 +1003,7 @@ async function loadSettings(quiet = false) {
     const pageSize = 20;
     let allRows = [];
 
-    // --------- Botones apertura manual
-    const manualOpenBtn   = document.getElementById('btnManualOpen');    // Salida
-    const manualOpenInBtn = document.getElementById('btnManualOpenIn'); // Entrada
+    // Aperturas manuales
     const CHANNEL_SALIDA  = '40288048981adc4601981b7cb2660b05';
     const CHANNEL_ENTRADA = '40288048981adc4601981b7c2d010aff';
 
@@ -1038,59 +1014,32 @@ async function loadSettings(quiet = false) {
 
       buttonEl.addEventListener('click', async () => {
         if (busy) return;
-
-        const proceed = await (Dialog?.confirm?.(
-          `¿Deseas realizar una APERTURA MANUAL de la barrera (${title})?`,
-          'Confirmar apertura'
-        ) ?? Promise.resolve(window.confirm(`¿Aperturar barrera manual (${title})?`)));
+        const proceed = window.confirm(`¿Aperturar barrera manual (${title})?`);
         if (!proceed) return;
 
-        let reason =
-          (await (Dialog?.prompt?.({
-            title: `Motivo de apertura (${title})`,
-            label: 'Describe brevemente el motivo (mín. 5 caracteres):',
-            placeholder: 'Ej. Emergencia, fallo del lector, visita autorizada, etc.',
-            confirmText: 'Continuar',
-            cancelText: 'Cancelar'
-          }) ?? Promise.resolve(window.prompt(`Motivo de apertura (${title}):`)))) || '';
-
-        reason = (reason || '').trim();
-        if (reason.length < 5) { (Dialog?.ok?.('El motivo debe tener al menos 5 caracteres.', 'Motivo inválido')) || alert('Motivo muy corto.'); return; }
-        if (reason.length > 255) { (Dialog?.ok?.('El motivo no debe superar 255 caracteres.', 'Motivo demasiado largo')) || alert('Motivo muy largo.'); return; }
+        let reason = window.prompt(`Motivo de apertura (${title}):`) || '';
+        reason = reason.trim();
+        if (reason.length < 5) { alert('Motivo muy corto.'); return; }
+        if (reason.length > 255) { alert('Motivo muy largo.'); return; }
 
         busy = true;
         buttonEl.disabled = true;
         const original = buttonEl.innerHTML;
         buttonEl.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span> Aperturando…`;
-        const m = Dialog?.loading?.({ title: `Apertura manual (${title})`, message: 'Contactando servicio…' });
 
         try {
-          // ⬇️ ENVÍA channel_id DIRECTO
           const res = await fetchJSON(api('gate/manual-open'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ reason, channel_id: channelId })
           });
 
-          if (!res.ok) {
-            if (res.debug) console.warn('gate/manual-open debug:', res.debug);
-            throw new Error(res.message || (res.field === 'reason' ? 'Motivo inválido.' : 'No se pudo aperturar'));
-          }
+          if (!res.ok) throw new Error(res.message || 'No se pudo aperturar');
+          alert(`Apertura manual (${title}) ejecutada.`);
 
-          (Dialog?.ok?.(
-            [
-              `Apertura manual (${title}) ejecutada.`,
-              res.opened_at ? `\nHora: ${res.opened_at}` : '',
-              res.code !== undefined ? `\nCódigo: ${res.code}` : '',
-              res.message ? `\nMensaje: ${res.message}` : '',
-              `\nMotivo registrado: ${reason}`
-            ].join(''),
-            `Apertura manual (${title})`
-          )) || alert(`Apertura manual (${title}) ejecutada.`);
         } catch (e) {
-          Dialog?.err?.(e, `Error en apertura manual (${title})`) || alert(`Error: ${e.message}`);
+          alert(`Error: ${e.message}`);
         } finally {
-          if (m && typeof m.close === 'function') m.close();
           buttonEl.disabled = false;
           buttonEl.innerHTML = original;
           busy = false;
@@ -1098,12 +1047,9 @@ async function loadSettings(quiet = false) {
       });
     }
 
-    // Conecta botones (Salida / Entrada)
     wireManualOpen(document.getElementById('btnManualOpen'),   { title: 'Salida',  channelId: CHANNEL_SALIDA });
     wireManualOpen(document.getElementById('btnManualOpenIn'), { title: 'Entrada', channelId: CHANNEL_ENTRADA });
 
-
-    // Mostrar hint con la tarifa por hora resuelta
     if (hourlyRateHint) {
       hourlyRateHint.textContent =
         Number.isFinite(hourlyRateResolved) && hourlyRateResolved > 0
@@ -1133,29 +1079,31 @@ async function loadSettings(quiet = false) {
       exit_at: row.exit_at ?? null,
     });
 
-    // --------- Modal de confirmación (usa billingConfig.hourly_rate)
+    // ---- Modal de confirmación
     function openInvoiceConfirmation(ticket, billingConfig = {}) {
       return new Promise((resolve) => {
-        // cálculos
-        const hoursValue   = typeof ticket.hours === 'number' ? ticket.hours : Number(ticket.hours);
-        const hours        = Number.isFinite(hoursValue) && hoursValue > 0 ? Number(hoursValue.toFixed(2)) : null;
-        const minutesValue = typeof ticket.duration_minutes === 'number' ? ticket.duration_minutes : Number(ticket.duration_minutes);
-        const minutes      = Number.isFinite(minutesValue) && minutesValue > 0 ? Math.round(minutesValue) : null;
+        // 1) Obtener minutos robustamente
+        let minutes = null;
+        const dm = Number(ticket.duration_minutes);
+        if (Number.isFinite(dm) && dm > 0) minutes = Math.round(dm);
+        else {
+          const rawH = Number(ticket.hours);
+          if (Number.isFinite(rawH) && rawH > 0) {
+            minutes = Math.round(rawH > 12 ? rawH : rawH * 60);
+          }
+        }
+
+        const hoursBilled = Number.isFinite(minutes) && minutes > 0 ? Math.ceil(minutes / 60) : null;
 
         const hourlyRateNumber = Number(billingConfig?.hourly_rate ?? null);
         const hourlyRate = Number.isFinite(hourlyRateNumber) && hourlyRateNumber > 0 ? hourlyRateNumber : null;
 
-        const canHourly   = hourlyRate !== null && hours !== null;
-        const hourlyTotal = canHourly ? Math.round(hours * hourlyRate * 100) / 100 : null;
+        const canHourly   = hourlyRate !== null && Number.isFinite(hoursBilled) && hoursBilled > 0;
+        const hourlyTotal = canHourly ? Math.round(hoursBilled * hourlyRate * 100) / 100 : null;
 
-        const totalFromDb = ticket.total != null && ticket.total !== '' ? Number(ticket.total) : null;
-        const normalizedDbTotal = Number.isFinite(totalFromDb) ? Number(totalFromDb.toFixed(2)) : null;
-
-        const customDefault = hourlyTotal ?? normalizedDbTotal;
-        const customValue = customDefault != null ? customDefault.toFixed(2) : '';
         const dateCandidate = ticket.exit_at || ticket.entry_at || ticket.fecha || null;
 
-        // refs modal
+        // Refs modal
         const modalEl  = document.getElementById('invoiceConfirmModal');
         const form     = document.getElementById('invoiceConfirmForm');
         const mErr     = document.getElementById('mError');
@@ -1164,49 +1112,48 @@ async function loadSettings(quiet = false) {
         const mGrace   = document.getElementById('mModeGrace');
         const mCustomR = document.getElementById('mModeCustom');
         const mNit     = document.getElementById('mNit');
-        const mNitHelp = document.getElementById('mNitHelp');
         const mNitStatus = document.getElementById('mNitStatus');
         const mHourlyLabel = document.getElementById('mHourlyLabel');
         const mHourlyHelp  = document.getElementById('mHourlyHelp');
 
-        // resumen
-        document.getElementById('mSumTicket').textContent   = String(ticket.ticket_no ?? '');
-        document.getElementById('mSumFecha').textContent    = dateCandidate ? `${formatDateTime(dateCandidate)} (${formatRelativeTime(dateCandidate)})` : '—';
-        document.getElementById('mSumHoras').textContent    = hours != null ? `${hours.toFixed(2)} h${minutes && minutes % 60 ? ` (${minutes} min)` : ''}` : '—';
-        document.getElementById('mSumTotalDb').textContent  = normalizedDbTotal != null ? formatCurrency(normalizedDbTotal) : '—';
+        // Resumen
+        document.getElementById('mSumTicket').textContent = String(ticket.ticket_no ?? '');
+        document.getElementById('mSumFecha').textContent  =
+          dateCandidate ? `${formatDateTime(dateCandidate)} (${formatRelativeTime(dateCandidate)})` : '—';
+        document.getElementById('mSumHoras').textContent  =
+          Number.isFinite(minutes) && minutes > 0 ? `${hoursBilled} h (ceil), ${minutes} min` : '—';
 
         const totalHourlyRow = document.getElementById('mSumTotalHourlyRow');
         if (hourlyTotal != null) {
           totalHourlyRow.hidden = false;
           document.getElementById('mSumTotalHourly').textContent = formatCurrency(hourlyTotal);
           mHourlyLabel.textContent = formatCurrency(hourlyTotal);
-          mHourlyHelp.textContent  = `Tarifa ${hourlyRate != null ? formatCurrency(hourlyRate) : '—'} × ${hours != null ? `${hours.toFixed(2)} h` : '—'}.`;
+          mHourlyHelp.textContent  = `Tarifa ${formatCurrency(hourlyRate)} × ${hoursBilled} h (ceil).`;
         } else {
           totalHourlyRow.hidden = true;
           mHourlyLabel.textContent = '';
-          mHourlyHelp.textContent  = 'Define una tarifa por hora en Ajustes para habilitar esta opción.';
+          mHourlyHelp.textContent  = 'Define una tarifa por hora válida.';
         }
 
-        // estado inicial radios
+        // Estado inicial: prioriza hourly si está habilitado
         mHourly.disabled = !canHourly;
         if (canHourly) { mHourly.checked = true; mCustom.disabled = true; }
         else           { mGrace.checked = true; mCustom.disabled = true; }
-        mCustom.value = customValue;
+
+        // NIT
         mNit.value = 'CF';
         mErr.hidden = true; mErr.textContent = '';
         mNitStatus.className = 'small mt-1 text-muted'; mNitStatus.textContent = 'Consumidor final (CF).';
 
-        // ——— NIT: sanitizar + lookup automático ———
         const normalizeNit = (v) => {
           v = (v || '').toUpperCase().trim();
           if (v === 'CF' || v === 'C') return v.length === 1 ? 'C' : 'CF';
-          return v.replace(/\D+/g, ''); // solo dígitos
+          return v.replace(/\D+/g, '');
         };
         const setNitStatus = (text, cls = 'text-muted') => {
           mNitStatus.className = `small mt-1 ${cls}`;
           mNitStatus.textContent = text || '';
         };
-
         const doLookup = debounce(async () => {
           const v = mNit.value;
           if (!v || v.toUpperCase() === 'CF') {
@@ -1241,27 +1188,16 @@ async function loadSettings(quiet = false) {
           }
           doLookup();
         });
-        mNit.addEventListener('keydown', (e) => {
-          const k = e.key;
-          const ctrl = e.ctrlKey || e.metaKey;
-          if (ctrl || ['Backspace','Delete','ArrowLeft','ArrowRight','Tab','Home','End'].includes(k)) return;
-          if (/^[a-zA-Z]$/.test(k)) { if (!['c','f','C','F'].includes(k)) e.preventDefault(); return; }
-          if (/^\d$/.test(k)) return;
-          e.preventDefault();
-        });
 
-        // activar/desactivar input custom
         function updateCustomState() {
           const isCustom = document.getElementById('mModeCustom').checked;
           mCustom.disabled = !isCustom;
-          if (isCustom && !mCustom.value) mCustom.value = customValue;
           mErr.hidden = true; mErr.textContent = '';
         }
         mHourly.addEventListener('change', updateCustomState);
         mGrace.addEventListener('change', updateCustomState);
         mCustomR.addEventListener('change', updateCustomState);
 
-        // cerrar
         function closeModal(retVal = null) {
           modalEl.classList.remove('show');
           modalEl.style.display = 'none';
@@ -1293,21 +1229,37 @@ async function loadSettings(quiet = false) {
           }
 
           if (selected === 'hourly') {
-            if (!canHourly || hourlyTotal == null) { mErr.textContent = 'Configura una tarifa por hora válida en Ajustes para usar esta opción.'; mErr.hidden = false; return; }
-            closeModal({ mode: 'hourly', total: hourlyTotal, label: `Cobro por hora ${formatCurrency(hourlyTotal)}`, receptor_nit: receptorNit });
+            if (!canHourly || hourlyTotal == null) {
+              mErr.textContent = 'Configura una tarifa por hora válida.';
+              mErr.hidden = false; return;
+            }
+            closeModal({
+              mode: 'hourly',
+              total: hourlyTotal,
+              label: `Cobro por hora ${formatCurrency(hourlyTotal)}`,
+              receptor_nit: receptorNit,
+              duration_minutes: minutes,
+              hours_billed_used: hoursBilled,
+              hourly_rate_used: hourlyRate
+            });
             return;
           }
+
           if (selected === 'grace') {
             closeModal({ mode: 'grace', total: 0, label: 'Ticket de gracia (Q0.00, sin FEL)', receptor_nit: receptorNit });
             return;
           }
+
           const customVal = parseFloat(mCustom.value);
-          if (!Number.isFinite(customVal) || customVal <= 0) { mErr.textContent = 'Ingresa un total personalizado mayor a cero.'; mErr.hidden = false; return; }
+          if (!Number.isFinite(customVal) || customVal <= 0) {
+            mErr.textContent = 'Ingresa un total personalizado mayor a cero.';
+            mErr.hidden = false; return;
+          }
           const normalized = Math.round(customVal * 100) / 100;
           closeModal({ mode: 'custom', total: normalized, label: `Cobro personalizado ${formatCurrency(normalized)}`, receptor_nit: receptorNit });
         };
 
-        // mostrar modal con backdrop
+        // mostrar modal
         modalEl.style.display = 'block';
         setTimeout(() => modalEl.classList.add('show'), 10);
         const backdrop = document.createElement('div');
@@ -1317,7 +1269,6 @@ async function loadSettings(quiet = false) {
       });
     }
 
-    // --------- handlers de la tabla
     function attachInvoiceHandlers() {
       tbody.querySelectorAll('[data-action="invoice"]').forEach((btn) => {
         btn.addEventListener('click', async () => {
@@ -1326,7 +1277,6 @@ async function loadSettings(quiet = false) {
           const originalHTML = btn.innerHTML;
           btn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span> Confirmando…`;
           try {
-            // snapshot de settings + overview para pasar hourly_rate correcto al modal
             const settingsSnapshot = await loadSettings();
             const hourlySnapshotOverview = await getHourlyRateFromOverview();
             const hourlySnapshotLoad     = parseMoneyLike(settingsSnapshot?.billing?.hourly_rate);
@@ -1339,16 +1289,24 @@ async function loadSettings(quiet = false) {
             btn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span> Enviando…`;
 
             const receptorNit = confirmation.receptor_nit || payload.receptor_nit || 'CF';
+
             const requestPayload = {
               ticket_no: payload.ticket_no,
               plate: payload.plate,
               receptor_nit: receptorNit,
               serie: payload.serie || 'A',
               numero: payload.numero || null,
-              mode: confirmation.mode,
-              total: Number(confirmation.total) || 0,
+              mode: confirmation.mode
             };
-            if (confirmation.mode === 'custom') requestPayload.custom_total = Number(confirmation.total);
+
+            if (confirmation.mode === 'hourly') {
+              requestPayload.total = Number(confirmation.total) || 0;
+              requestPayload.duration_minutes = Number(confirmation.duration_minutes) || null;
+              requestPayload.hours_billed_used = Number(confirmation.hours_billed_used) || null;
+              requestPayload.hourly_rate_used = Number(confirmation.hourly_rate_used) || null;
+            } else if (confirmation.mode === 'custom') {
+              requestPayload.custom_total = Number(confirmation.total);
+            }
 
             const js = await fetchJSON(api('fel/invoice'), {
               method: 'POST',
@@ -1358,39 +1316,12 @@ async function loadSettings(quiet = false) {
 
             if (!js.ok) throw new Error(js.error || 'No se pudo certificar.');
 
-            const uuidTxt = js.uuid ? `UUID ${js.uuid}` : 'Sin UUID (revise respuesta)';
-            const reason =
-              Number(js.billing_amount) <= 0
-                ? 'Dato de billing = 0.'
-                : (js.pay_notify_ack === false
-                    ? (js.pay_notify_error ? `PayNotify sin confirmación (${js.pay_notify_error}).` : 'PayNotify sin confirmación.')
-                    : null);
-
-            if (js.manual_open) {
-              (Dialog?.ok?.(
-                [
-                  'Pago registrado (apertura manual requerida).',
-                  uuidTxt,
-                  reason ? `Motivo: ${reason}` : null,
-                  '',
-                  'La barrera debe aperturarse manualmente.'
-                ].filter(Boolean).join('\n'),
-                'Apertura manual'
-              )) || alert(`Pago registrado. ${uuidTxt}`);
-            } else {
-              (Dialog?.ok?.(
-                [
-                  `Factura enviada (${confirmation.label}).`,
-                  uuidTxt,
-                  js.pay_notify_ack ? 'Notificación a ZKBio confirmada.' : null
-                ].filter(Boolean).join(' '),
-                'FEL enviado'
-              )) || alert(`Factura enviada. ${uuidTxt}`);
-            }
+            const uuidTxt = js.uuid ? `UUID ${js.uuid}` : 'Sin UUID';
+            alert(`Factura enviada (${confirmation.label}). ${uuidTxt}`);
 
             await loadList();
           } catch (e) {
-            Dialog?.err?.(e, 'Error al facturar') || alert(`Error: ${e.message}`);
+            alert(`Error: ${e.message}`);
           } finally {
             btn.disabled = false;
             btn.innerHTML = originalHTML;
@@ -1417,7 +1348,7 @@ async function loadSettings(quiet = false) {
           </tr>`;
       } else {
         tbody.innerHTML = pageRows.map((d) => {
-          const totalFmt = formatCurrency(d.total);
+          const totalFmt = formatCurrency(parseMoneyLike(d.total));
           const payload = encodeURIComponent(JSON.stringify(buildPayload(d)));
           const disabled = d.uuid ? 'disabled' : '';
           const ticketText = d.ticket_no ? `${d.ticket_no}${d.plate ? ' · ' + d.plate : ''}` : (d.plate ?? '(sin placa)');
@@ -1449,7 +1380,6 @@ async function loadSettings(quiet = false) {
       nextBtn.disabled = state.page >= totalPages || !filtered.length;
     }
 
-    // --------- eventos de búsqueda y paginación
     searchInput.addEventListener('input', (event) => {
       state.search = event.target.value.trim();
       state.page = 1;
@@ -1461,7 +1391,6 @@ async function loadSettings(quiet = false) {
       if (state.page < totalPages) { state.page += 1; renderPage(); }
     });
 
-    // --------- carga inicial
     async function loadList() {
       tbody.innerHTML = `
         <tr>

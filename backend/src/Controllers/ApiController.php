@@ -1491,122 +1491,180 @@ class ApiController {
             $hourlyRate  = is_numeric($extra['hourly_rate']  ?? null) ? (float)$extra['hourly_rate']
                         : (is_finite($rateClient) ? (float)$rateClient : 0.00);
             $monthlyRate = is_numeric($extra['monthly_rate'] ?? null) ? (float)$extra['monthly_rate'] : 0.00;
+            // ================== FEL (solo si NO es gracia) ==================
+$felOk = false;
+$uuid  = null;
+$felRes = null;
+$felErr = null;
+$pdfBase64 = null;
+
+// (opcional) para payNotify después
+$payBillin   = 0.0;
+$payRecordId = '0';
+$payPlate    = $plate;
+
+if (!$isGrace) {
+    // 1) Enviar a FEL
+    $clientFel = new \App\Services\G4SClient($cfg);
+
+    // Construye el payload con el total final que ya decidiste arriba
+    $payloadFel = [
+        'ticket_no'    => $ticketNo,
+        'receptor_nit' => $receptorNit,
+        'total'        => round($billingAmount, 2), // usa el monto efectivo que facturarás
+        'hours'        => $hours,
+        'minutes'      => $minutes,
+        'mode'         => $mode,                    // 'hourly' aquí
+    ];
+
+    $felRes = $clientFel->submitInvoice($payloadFel);
+    $this->debugLog('fel_invoice_out.txt', [
+        'request_payload' => $payloadFel,
+        'g4s_response'    => $felRes,
+        'extra'           => $extra,
+    ]);
+
+    $felOk  = (bool)($felRes['ok'] ?? false);
+    $uuid   = $felRes['uuid']  ?? null;
+    $felErr = $felRes['error'] ?? null;
+
+    // 2) Intentar obtener PDF
+    if ($felOk && $uuid) {
+        if (!empty($felRes['pdf_base64'])) {
+            $pdfBase64 = (string)$felRes['pdf_base64'];
+        } else {
+            // intenta por GUID; si no, por el último XML que dejamos en storage
+            $pdfBase64 = $this->pdfFromUuidViaG4S($uuid);
+            if (!$pdfBase64 && isset($felRes['raw'])) {
+                $xmlDte = @file_get_contents(__DIR__ . '/../../storage/last_dte.xml') ?: '';
+                if ($xmlDte !== '') $pdfBase64 = $this->pdfFromXmlViaG4S($xmlDte);
+            }
+        }
+    }
+
+    // 3) Persistir invoice + PDF
+    $pdo->beginTransaction();
+    try { $this->ensureInvoicePdfColumn($pdo); } catch (\Throwable $e) {}
+
+    $status = $felOk ? 'CERTIFIED' : 'FAILED';
+
+    $stmt = $pdo->prepare("
+        INSERT INTO invoices
+        (
+            ticket_no, total, uuid, status,
+            request_json, response_json, created_at,
+            receptor_nit, entry_at, exit_at,
+            duration_min, hours_billed, billing_mode,
+            hourly_rate, monthly_rate
+        )
+        VALUES
+        (
+            :ticket_no, :total, :uuid, :status,
+            :request_json, :response_json, :created_at,
+            :receptor_nit, :entry_at, :exit_at,
+            :duration_min, :hours_billed, :billing_mode,
+            :hourly_rate, :monthly_rate
+        )
+    ");
+    $stmt->execute([
+        ':ticket_no'     => $ticketNo,
+        ':total'         => round($billingAmount, 2),
+        ':uuid'          => $uuid,
+        ':status'        => $status,
+        ':request_json'  => json_encode($body, JSON_UNESCAPED_UNICODE),
+        ':response_json' => json_encode($felRes, JSON_UNESCAPED_UNICODE),
+        ':created_at'    => $nowGT,
+        ':receptor_nit'  => $receptorNit,
+        ':entry_at'      => $entryAt,
+        ':exit_at'       => $exitAt,
+        ':duration_min'  => $durationMinPersist,
+        ':hours_billed'  => $hoursBilledPersist,
+        ':billing_mode'  => $mode,
+        ':hourly_rate'   => $hourlyRate,
+        ':monthly_rate'  => $monthlyRate,
+    ]);
+
+    if ($pdfBase64) {
+        try {
+            $drv = strtolower((string)$pdo->getAttribute(\PDO::ATTR_DRIVER_NAME));
+            if ($drv === 'mysql') {
+                $pdo->exec("UPDATE invoices SET pdf_base64 = " . $pdo->quote($pdfBase64) . " WHERE ticket_no = " . $pdo->quote($ticketNo) . " LIMIT 1");
+            } else {
+                $pdo->exec("UPDATE invoices SET pdf_base64 = " . $pdo->quote($pdfBase64) . " WHERE ticket_no = " . $pdo->quote($ticketNo));
+            }
+        } catch (\Throwable $e) {}
+    }
+
+    // marca ticket cerrado
+    $up = $pdo->prepare("UPDATE tickets SET status = 'CLOSED', exit_at = COALESCE(exit_at, :now_exit) WHERE ticket_no = :t");
+    $up->execute([':now_exit' => $nowGT, ':t' => $ticketNo]);
+
+    $pdo->commit();
+
+    // 4) Recupera datos de payments (si existen) para payNotify
+    try {
+        $qp = $pdo->prepare("SELECT billin, billin_json, plate FROM payments WHERE ticket_no = :t LIMIT 1");
+        $qp->execute([':t' => $ticketNo]);
+        if ($pr = $qp->fetch()) {
+            if (isset($pr['billin']) && is_numeric($pr['billin'])) $payBillin = (float)$pr['billin'];
+            if (!empty($pr['billin_json'])) $payRecordId = (string)$pr['billin_json'];
+            if (!empty($pr['plate'])) $payPlate = $pr['plate'];
+        }
+    } catch (\Throwable $e) {}
+} else {
+    // GRACE: también deja el ticket como CLOSED y registra invoice sin FEL
+    $pdo->beginTransaction();
+    try { $this->ensureInvoicePdfColumn($pdo); } catch (\Throwable $e) {}
+
+    $stmt = $pdo->prepare("
+        INSERT INTO invoices
+        (
+            ticket_no, total, uuid, status,
+            request_json, response_json, created_at,
+            receptor_nit, entry_at, exit_at,
+            duration_min, hours_billed, billing_mode,
+            hourly_rate, monthly_rate
+        )
+        VALUES
+        (
+            :ticket_no, :total, :uuid, :status,
+            :request_json, :response_json, :created_at,
+            :receptor_nit, :entry_at, :exit_at,
+            :duration_min, :hours_billed, :billing_mode,
+            :hourly_rate, :monthly_rate
+        )
+    ");
+    $stmt->execute([
+        ':ticket_no'     => $ticketNo,
+        ':total'         => 0.00,
+        ':uuid'          => null,
+        ':status'        => 'GRATIS',
+        ':request_json'  => json_encode($body, JSON_UNESCAPED_UNICODE),
+        ':response_json' => json_encode(['ok'=>true,'note'=>'no FEL (grace)'], JSON_UNESCAPED_UNICODE),
+        ':created_at'    => $nowGT,
+        ':receptor_nit'  => $receptorNit,
+        ':entry_at'      => $entryAt,
+        ':exit_at'       => $exitAt,
+        ':duration_min'  => $durationMinPersist,
+        ':hours_billed'  => $hoursBilledPersist,
+        ':billing_mode'  => 'grace',
+        ':hourly_rate'   => $hourlyRate,
+        ':monthly_rate'  => $monthlyRate,
+    ]);
+
+    $up = $pdo->prepare("UPDATE tickets SET status = 'CLOSED', exit_at = COALESCE(exit_at, :now_exit) WHERE ticket_no = :t");
+    $up->execute([':now_exit' => $nowGT, ':t' => $ticketNo]);
+
+    $pdo->commit();
+}
+// ================== /FEL ==================
+
 
             // PayNotify
-            $payBillin   = 0.0;
-            $payRecordId = '0';
-            $payPlate    = $plate;
-            try {
-                $qp = $pdo->prepare("SELECT billin, billin_json, plate FROM payments WHERE ticket_no = :t LIMIT 1");
-                $qp->execute([':t' => $ticketNo]);
-                if ($pr = $qp->fetch()) {
-                    if (isset($pr['billin']) && is_numeric($pr['billin'])) $payBillin = (float)$pr['billin'];
-                    if (!empty($pr['billin_json'])) $payRecordId = (string)$pr['billin_json'];
-                    if (!empty($pr['plate'])) $payPlate = $pr['plate'];
-                }
-            } catch (\Throwable $e) {}
+            // ==== Apertura / PayNotify ====
+            // En GRACE: NO usamos payNotify. Llamamos a la misma API que usa openGateManual.
+            // En NO-GRACE: mantenemos payNotify como está.
 
-            // FEL (no gracia)
-            $felOk = false;
-            $uuid  = null;
-            $felRes = null;
-            $felErr = null;
-            $pdfBase64 = null;
-
-            if (!$isGrace) {
-                $clientFel = new \App\Services\G4SClient($cfg);
-                $payloadFel = [
-                    'ticket_no'    => $ticketNo,
-                    'receptor_nit' => $receptorNit,
-                    'total'        => round($finalTotal, 2),
-                    'hours'        => $hours,
-                    'minutes'      => $minutes,
-                    'mode'         => $mode,
-                ];
-
-                $felRes = $clientFel->submitInvoice($payloadFel);
-                $this->debugLog('fel_invoice_out.txt', [
-                    'request_payload' => $payloadFel,
-                    'g4s_response'    => $felRes,
-                    'extra'           => $extra,
-                ]);
-
-                $felOk  = (bool)($felRes['ok'] ?? false);
-                $uuid   = $felRes['uuid']  ?? null;
-                $felErr = $felRes['error'] ?? null;
-
-                if ($felOk && $uuid) {
-                    if (!empty($felRes['pdf_base64'])) {
-                        $pdfBase64 = (string)$felRes['pdf_base64'];
-                    } else {
-                        $pdfBase64 = $this->pdfFromUuidViaG4S($uuid);
-                        if (!$pdfBase64 && isset($felRes['raw'])) {
-                            $xmlDte = @file_get_contents(__DIR__ . '/../../storage/last_dte.xml') ?: '';
-                            if ($xmlDte !== '') $pdfBase64 = $this->pdfFromXmlViaG4S($xmlDte);
-                        }
-                    }
-                }
-            }
-
-            // Persistir
-            $pdo->beginTransaction();
-            try { $this->ensureInvoicePdfColumn($pdo); } catch (\Throwable $e) {}
-
-            $stmt = $pdo->prepare("
-                INSERT INTO invoices
-                (
-                    ticket_no, total, uuid, status,
-                    request_json, response_json, created_at,
-                    receptor_nit, entry_at, exit_at,
-                    duration_min, hours_billed, billing_mode,
-                    hourly_rate, monthly_rate
-                )
-                VALUES
-                (
-                    :ticket_no, :total, :uuid, :status,
-                    :request_json, :response_json, :created_at,
-                    :receptor_nit, :entry_at, :exit_at,
-                    :duration_min, :hours_billed, :billing_mode,
-                    :hourly_rate, :monthly_rate
-                )
-            ");
-
-            $status = $isGrace ? 'GRATIS' : ($felOk ? 'CERTIFIED' : 'FAILED');
-
-            $stmt->execute([
-                ':ticket_no'     => $ticketNo,
-                ':total'         => round($finalTotal, 2),
-                ':uuid'          => $uuid,
-                ':status'        => $status,
-                ':request_json'  => json_encode($body, JSON_UNESCAPED_UNICODE),
-                ':response_json' => json_encode($isGrace ? ['ok'=>true,'note'=>'no FEL (grace)'] : $felRes, JSON_UNESCAPED_UNICODE),
-                ':created_at'    => $nowGT,
-                ':receptor_nit'  => $receptorNit,
-                ':entry_at'      => $entryAt,
-                ':exit_at'       => $exitAt,
-                ':duration_min'  => $durationMinPersist,
-                ':hours_billed'  => $hoursBilledPersist,
-                ':billing_mode'  => $isGrace ? 'grace' : $mode,
-                ':hourly_rate'   => $hourlyRate,
-                ':monthly_rate'  => $monthlyRate,
-            ]);
-
-            if (!$isGrace && $pdfBase64) {
-                try {
-                    $drv = strtolower((string)$pdo->getAttribute(\PDO::ATTR_DRIVER_NAME));
-                    if ($drv === 'mysql') {
-                        $pdo->exec("UPDATE invoices SET pdf_base64 = " . $pdo->quote($pdfBase64) . " WHERE ticket_no = " . $pdo->quote($ticketNo) . " LIMIT 1");
-                    } else {
-                        $pdo->exec("UPDATE invoices SET pdf_base64 = " . $pdo->quote($pdfBase64) . " WHERE ticket_no = " . $pdo->quote($ticketNo));
-                    }
-                } catch (\Throwable $e) {}
-            }
-
-            $up = $pdo->prepare("UPDATE tickets SET status = 'CLOSED', exit_at = COALESCE(exit_at, :now_exit) WHERE ticket_no = :t");
-            $up->execute([':now_exit' => $nowGT, ':t' => $ticketNo]);
-            $pdo->commit();
-
-            // PayNotify
             $manualOpen     = false;
             $payNotifySent  = false;
             $payNotifyAck   = false;
@@ -1615,112 +1673,196 @@ class ApiController {
             $payNotifyType  = null;
 
             $effectiveBilling = $isGrace ? 0.0 : round((($payBillin > 0) ? $payBillin : $billingAmount), 2);
-            $shouldNotify     = $isGrace ? true : ($felOk && $effectiveBilling > 0);
 
-            if ($shouldNotify) {
-                $cid = $this->newCorrelationId('paynotify');
+            if ($isGrace) {
+                // ====== GRACE: abrir por canal de salida ======
+                $reason = 'ticket de gracia';
+                $channelId = '40288048981adc4601981b7cb2660b05'; // canal de salida solicitado
 
+                // === Config base (igual a openGateManual) ===
                 $baseUrl = rtrim((string) $this->config->get('HAMACHI_PARK_BASE_URL', ''), '/');
                 if ($baseUrl === '') {
+                    // si no hay URL configurada, no podemos abrir
                     $payNotifyError = 'HAMACHI_PARK_BASE_URL no está configurado.';
                     $manualOpen = true;
                 } else {
-                    $carNumber = $plate ?: ($extra['plate'] ?? '');
-                    $recordId  = $payRecordId;
+                    // Token: igual que openGateManual admite token por query
+                    $accessToken   = (string) ($this->config->get('HAMACHI_PARK_ACCESS_TOKEN', ''));
+                    $tokenQueryKey = (string) ($this->config->get('HAMACHI_PARK_TOKEN_QUERY_KEY', 'access_token'));
 
-                    if ($recordId === '0' || $recordId === '' || $carNumber === '') {
-                        $payNotifyError = 'Faltan carNumber/recordId para payNotify';
+                    $query = ['channelId' => $channelId];
+                    if ($accessToken !== '') $query[$tokenQueryKey] = $accessToken;
+
+                    $endpoint = $baseUrl . '/api/v1/parkBase/openGateChannel?' . http_build_query($query);
+
+                    // Headers mínimos
+                    $headers = ['Accept: application/json', 'Content-Type: application/json; charset=utf-8', 'Expect:'];
+                    $hostHeader = trim((string) $this->config->get('HAMACHI_PARK_HOST_HEADER', ''));
+                    if ($hostHeader !== '') $headers[] = 'Host: ' . $hostHeader;
+
+                    // SSL / CONNECT_TO
+                    $verifySsl = strtolower((string) $this->config->get('HAMACHI_PARK_VERIFY_SSL', 'false')) === 'true';
+                    $connectTo = trim((string)$this->config->get('HAMACHI_PARK_CONNECT_TO', ''));
+
+                    try {
+                        $ch = curl_init($endpoint);
+                        $opts = [
+                            CURLOPT_RETURNTRANSFER => true,
+                            CURLOPT_CONNECTTIMEOUT => 10,
+                            CURLOPT_TIMEOUT        => 20,
+                            CURLOPT_HTTPHEADER     => $headers,
+                            CURLOPT_NOSIGNAL       => true,
+                            CURLOPT_TCP_KEEPALIVE  => 1,
+                            CURLOPT_TCP_KEEPIDLE   => 30,
+                            CURLOPT_TCP_KEEPINTVL  => 10,
+                            CURLOPT_HTTP_VERSION   => CURL_HTTP_VERSION_1_1,
+                            CURLOPT_FOLLOWLOCATION => true,
+                            CURLOPT_MAXREDIRS      => 5,
+                            CURLOPT_AUTOREFERER    => true,
+                            CURLOPT_POST           => true,
+                            CURLOPT_POSTFIELDS     => '{}', // POST forzado como en openGateManual
+                            CURLOPT_HEADER         => true,
+                        ];
+                        if (!$verifySsl) { $opts[CURLOPT_SSL_VERIFYPEER]=false; $opts[CURLOPT_SSL_VERIFYHOST]=false; }
+                        if ($connectTo !== '') { $opts[CURLOPT_CONNECT_TO] = [$connectTo]; }
+                        curl_setopt_array($ch, $opts);
+
+                        $resp = curl_exec($ch);
+                        if ($resp === false) {
+                            $payNotifyError = curl_error($ch) ?: 'Error desconocido';
+                            curl_close($ch);
+                            $manualOpen = true;
+                        } else {
+                            $info   = curl_getinfo($ch) ?: [];
+                            $status = (int)($info['http_code'] ?? 0);
+                            $hsize  = (int)($info['header_size'] ?? 0);
+                            $body   = substr($resp, $hsize) ?: '';
+                            curl_close($ch);
+
+                            $json = json_decode($body, true);
+                            $code    = $json['code'] ?? ($json['ret'] ?? ($json['status'] ?? null));
+                            $message = $json['message'] ?? ($json['msg'] ?? ($json['detail'] ?? null));
+                            $okGate  = ($status === 200) && (
+                                $code === 0 || $code === '0' ||
+                                (is_string($message) && preg_match('/^success$/i', $message)) ||
+                                ($json['success'] ?? false) === true
+                            );
+
+                            $manualOpen = !$okGate; // si falla, que el front muestre botón de apertura manual
+                            if (!$okGate) $payNotifyError = 'Apertura (grace) falló: '.($message ?? "HTTP $status");
+                        }
+                    } catch (\Throwable $e) {
+                        $payNotifyError = $e->getMessage();
+                        $manualOpen = true;
+                    }
+                }
+
+            } else {
+                // ====== NO GRACE: flujo payNotify original ======
+                $shouldNotify = ($felOk && $effectiveBilling > 0);
+
+                if ($shouldNotify) {
+                    $cid = $this->newCorrelationId('paynotify');
+
+                    $baseUrl = rtrim((string) $this->config->get('HAMACHI_PARK_BASE_URL', ''), '/');
+                    if ($baseUrl === '') {
+                        $payNotifyError = 'HAMACHI_PARK_BASE_URL no está configurado.';
                         $manualOpen = true;
                     } else {
-                        $endpoint = $baseUrl . '/api/v1/parkCost/payNotify';
-                        $accessToken = (string)($this->config->get('HAMACHI_PARK_ACCESS_TOKEN', ''));
-                        if ($accessToken !== '') {
-                            $endpoint .= (strpos($endpoint, '?') === false ? '?' : '&') . 'access_token=' . urlencode($accessToken);
-                        }
+                        $carNumber = $payPlate ?: ($plate ?: ($extra['plate'] ?? ''));
+                        $recordId  = $payRecordId;
 
-                        $headers = ['Accept: application/json', 'Content-Type: application/json'];
-                        $hostHeader = trim((string) $this->config->get('HAMACHI_PARK_HOST_HEADER', ''));
-                        if ($hostHeader !== '') $headers[] = 'Host: ' . $hostHeader;
-
-                        $verifySsl = strtolower((string) $this->config->get('HAMACHI_PARK_VERIFY_SSL', 'false')) === 'true';
-                        $connectTo = trim((string) $this->config->get('HAMACHI_PARK_CONNECT_TO', ''));
-
-                        $paymentType = $isGrace ? 'free' : (string)$this->config->get('HAMACHI_PARK_PAYMENT_TYPE', 'cash');
-
-                        $notifyPayload = [
-                            'carNumber'   => $carNumber,
-                            'paymentType' => $paymentType,
-                            'recordId'    => $recordId,
-                        ];
-
-                        try {
-                            $ch = curl_init($endpoint);
-                            curl_setopt_array($ch, [
-                                CURLOPT_RETURNTRANSFER => true,
-                                CURLOPT_CONNECTTIMEOUT => 15,
-                                CURLOPT_TIMEOUT        => 20,
-                                CURLOPT_HTTPHEADER     => $headers,
-                                CURLOPT_NOSIGNAL       => true,
-                                CURLOPT_TCP_KEEPALIVE  => 1,
-                                CURLOPT_TCP_KEEPIDLE   => 30,
-                                CURLOPT_TCP_KEEPINTVL  => 10,
-                                CURLOPT_HTTP_VERSION   => CURL_HTTP_VERSION_1_1,
-                                CURLOPT_POST           => true,
-                                CURLOPT_POSTFIELDS     => json_encode($notifyPayload, JSON_UNESCAPED_UNICODE),
-                                CURLOPT_HEADER         => true,
-                            ]);
-                            if (!$verifySsl) {
-                                curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-                                curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
-                            }
-                            if ($connectTo !== '') curl_setopt($ch, CURLOPT_CONNECT_TO, [$connectTo]);
-
-                            $resp = curl_exec($ch);
-                            if ($resp === false) {
-                                $payNotifyError = curl_error($ch) ?: 'Error desconocido';
-                                curl_close($ch);
-                                $manualOpen = true;
-                            } else {
-                                $info   = curl_getinfo($ch) ?: [];
-                                $status = (int)($info['http_code'] ?? 0);
-                                $hsize  = (int)($info['header_size'] ?? 0);
-                                curl_close($ch);
-
-                                $body  = substr($resp, $hsize) ?: '';
-                                $ctype = (string)($info['content_type'] ?? '');
-                                $payNotifyRaw  = $body;
-                                $payNotifyType = $ctype;
-
-                                $payNotifySent = ($status >= 200 && $status < 300);
-
-                                $json = null;
-                                $looksJson = stripos($ctype, 'application/json') !== false
-                                        || (strlen($body) && ($body[0] === '{' || $body[0] === '['));
-                                if ($looksJson) {
-                                    $tmp = json_decode($body, true);
-                                    if (json_last_error() === JSON_ERROR_NONE) $json = $tmp;
-                                }
-
-                                if ($payNotifySent && is_array($json)) {
-                                    $payNotifyAck = (isset($json['code']) && (int)$json['code'] === 0);
-                                    if (!$payNotifyAck) $payNotifyError = isset($json['message']) ? (string)$json['message'] : 'ACK inválido';
-                                } else if (!$payNotifySent) {
-                                    $payNotifyError = "HTTP $status";
-                                }
-
-                                if (!$payNotifySent || !$payNotifyAck) $manualOpen = true;
-                            }
-
-                        } catch (\Throwable $e) {
-                            $payNotifyError = $e->getMessage();
+                        if ($recordId === '0' || $recordId === '' || $carNumber === '') {
+                            $payNotifyError = 'Faltan carNumber/recordId para payNotify';
                             $manualOpen = true;
+                        } else {
+                            $endpoint = $baseUrl . '/api/v1/parkCost/payNotify';
+                            $accessToken = (string)($this->config->get('HAMACHI_PARK_ACCESS_TOKEN', ''));
+                            if ($accessToken !== '') {
+                                $endpoint .= (strpos($endpoint, '?') === false ? '?' : '&') . 'access_token=' . urlencode($accessToken);
+                            }
+
+                            $headers = ['Accept: application/json', 'Content-Type: application/json'];
+                            $hostHeader = trim((string) $this->config->get('HAMACHI_PARK_HOST_HEADER', ''));
+                            if ($hostHeader !== '') $headers[] = 'Host: ' . $hostHeader;
+
+                            $verifySsl = strtolower((string) $this->config->get('HAMACHI_PARK_VERIFY_SSL', 'false')) === 'true';
+                            $connectTo = trim((string) $this->config->get('HAMACHI_PARK_CONNECT_TO', ''));
+
+                            $paymentType = (string)$this->config->get('HAMACHI_PARK_PAYMENT_TYPE', 'cash');
+
+                            $notifyPayload = [
+                                'carNumber'   => $carNumber,
+                                'paymentType' => $paymentType,
+                                'recordId'    => $recordId,
+                            ];
+
+                            try {
+                                $ch = curl_init($endpoint);
+                                curl_setopt_array($ch, [
+                                    CURLOPT_RETURNTRANSFER => true,
+                                    CURLOPT_CONNECTTIMEOUT => 15,
+                                    CURLOPT_TIMEOUT        => 20,
+                                    CURLOPT_HTTPHEADER     => $headers,
+                                    CURLOPT_NOSIGNAL       => true,
+                                    CURLOPT_TCP_KEEPALIVE  => 1,
+                                    CURLOPT_TCP_KEEPIDLE   => 30,
+                                    CURLOPT_TCP_KEEPINTVL  => 10,
+                                    CURLOPT_HTTP_VERSION   => CURL_HTTP_VERSION_1_1,
+                                    CURLOPT_POST           => true,
+                                    CURLOPT_POSTFIELDS     => json_encode($notifyPayload, JSON_UNESCAPED_UNICODE),
+                                    CURLOPT_HEADER         => true,
+                                ]);
+                                if (!$verifySsl) {
+                                    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+                                    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+                                }
+                                if ($connectTo !== '') curl_setopt($ch, CURLOPT_CONNECT_TO, [$connectTo]);
+
+                                $resp = curl_exec($ch);
+                                if ($resp === false) {
+                                    $payNotifyError = curl_error($ch) ?: 'Error desconocido';
+                                    curl_close($ch);
+                                    $manualOpen = true;
+                                } else {
+                                    $info   = curl_getinfo($ch) ?: [];
+                                    $status = (int)($info['http_code'] ?? 0);
+                                    $hsize  = (int)($info['header_size'] ?? 0);
+                                    $body  = substr($resp, $hsize) ?: '';
+                                    $ctype = (string)($info['content_type'] ?? '');
+                                    curl_close($ch);
+
+                                    $payNotifyRaw  = $body;
+                                    $payNotifyType = $ctype;
+
+                                    $payNotifySent = ($status >= 200 && $status < 300);
+
+                                    $json = null;
+                                    $looksJson = stripos($ctype, 'application/json') !== false
+                                            || (strlen($body) && ($body[0] === '{' || $body[0] === '['));
+                                    if ($looksJson) {
+                                        $tmp = json_decode($body, true);
+                                        if (json_last_error() === JSON_ERROR_NONE) $json = $tmp;
+                                    }
+
+                                    if ($payNotifySent && is_array($json)) {
+                                        $payNotifyAck = (isset($json['code']) && (int)$json['code'] === 0);
+                                        if (!$payNotifyAck) $payNotifyError = isset($json['message']) ? (string)$json['message'] : 'ACK inválido';
+                                    } else if (!$payNotifySent) {
+                                        $payNotifyError = "HTTP $status";
+                                    }
+
+                                    if (!$payNotifySent || !$payNotifyAck) $manualOpen = true;
+                                }
+
+                            } catch (\Throwable $e) {
+                                $payNotifyError = $e->getMessage();
+                                $manualOpen = true;
+                            }
                         }
                     }
                 }
-            } else {
-                $manualOpen = true;
             }
-
             echo json_encode([
                 'ok'               => $isGrace ? true : $felOk,
                 'uuid'             => $uuid,

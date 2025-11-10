@@ -1349,7 +1349,7 @@ class ApiController {
         return array_keys($arr) !== range(0, count($arr) - 1);
     }
 
-    public function invoiceOne(): void
+    public function invoiceOne(): void 
     {
         header('Content-Type: application/json; charset=utf-8');
 
@@ -1382,53 +1382,70 @@ class ApiController {
 
             // Cálculo “oficial” del backend
             $calc = $this->resolveTicketAmount($ticketNo, $isGrace ? 'hourly' : $mode, $customTotal);
-            $hours   = (float)($calc[0] ?? 0);
-            $minutes = (int)  ($calc[1] ?? 0);
+            $hours        = (float)($calc[0] ?? 0);
+            $minutes      = (int)  ($calc[1] ?? 0);
             $totalBackend = $isGrace ? 0.00 : (float)($calc[2] ?? 0);
-            $extra   = is_array($calc[3] ?? null) ? $calc[3] : [];
+            $extra        = is_array($calc[3] ?? null) ? $calc[3] : [];
 
             $durationMinBackend = (int) max(0, $hours * 60 + $minutes);
             $hoursBilledBackend = (int) ceil($durationMinBackend / 60);
             $billingAmount      = $isGrace ? 0.00 : (isset($extra['billing_amount']) ? (float)$extra['billing_amount'] : $totalBackend);
 
             // Datos del cliente para hourly (opcional)
-            $dmClient   = isset($body['duration_minutes']) ? (int)$body['duration_minutes'] : null;
-            $hbClient   = isset($body['hours_billed_used']) ? (int)$body['hours_billed_used'] : null;
-            $rateClient = isset($body['hourly_rate_used']) ? (float)$body['hourly_rate_used'] : null;
+            $dmClient    = isset($body['duration_minutes']) ? (int)$body['duration_minutes'] : null;
+            $hbClient    = isset($body['hours_billed_used']) ? (int)$body['hours_billed_used'] : null;
+            $rateClient  = isset($body['hourly_rate_used']) ? (float)$body['hourly_rate_used'] : null;
             $totalClient = isset($body['total']) ? (float)$body['total'] : null;
 
-            // Total final
-            $finalTotal = $totalBackend;
+            // Totales iniciales y valores a persistir (se ajustan más abajo)
+            $finalTotal          = $totalBackend;
+            $durationMinPersist  = $durationMinBackend;
+            $hoursBilledPersist  = $hoursBilledBackend;
 
             if ($mode === 'custom') {
-                $finalTotal   = round((float)$customTotal, 2);
-                $billingAmount= $finalTotal;
+                $finalTotal    = round((float)$customTotal, 2);
+                $billingAmount = $finalTotal;
 
             } elseif ($mode === 'hourly' && !$isGrace) {
                 $clientHasMin  = is_finite($dmClient)   && $dmClient   !== null && $dmClient   > 0;
                 $clientHasRate = is_finite($rateClient) && $rateClient !== null && $rateClient > 0;
 
                 $clientComputed = null;
-                if ($clientHasMin && $clientHasRate) {
-                    $hb = $hbClient && $hbClient > 0 ? (int)$hbClient : (int)ceil($dmClient / 60);
-                    $clientComputed = round($hb * $rateClient, 2);
-                }
+                $hbUsed = null;
 
-                if ($clientComputed !== null) {
-                    $finalTotal = $clientComputed;
+                // Si el cliente envía minutos + tarifa, confiar en su cálculo
+                if ($clientHasMin && $clientHasRate) {
+                    $hbUsed = ($hbClient && $hbClient > 0) ? (int)$hbClient : (int)ceil($dmClient / 60);
+                    $clientComputed = round($hbUsed * $rateClient, 2);
+
+                    $finalTotal         = $clientComputed;
+                    $billingAmount      = $finalTotal;
+                    $durationMinPersist = (int)$dmClient;
+                    $hoursBilledPersist = (int)$hbUsed;
+                    $extra['final_total_source'] = 'client';
                 }
-                if (is_finite($totalClient) && $totalClient > 0) {
-                    $finalTotal = max($finalTotal, round($totalClient, 2));
+                // Si no envía minutos/tarifa pero sí un total, usar ese total
+                elseif (is_finite($totalClient) && $totalClient > 0) {
+                    $finalTotal         = round($totalClient, 2);
+                    $billingAmount      = $finalTotal;
+                    $durationMinPersist = $durationMinBackend;
+                    $hoursBilledPersist = $hoursBilledBackend;
+                    $extra['final_total_source'] = 'client_total';
                 }
-                $finalTotal    = max($finalTotal, $totalBackend);
-                $billingAmount = $finalTotal;
+                // Respaldo: cálculo del backend
+                else {
+                    $finalTotal         = $totalBackend;
+                    $billingAmount      = $finalTotal;
+                    $durationMinPersist = $durationMinBackend;
+                    $hoursBilledPersist = $hoursBilledBackend;
+                    $extra['final_total_source'] = 'backend';
+                }
 
                 // Solo para trazas locales (no se devuelven en JSON)
                 $extra['client_minutes']      = $clientHasMin ? (int)$dmClient : null;
                 $extra['client_hours_billed'] = $hbClient ?? null;
                 $extra['client_hourly_rate']  = $rateClient ?? null;
                 $extra['client_total_sent']   = (is_finite($totalClient) && $totalClient > 0) ? round($totalClient,2) : null;
-                $extra['final_total_source']  = ($clientComputed !== null || $totalClient) ? 'client_or_max' : 'backend';
             }
 
             // DB / TZ
@@ -1470,8 +1487,10 @@ class ApiController {
                 }
             } catch (\Throwable $e) { /* ignorar */ }
 
-            $hourlyRate   = is_numeric($extra['hourly_rate']  ?? null) ? (float)$extra['hourly_rate']  : (is_finite($rateClient) ? (float)$rateClient : 0.00);
-            $monthlyRate  = is_numeric($extra['monthly_rate'] ?? null) ? (float)$extra['monthly_rate'] : 0.00;
+            // Tasas registradas (prefiere backend; si no, usa lo que mandó el cliente)
+            $hourlyRate  = is_numeric($extra['hourly_rate']  ?? null) ? (float)$extra['hourly_rate']
+                        : (is_finite($rateClient) ? (float)$rateClient : 0.00);
+            $monthlyRate = is_numeric($extra['monthly_rate'] ?? null) ? (float)$extra['monthly_rate'] : 0.00;
 
             // PayNotify
             $payBillin   = 0.0;
@@ -1509,6 +1528,7 @@ class ApiController {
                 $this->debugLog('fel_invoice_out.txt', [
                     'request_payload' => $payloadFel,
                     'g4s_response'    => $felRes,
+                    'extra'           => $extra,
                 ]);
 
                 $felOk  = (bool)($felRes['ok'] ?? false);
@@ -1564,8 +1584,8 @@ class ApiController {
                 ':receptor_nit'  => $receptorNit,
                 ':entry_at'      => $entryAt,
                 ':exit_at'       => $exitAt,
-                ':duration_min'  => $durationMinBackend,
-                ':hours_billed'  => $hoursBilledBackend,
+                ':duration_min'  => $durationMinPersist,
+                ':hours_billed'  => $hoursBilledPersist,
                 ':billing_mode'  => $isGrace ? 'grace' : $mode,
                 ':hourly_rate'   => $hourlyRate,
                 ':monthly_rate'  => $monthlyRate,

@@ -3286,7 +3286,533 @@ if (!$isGrace) {
         $this->debugLog('g4s_pdf_unparsed.txt', ['preview'=>mb_substr($soapResp, 0, 1500)]);
         return null;
     }
+        
+    public function reportsManualOpen(): void
+    {
+        header('Content-Type: application/json; charset=utf-8');
+
+        try {
+            /** Conexión */
+            /** @var \Config\Config $cfg */
+            $cfg = $this->config;
+            $pdo = \App\Utils\DB::pdo($cfg);
+            $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
+            $pdo->setAttribute(\PDO::ATTR_DEFAULT_FETCH_MODE, \PDO::FETCH_ASSOC);
+
+            /** Filtros */
+            $from = $_GET['from'] ?? null;
+            $to   = $_GET['to']   ?? null;
+            $text = $_GET['q']    ?? null;  // búsqueda general (usuario, motivo, etc.)
+
+            $sql = "
+                SELECT 
+                    id,
+                    channel_id,
+                    opened_at,
+                    reason,
+
+                    CASE
+                        WHEN channel_id = '40288048981adc4601981b7cb2660b05' THEN 'Salida'
+                        WHEN channel_id = '40288048981adc4601981b7c2d010aff' THEN 'Entrada'
+                        ELSE 'Otro canal'
+                    END AS tipo
+                FROM manual_open_logs
+                WHERE 1=1
+            ";
+
+            $params = [];
+
+            if ($from) {
+                $sql .= " AND DATE(opened_at) >= :from";
+                $params[':from'] = $from;
+            }
+
+            if ($to) {
+                $sql .= " AND DATE(opened_at) <= :to";
+                $params[':to'] = $to;
+            }
+
+            if ($text) {
+                $sql .= " AND (
+                            channel_id     LIKE :q
+                            OR reason       LIKE :q
+                            OR result_message LIKE :q
+                            OR extra_json   LIKE :q
+                        )";
+                $params[':q'] = "%{$text}%";
+            }
+
+            $sql .= " ORDER BY opened_at DESC LIMIT 500";
+
+            $stmt = $pdo->prepare($sql);
+            $stmt->execute($params);
+            $rows = $stmt->fetchAll();
+
+            echo json_encode([
+                'ok'   => true,
+                'rows' => $rows,
+            ], JSON_UNESCAPED_UNICODE);
+
+        } catch (\Throwable $e) {
+            http_response_code(500);
+            echo json_encode([
+                'ok'    => false,
+                'error' => $e->getMessage(),
+            ], JSON_UNESCAPED_UNICODE);
+        }
+    }
+
+public function reportManualInvoiceList(): void
+{
+    header('Content-Type: application/json; charset=utf-8');
+
+    try {
+        /** @var \Config\Config $cfg */
+        $cfg = $this->config;
+        $pdo = \App\Utils\DB::pdo($cfg);
+        $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
+        $pdo->setAttribute(\PDO::ATTR_DEFAULT_FETCH_MODE, \PDO::FETCH_ASSOC);
+
+        // Filtros que manda el front
+        $from   = $_GET['from']   ?? null;
+        $to     = $_GET['to']     ?? null;
+        $mode   = $_GET['mode']   ?? null;   // ANY | custom | monthly | grace
+        $nit    = $_GET['nit']    ?? null;
+        $reason = $_GET['reason'] ?? null;
+
+        $sql = "
+            SELECT
+                id,
+                created_at,
+                reason,
+                receptor_nit,
+                receptor_name,
+                amount,
+                used_monthly,
+                send_to_fel,
+                fel_uuid,
+                fel_status,
+                fel_message,
+                fel_pdf_base64,
+
+                -- lo que espera el front como 'mode'
+                CASE
+                    WHEN used_monthly = 1 THEN 'monthly'
+                    WHEN (send_to_fel = 0 OR amount = 0) THEN 'grace'
+                    ELSE 'custom'
+                END AS mode,
+
+                -- lo que espera el front como 'status'
+                fel_status AS status
+            FROM manual_invoices
+            WHERE 1=1
+        ";
+
+        $params = [];
+
+        if ($from) {
+            $sql .= " AND DATE(created_at) >= :from";
+            $params[':from'] = $from;
+        }
+
+        if ($to) {
+            $sql .= " AND DATE(created_at) <= :to";
+            $params[':to'] = $to;
+        }
+
+        if ($nit) {
+            $sql .= " AND receptor_nit LIKE :nit";
+            $params[':nit'] = '%' . $nit . '%';
+        }
+
+        if ($reason) {
+            $sql .= " AND reason LIKE :reason";
+            $params[':reason'] = '%' . $reason . '%';
+        }
+
+        // filtro por modo (como el combo del front)
+        if ($mode && $mode !== 'ANY') {
+            if ($mode === 'monthly') {
+                $sql .= " AND used_monthly = 1";
+            } elseif ($mode === 'grace') {
+                $sql .= " AND (send_to_fel = 0 OR amount = 0)";
+            } else {
+                // 'custom' → todo lo que NO es mensual y NO es gracia
+                $sql .= " AND (used_monthly IS NULL OR used_monthly = 0)
+                          AND (send_to_fel = 1 AND amount > 0)";
+            }
+        }
+
+        $sql .= " ORDER BY created_at DESC LIMIT 1000";
+
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($params);
+        $rows = $stmt->fetchAll();
+
+        // ✅ Normalizar fel_uuid para que el front no reciba 1/0 como UUID
+        foreach ($rows as &$r) {
+            $uuid = trim((string)($r['fel_uuid'] ?? ''));
+
+            // Si viene vacío o como bandera (1/0), lo anulamos
+            if ($uuid === '' || $uuid === '0' || $uuid === '1') {
+                $uuid = null;
+            }
+
+            $r['fel_uuid'] = $uuid;
+
+            // Alias extra por si el front usa uuid como en emitidas
+            $r['uuid'] = $uuid;
+
+            // Casts seguros
+            $r['amount'] = (float)($r['amount'] ?? 0);
+            $r['used_monthly'] = (int)($r['used_monthly'] ?? 0);
+            $r['send_to_fel']  = (int)($r['send_to_fel'] ?? 0);
+            $r['status'] = strtoupper((string)($r['status'] ?? $r['fel_status'] ?? ''));
+        }
+        unset($r);
+
+        echo json_encode([
+            'ok'   => true,
+            'rows' => $rows,      // 👈 lo que usa el front
+            'data' => $rows,      // opcional: compatibilidad
+        ], JSON_UNESCAPED_UNICODE);
+
+    } catch (\Throwable $e) {
+        echo json_encode([
+            'ok'    => false,
+            'error' => 'manualInvoiceList: ' . $e->getMessage(),
+        ]);
+    }
+}
+
+
+    // En tu controlador FEL (por ejemplo FelController.php)
+    /**
+ * Devuelve PDF BINARIO de G4S para factura manual.
+ * NO usa BD para pdf (solo para buscar uuid).
+ * GET /api/fel/manual-invoice/pdf?id=123
+ */
+    public function manualInvoicePdf(): void
+    {
+        $id = trim((string)($_GET['id'] ?? ''));
+
+        $this->debugLog('g4s_pdf_debug.txt', [
+            'step' => 'manualInvoicePdf_start',
+            'id_qs' => $id,
+        ]);
+
+        if ($id === '' || !ctype_digit($id)) {
+            http_response_code(400);
+            echo "id requerido";
+            $this->debugLog('g4s_pdf_debug.txt', [
+                'step' => 'manualInvoicePdf_bad_id',
+                'id_qs' => $id
+            ]);
+            return;
+        }
+
+        $db = $this->db();
+
+        // 1) Intentar obtener UUID desde tabla manual_invoices
+        $uuid = '';
+        try {
+            $stmt = $db->prepare("
+                SELECT 
+                    fel_uuid AS uuid1,
+                    uuid     AS uuid2
+                FROM manual_invoices
+                WHERE id = ?
+                LIMIT 1
+            ");
+            $stmt->execute([(int)$id]);
+            $row = $stmt->fetch(\PDO::FETCH_ASSOC) ?: null;
+
+            if ($row) {
+                $uuid = trim((string)($row['uuid1'] ?? $row['uuid2'] ?? ''));
+            }
+        } catch (\Throwable $e) {
+            // si no existe tabla/manual_invoices, no rompemos; probamos otro lookup
+            $this->debugLog('g4s_pdf_debug.txt', [
+                'step' => 'manualInvoicePdf_lookup_manual_invoices_failed',
+                'err'  => $e->getMessage()
+            ]);
+        }
+
+        // 2) Fallback SOLO para buscar el UUID en invoices por manual_id (no pdf)
+        if ($uuid === '') {
+            $stmt2 = $db->prepare("
+                SELECT uuid
+                FROM invoices
+                WHERE manual_id = ?
+                ORDER BY id DESC
+                LIMIT 1
+            ");
+            $stmt2->execute([(int)$id]);
+            $row2 = $stmt2->fetch(\PDO::FETCH_ASSOC) ?: null;
+            if ($row2 && !empty($row2['uuid'])) {
+                $uuid = trim((string)$row2['uuid']);
+            }
+
+            $this->debugLog('g4s_pdf_debug.txt', [
+                'step' => 'manualInvoicePdf_lookup_invoices_by_manual_id',
+                'found' => (bool)$row2,
+                'uuid'  => $uuid ?: null
+            ]);
+        }
+
+        if ($uuid === '') {
+            http_response_code(404);
+            echo "No se encontró UUID para esa factura manual";
+            $this->debugLog('g4s_pdf_debug.txt', [
+                'step' => 'manualInvoicePdf_missing_uuid',
+                'id'   => $id
+            ]);
+            return;
+        }
+
+        // 3) SOLO G4S
+        $pdfBase64 = $this->fetchG4sPdfByUuid($uuid);
+
+        if (!$pdfBase64) {
+            http_response_code(404);
+            echo "No se pudo obtener PDF de G4S";
+            $this->debugLog('g4s_pdf_debug.txt', [
+                'step' => 'manualInvoicePdf_g4s_failed_no_fallback',
+                'uuid' => $uuid
+            ]);
+            return;
+        }
+
+        $pdfBinary = base64_decode($pdfBase64, true);
+        if ($pdfBinary === false || strlen($pdfBinary) < 1000) {
+            http_response_code(500);
+            echo "PDF inválido desde G4S";
+            $this->debugLog('g4s_pdf_debug.txt', [
+                'step' => 'manualInvoicePdf_decode_failed',
+                'uuid' => $uuid,
+                'decoded_ok' => $pdfBinary !== false,
+                'decoded_len' => $pdfBinary !== false ? strlen($pdfBinary) : 0,
+            ]);
+            return;
+        }
+
+        $this->debugLog('g4s_pdf_debug.txt', [
+            'step' => 'manualInvoicePdf_serving_g4s_pdf',
+            'uuid' => $uuid,
+            'binary_len' => strlen($pdfBinary),
+        ]);
+
+        header("Content-Type: application/pdf");
+        header("Content-Disposition: inline; filename=\"manual_{$uuid}.pdf\"");
+        header("Content-Length: " . strlen($pdfBinary));
+        echo $pdfBinary;
+    }
+
+    /**
+     * Consulta a G4S (Documenta) por el PDF usando GET_DOCUMENT.
+     * Devuelve el PDF en base64 o null si falla.
+     */
+    private function fetchG4sPdfByUuid(string $uuid): ?string
+    {
+        $requestor = '425C5714-AA9E-4212-B4AA-75BD70328030';
+        $entity    = '81491514';
+        $user      = '425C5714-AA9E-4212-B4AA-75BD70328030';
+        $userName  = 'TEMP';
+        $endpoint  = 'https://fel.g4sdocumenta.com/webservicefront/factwsfront.asmx';
+
+        $xmlBody = <<<XML
+        <?xml version="1.0" encoding="utf-8"?>
+        <soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                    xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+                    xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+        <soap:Body>
+            <RequestTransaction xmlns="http://www.fact.com.mx/schema/ws">
+            <Requestor>{$requestor}</Requestor>
+            <Transaction>GET_DOCUMENT</Transaction>
+            <Country>GT</Country>
+            <Entity>{$entity}</Entity>
+            <User>{$user}</User>
+            <UserName>{$userName}</UserName>
+            <Data1>{$uuid}</Data1>
+            <Data2></Data2>
+            <Data3>XML PDF</Data3>
+            </RequestTransaction>
+        </soap:Body>
+        </soap:Envelope>
+        XML;
+
+        // LOG request
+        $this->debugLog('g4s_pdf_debug.txt', [
+            'step' => 'request_build',
+            'uuid' => $uuid,
+            'endpoint' => $endpoint,
+            'soap_action' => 'RequestTransaction',
+            'xml_len' => strlen($xmlBody),
+        ]);
+
+        $ch = curl_init($endpoint);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_POST           => true,
+            CURLOPT_HTTPHEADER     => [
+                'Content-Type: text/xml; charset=utf-8',
+                'SOAPAction: "http://www.fact.com.mx/schema/ws/RequestTransaction"'
+            ],
+            CURLOPT_POSTFIELDS     => $xmlBody,
+            CURLOPT_TIMEOUT        => 30,
+        ]);
+
+        $response = curl_exec($ch);
+        $err      = curl_error($ch);
+        $code     = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        // LOG raw response status
+        $this->debugLog('g4s_pdf_debug.txt', [
+            'step' => 'curl_result',
+            'http_code' => $code,
+            'curl_error' => $err ?: null,
+            'response_len' => $response ? strlen($response) : 0,
+            'response_head' => $response ? substr($response, 0, 400) : null,
+        ]);
+
+        if ($err || $code !== 200 || !$response) {
+            $this->debugLog('g4s_pdf_debug.txt', [
+                'step' => 'curl_failed',
+                'reason' => $err ?: "HTTP $code o respuesta vacía",
+            ]);
+            return null;
+        }
+
+        // ============================
+        // 1) LIMPIEZA DEL XML
+        // ============================
+        $clean = $response;
+        $clean = preg_replace('/^\xEF\xBB\xBF/', '', $clean);             // quitar BOM
+        $clean = preg_replace('/[^\P{C}\t\n\r]+/u', '', $clean);          // quitar control chars
+
+        // ============================
+        // 2) PARSE ROBUSTO DOM (flags seguros)
+        // ============================
+        libxml_use_internal_errors(true);
+        $dom = new \DOMDocument('1.0', 'UTF-8');
+
+        $flags = 0;
+        if (defined('LIBXML_NONET'))      $flags |= \LIBXML_NONET;
+        if (defined('LIBXML_NOERROR'))    $flags |= \LIBXML_NOERROR;
+        if (defined('LIBXML_NOWARNING'))  $flags |= \LIBXML_NOWARNING;
+        if (defined('LIBXML_RECOVER'))    $flags |= \LIBXML_RECOVER;     // <- puede no existir en tu PHP
+        if (defined('LIBXML_PARSEHUGE'))  $flags |= \LIBXML_PARSEHUGE;   // <- igual
+
+        $ok = $dom->loadXML($clean, $flags);
+
+        if (!$ok) {
+            $this->debugLog('g4s_pdf_debug.txt', [
+                'step' => 'dom_parse_failed',
+                'flags' => $flags,
+                'errors' => array_map(
+                    fn($e) => trim($e->message),
+                    libxml_get_errors()
+                )
+            ]);
+            libxml_clear_errors();
+            return null;
+        }
+        libxml_clear_errors();
+
+        // ============================
+        // 3) BUSCAR ResponseData3
+        // ============================
+        $nodes = $dom->getElementsByTagName('ResponseData3');
+
+        if (!$nodes || $nodes->length === 0) {
+            $this->debugLog('g4s_pdf_debug.txt', [
+                'step' => 'no_responseData3',
+                'note' => 'No se encontró etiqueta ResponseData3'
+            ]);
+            return null;
+        }
+
+        $pdfBase64 = trim((string)$nodes->item(0)->textContent);
+
+        $this->debugLog('g4s_pdf_debug.txt', [
+            'step' => 'responseData3_found',
+            'base64_len' => strlen($pdfBase64),
+            'base64_head' => substr($pdfBase64, 0, 80),
+        ]);
+
+        if ($pdfBase64 === '') {
+            $this->debugLog('g4s_pdf_debug.txt', [
+                'step' => 'responseData3_empty'
+            ]);
+            return null;
+        }
+
+        // Validación rápida base64
+        $decoded = base64_decode($pdfBase64, true);
+        if ($decoded === false || strlen($decoded) < 1000) {
+            $this->debugLog('g4s_pdf_debug.txt', [
+                'step' => 'base64_invalid',
+                'decoded_ok' => $decoded !== false,
+                'decoded_len' => $decoded !== false ? strlen($decoded) : 0
+            ]);
+            return null;
+        }
+
+        return $pdfBase64;
+    }
+
+
+    public function invoicePdf(): void
+    {
+        $uuid = trim((string)($_GET['uuid'] ?? ''));
+
+        $this->debugLog('g4s_pdf_debug.txt', [
+            'step' => 'invoicePdf_start',
+            'uuid_qs' => $uuid,
+            'ticket_no_qs' => trim((string)($_GET['ticket_no'] ?? '')),
+        ]);
+
+        if ($uuid === '') {
+            http_response_code(400);
+            echo "uuid requerido";
+            $this->debugLog('g4s_pdf_debug.txt', [
+                'step' => 'missing_uuid',
+                'message' => 'No vino uuid'
+            ]);
+            return;
+        }
+
+        $pdfBase64 = $this->fetchG4sPdfByUuid($uuid);
+
+        if (!$pdfBase64) {
+            http_response_code(404);
+            echo "No se pudo obtener PDF de G4S";
+            $this->debugLog('g4s_pdf_debug.txt', [
+                'step' => 'g4s_failed_no_fallback',
+                'uuid' => $uuid
+            ]);
+            return;
+        }
+
+        $pdfBinary = base64_decode($pdfBase64);
+
+        $this->debugLog('g4s_pdf_debug.txt', [
+            'step' => 'serving_g4s_pdf',
+            'uuid' => $uuid,
+            'binary_len' => strlen($pdfBinary),
+        ]);
+
+        header("Content-Type: application/pdf");
+        header("Content-Disposition: inline; filename=\"factura_{$uuid}.pdf\"");
+        header("Content-Length: " . strlen($pdfBinary));
+        echo $pdfBinary;
+    }
+
+
+
+
 
 }
 
-    
+

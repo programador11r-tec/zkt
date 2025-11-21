@@ -105,10 +105,26 @@ $router->get('/api/fel/manual-invoice-list', function () use ($api) {
      Auth::requireAuth();
     return $api->manualInvoiceList();
 });
+$router->get('/api/fel/report-manual-invoice-list', function () use ($api) {
+     Auth::requireAuth();
+    return $api->reportManualInvoiceList();
+});
 $router->post('/api/fel/manual-invoice', function () use ($api) {
     Auth::requireAuth();
     return $api->manualInvoiceCreate();
 });
+
+$router->get('/api/reports/manual-open', function () use ($api) {
+    Auth::requireAuth();
+    return $api->reportsManualOpen();   // nuevo método en ApiController
+});
+
+
+// === FEL PDFs ===
+$router->get('/api/fel/invoice/pdf', function () use ($api) {
+    $api->invoicePdf();
+});
+
 
 // Consulta NIT (G4S): autenticado (tú decides si solo admin)
 $router->get('/api/g4s/lookup-nit', function () {

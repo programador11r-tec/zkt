@@ -378,8 +378,8 @@ class ApiController {
 
             $pageNo   = (int) ($_GET['pageNo'] ?? $_GET['page'] ?? 1);
             if ($pageNo < 1) $pageNo = 1;
-            $pageSize = (int) ($_GET['pageSize'] ?? $_GET['limit'] ?? 5);
-            if ($pageSize <= 0) $pageSize = 5;
+            $pageSize = (int) ($_GET['pageSize'] ?? $_GET['limit'] ?? 25);
+            if ($pageSize <= 0) $pageSize = 25;
             $pageSize = min($pageSize, 1000);
 
             $query = [

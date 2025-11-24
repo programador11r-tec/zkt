@@ -1,5 +1,5 @@
 <?php
-$dir = __DIR__ . '/../backend/storage/logs';
+$dir = __DIR__ . '/../logs';
 
 if (!is_dir($dir)) {
     die("La carpeta de logs no existe.");

@@ -1492,172 +1492,172 @@ class ApiController {
                         : (is_finite($rateClient) ? (float)$rateClient : 0.00);
             $monthlyRate = is_numeric($extra['monthly_rate'] ?? null) ? (float)$extra['monthly_rate'] : 0.00;
             // ================== FEL (solo si NO es gracia) ==================
-$felOk = false;
-$uuid  = null;
-$felRes = null;
-$felErr = null;
-$pdfBase64 = null;
+            $felOk = false;
+            $uuid  = null;
+            $felRes = null;
+            $felErr = null;
+            $pdfBase64 = null;
 
-// (opcional) para payNotify después
-$payBillin   = 0.0;
-$payRecordId = '0';
-$payPlate    = $plate;
+            // (opcional) para payNotify después
+            $payBillin   = 0.0;
+            $payRecordId = '0';
+            $payPlate    = $plate;
 
-if (!$isGrace) {
-    // 1) Enviar a FEL
-    $clientFel = new \App\Services\G4SClient($cfg);
+            if (!$isGrace) {
+                // 1) Enviar a FEL
+                $clientFel = new \App\Services\G4SClient($cfg);
 
-    // Construye el payload con el total final que ya decidiste arriba
-    $payloadFel = [
-        'ticket_no'    => $ticketNo,
-        'receptor_nit' => $receptorNit,
-        'total'        => round($billingAmount, 2), // usa el monto efectivo que facturarás
-        'hours'        => $hours,
-        'minutes'      => $minutes,
-        'mode'         => $mode,                    // 'hourly' aquí
-    ];
+                // Construye el payload con el total final que ya decidiste arriba
+                $payloadFel = [
+                    'ticket_no'    => $ticketNo,
+                    'receptor_nit' => $receptorNit,
+                    'total'        => round($billingAmount, 2), // usa el monto efectivo que facturarás
+                    'hours'        => $hours,
+                    'minutes'      => $minutes,
+                    'mode'         => $mode,                    // 'hourly' aquí
+                ];
 
-    $felRes = $clientFel->submitInvoice($payloadFel);
-    $this->debugLog('fel_invoice_out.txt', [
-        'request_payload' => $payloadFel,
-        'g4s_response'    => $felRes,
-        'extra'           => $extra,
-    ]);
+                $felRes = $clientFel->submitInvoice($payloadFel);
+                $this->debugLog('fel_invoice_out.txt', [
+                    'request_payload' => $payloadFel,
+                    'g4s_response'    => $felRes,
+                    'extra'           => $extra,
+                ]);
 
-    $felOk  = (bool)($felRes['ok'] ?? false);
-    $uuid   = $felRes['uuid']  ?? null;
-    $felErr = $felRes['error'] ?? null;
+                $felOk  = (bool)($felRes['ok'] ?? false);
+                $uuid   = $felRes['uuid']  ?? null;
+                $felErr = $felRes['error'] ?? null;
 
-    // 2) Intentar obtener PDF
-    if ($felOk && $uuid) {
-        if (!empty($felRes['pdf_base64'])) {
-            $pdfBase64 = (string)$felRes['pdf_base64'];
-        } else {
-            // intenta por GUID; si no, por el último XML que dejamos en storage
-            $pdfBase64 = $this->pdfFromUuidViaG4S($uuid);
-            if (!$pdfBase64 && isset($felRes['raw'])) {
-                $xmlDte = @file_get_contents(__DIR__ . '/../../storage/last_dte.xml') ?: '';
-                if ($xmlDte !== '') $pdfBase64 = $this->pdfFromXmlViaG4S($xmlDte);
-            }
-        }
-    }
+                // 2) Intentar obtener PDF
+                if ($felOk && $uuid) {
+                    if (!empty($felRes['pdf_base64'])) {
+                        $pdfBase64 = (string)$felRes['pdf_base64'];
+                    } else {
+                        // intenta por GUID; si no, por el último XML que dejamos en storage
+                        $pdfBase64 = $this->pdfFromUuidViaG4S($uuid);
+                        if (!$pdfBase64 && isset($felRes['raw'])) {
+                            $xmlDte = @file_get_contents(__DIR__ . '/../../storage/last_dte.xml') ?: '';
+                            if ($xmlDte !== '') $pdfBase64 = $this->pdfFromXmlViaG4S($xmlDte);
+                        }
+                    }
+                }
 
-    // 3) Persistir invoice + PDF
-    $pdo->beginTransaction();
-    try { $this->ensureInvoicePdfColumn($pdo); } catch (\Throwable $e) {}
+                // 3) Persistir invoice + PDF
+                $pdo->beginTransaction();
+                try { $this->ensureInvoicePdfColumn($pdo); } catch (\Throwable $e) {}
 
-    $status = $felOk ? 'CERTIFIED' : 'FAILED';
+                $status = $felOk ? 'CERTIFIED' : 'FAILED';
 
-    $stmt = $pdo->prepare("
-        INSERT INTO invoices
-        (
-            ticket_no, total, uuid, status,
-            request_json, response_json, created_at,
-            receptor_nit, entry_at, exit_at,
-            duration_min, hours_billed, billing_mode,
-            hourly_rate, monthly_rate
-        )
-        VALUES
-        (
-            :ticket_no, :total, :uuid, :status,
-            :request_json, :response_json, :created_at,
-            :receptor_nit, :entry_at, :exit_at,
-            :duration_min, :hours_billed, :billing_mode,
-            :hourly_rate, :monthly_rate
-        )
-    ");
-    $stmt->execute([
-        ':ticket_no'     => $ticketNo,
-        ':total'         => round($billingAmount, 2),
-        ':uuid'          => $uuid,
-        ':status'        => $status,
-        ':request_json'  => json_encode($body, JSON_UNESCAPED_UNICODE),
-        ':response_json' => json_encode($felRes, JSON_UNESCAPED_UNICODE),
-        ':created_at'    => $nowGT,
-        ':receptor_nit'  => $receptorNit,
-        ':entry_at'      => $entryAt,
-        ':exit_at'       => $exitAt,
-        ':duration_min'  => $durationMinPersist,
-        ':hours_billed'  => $hoursBilledPersist,
-        ':billing_mode'  => $mode,
-        ':hourly_rate'   => $hourlyRate,
-        ':monthly_rate'  => $monthlyRate,
-    ]);
+                $stmt = $pdo->prepare("
+                    INSERT INTO invoices
+                    (
+                        ticket_no, total, uuid, status,
+                        request_json, response_json, created_at,
+                        receptor_nit, entry_at, exit_at,
+                        duration_min, hours_billed, billing_mode,
+                        hourly_rate, monthly_rate
+                    )
+                    VALUES
+                    (
+                        :ticket_no, :total, :uuid, :status,
+                        :request_json, :response_json, :created_at,
+                        :receptor_nit, :entry_at, :exit_at,
+                        :duration_min, :hours_billed, :billing_mode,
+                        :hourly_rate, :monthly_rate
+                    )
+                ");
+                $stmt->execute([
+                    ':ticket_no'     => $ticketNo,
+                    ':total'         => round($billingAmount, 2),
+                    ':uuid'          => $uuid,
+                    ':status'        => $status,
+                    ':request_json'  => json_encode($body, JSON_UNESCAPED_UNICODE),
+                    ':response_json' => json_encode($felRes, JSON_UNESCAPED_UNICODE),
+                    ':created_at'    => $nowGT,
+                    ':receptor_nit'  => $receptorNit,
+                    ':entry_at'      => $entryAt,
+                    ':exit_at'       => $exitAt,
+                    ':duration_min'  => $durationMinPersist,
+                    ':hours_billed'  => $hoursBilledPersist,
+                    ':billing_mode'  => $mode,
+                    ':hourly_rate'   => $hourlyRate,
+                    ':monthly_rate'  => $monthlyRate,
+                ]);
 
-    if ($pdfBase64) {
-        try {
-            $drv = strtolower((string)$pdo->getAttribute(\PDO::ATTR_DRIVER_NAME));
-            if ($drv === 'mysql') {
-                $pdo->exec("UPDATE invoices SET pdf_base64 = " . $pdo->quote($pdfBase64) . " WHERE ticket_no = " . $pdo->quote($ticketNo) . " LIMIT 1");
+                if ($pdfBase64) {
+                    try {
+                        $drv = strtolower((string)$pdo->getAttribute(\PDO::ATTR_DRIVER_NAME));
+                        if ($drv === 'mysql') {
+                            $pdo->exec("UPDATE invoices SET pdf_base64 = " . $pdo->quote($pdfBase64) . " WHERE ticket_no = " . $pdo->quote($ticketNo) . " LIMIT 1");
+                        } else {
+                            $pdo->exec("UPDATE invoices SET pdf_base64 = " . $pdo->quote($pdfBase64) . " WHERE ticket_no = " . $pdo->quote($ticketNo));
+                        }
+                    } catch (\Throwable $e) {}
+                }
+
+                // marca ticket cerrado
+                $up = $pdo->prepare("UPDATE tickets SET status = 'CLOSED', exit_at = COALESCE(exit_at, :now_exit) WHERE ticket_no = :t");
+                $up->execute([':now_exit' => $nowGT, ':t' => $ticketNo]);
+
+                $pdo->commit();
+
+                // 4) Recupera datos de payments (si existen) para payNotify
+                try {
+                    $qp = $pdo->prepare("SELECT billin, billin_json, plate FROM payments WHERE ticket_no = :t LIMIT 1");
+                    $qp->execute([':t' => $ticketNo]);
+                    if ($pr = $qp->fetch()) {
+                        if (isset($pr['billin']) && is_numeric($pr['billin'])) $payBillin = (float)$pr['billin'];
+                        if (!empty($pr['billin_json'])) $payRecordId = (string)$pr['billin_json'];
+                        if (!empty($pr['plate'])) $payPlate = $pr['plate'];
+                    }
+                } catch (\Throwable $e) {}
             } else {
-                $pdo->exec("UPDATE invoices SET pdf_base64 = " . $pdo->quote($pdfBase64) . " WHERE ticket_no = " . $pdo->quote($ticketNo));
+                // GRACE: también deja el ticket como CLOSED y registra invoice sin FEL
+                $pdo->beginTransaction();
+                try { $this->ensureInvoicePdfColumn($pdo); } catch (\Throwable $e) {}
+
+                $stmt = $pdo->prepare("
+                    INSERT INTO invoices
+                    (
+                        ticket_no, total, uuid, status,
+                        request_json, response_json, created_at,
+                        receptor_nit, entry_at, exit_at,
+                        duration_min, hours_billed, billing_mode,
+                        hourly_rate, monthly_rate
+                    )
+                    VALUES
+                    (
+                        :ticket_no, :total, :uuid, :status,
+                        :request_json, :response_json, :created_at,
+                        :receptor_nit, :entry_at, :exit_at,
+                        :duration_min, :hours_billed, :billing_mode,
+                        :hourly_rate, :monthly_rate
+                    )
+                ");
+                $stmt->execute([
+                    ':ticket_no'     => $ticketNo,
+                    ':total'         => 0.00,
+                    ':uuid'          => null,
+                    ':status'        => 'GRATIS',
+                    ':request_json'  => json_encode($body, JSON_UNESCAPED_UNICODE),
+                    ':response_json' => json_encode(['ok'=>true,'note'=>'no FEL (grace)'], JSON_UNESCAPED_UNICODE),
+                    ':created_at'    => $nowGT,
+                    ':receptor_nit'  => $receptorNit,
+                    ':entry_at'      => $entryAt,
+                    ':exit_at'       => $exitAt,
+                    ':duration_min'  => $durationMinPersist,
+                    ':hours_billed'  => $hoursBilledPersist,
+                    ':billing_mode'  => 'grace',
+                    ':hourly_rate'   => $hourlyRate,
+                    ':monthly_rate'  => $monthlyRate,
+                ]);
+
+                $up = $pdo->prepare("UPDATE tickets SET status = 'CLOSED', exit_at = COALESCE(exit_at, :now_exit) WHERE ticket_no = :t");
+                $up->execute([':now_exit' => $nowGT, ':t' => $ticketNo]);
+
+                $pdo->commit();
             }
-        } catch (\Throwable $e) {}
-    }
-
-    // marca ticket cerrado
-    $up = $pdo->prepare("UPDATE tickets SET status = 'CLOSED', exit_at = COALESCE(exit_at, :now_exit) WHERE ticket_no = :t");
-    $up->execute([':now_exit' => $nowGT, ':t' => $ticketNo]);
-
-    $pdo->commit();
-
-    // 4) Recupera datos de payments (si existen) para payNotify
-    try {
-        $qp = $pdo->prepare("SELECT billin, billin_json, plate FROM payments WHERE ticket_no = :t LIMIT 1");
-        $qp->execute([':t' => $ticketNo]);
-        if ($pr = $qp->fetch()) {
-            if (isset($pr['billin']) && is_numeric($pr['billin'])) $payBillin = (float)$pr['billin'];
-            if (!empty($pr['billin_json'])) $payRecordId = (string)$pr['billin_json'];
-            if (!empty($pr['plate'])) $payPlate = $pr['plate'];
-        }
-    } catch (\Throwable $e) {}
-} else {
-    // GRACE: también deja el ticket como CLOSED y registra invoice sin FEL
-    $pdo->beginTransaction();
-    try { $this->ensureInvoicePdfColumn($pdo); } catch (\Throwable $e) {}
-
-    $stmt = $pdo->prepare("
-        INSERT INTO invoices
-        (
-            ticket_no, total, uuid, status,
-            request_json, response_json, created_at,
-            receptor_nit, entry_at, exit_at,
-            duration_min, hours_billed, billing_mode,
-            hourly_rate, monthly_rate
-        )
-        VALUES
-        (
-            :ticket_no, :total, :uuid, :status,
-            :request_json, :response_json, :created_at,
-            :receptor_nit, :entry_at, :exit_at,
-            :duration_min, :hours_billed, :billing_mode,
-            :hourly_rate, :monthly_rate
-        )
-    ");
-    $stmt->execute([
-        ':ticket_no'     => $ticketNo,
-        ':total'         => 0.00,
-        ':uuid'          => null,
-        ':status'        => 'GRATIS',
-        ':request_json'  => json_encode($body, JSON_UNESCAPED_UNICODE),
-        ':response_json' => json_encode(['ok'=>true,'note'=>'no FEL (grace)'], JSON_UNESCAPED_UNICODE),
-        ':created_at'    => $nowGT,
-        ':receptor_nit'  => $receptorNit,
-        ':entry_at'      => $entryAt,
-        ':exit_at'       => $exitAt,
-        ':duration_min'  => $durationMinPersist,
-        ':hours_billed'  => $hoursBilledPersist,
-        ':billing_mode'  => 'grace',
-        ':hourly_rate'   => $hourlyRate,
-        ':monthly_rate'  => $monthlyRate,
-    ]);
-
-    $up = $pdo->prepare("UPDATE tickets SET status = 'CLOSED', exit_at = COALESCE(exit_at, :now_exit) WHERE ticket_no = :t");
-    $up->execute([':now_exit' => $nowGT, ':t' => $ticketNo]);
-
-    $pdo->commit();
-}
-// ================== /FEL ==================
+            // ================== /FEL ==================
 
 
             // PayNotify

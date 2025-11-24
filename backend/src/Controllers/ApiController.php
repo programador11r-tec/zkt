@@ -1349,7 +1349,7 @@ class ApiController {
         return array_keys($arr) !== range(0, count($arr) - 1);
     }
 
-    public function invoiceOne(): void 
+    public function invoiceOne(): void
     {
         header('Content-Type: application/json; charset=utf-8');
 
@@ -1410,9 +1410,6 @@ class ApiController {
                 $clientHasMin  = is_finite($dmClient)   && $dmClient   !== null && $dmClient   > 0;
                 $clientHasRate = is_finite($rateClient) && $rateClient !== null && $rateClient > 0;
 
-                $clientComputed = null;
-                $hbUsed = null;
-
                 // Si el cliente envía minutos + tarifa, confiar en su cálculo
                 if ($clientHasMin && $clientHasRate) {
                     $hbUsed = ($hbClient && $hbClient > 0) ? (int)$hbClient : (int)ceil($dmClient / 60);
@@ -1441,7 +1438,7 @@ class ApiController {
                     $extra['final_total_source'] = 'backend';
                 }
 
-                // Solo para trazas locales (no se devuelven en JSON)
+                // trazas locales
                 $extra['client_minutes']      = $clientHasMin ? (int)$dmClient : null;
                 $extra['client_hours_billed'] = $hbClient ?? null;
                 $extra['client_hourly_rate']  = $rateClient ?? null;
@@ -1487,10 +1484,11 @@ class ApiController {
                 }
             } catch (\Throwable $e) { /* ignorar */ }
 
-            // Tasas registradas (prefiere backend; si no, usa lo que mandó el cliente)
+            // Tasas registradas
             $hourlyRate  = is_numeric($extra['hourly_rate']  ?? null) ? (float)$extra['hourly_rate']
                         : (is_finite($rateClient) ? (float)$rateClient : 0.00);
             $monthlyRate = is_numeric($extra['monthly_rate'] ?? null) ? (float)$extra['monthly_rate'] : 0.00;
+
             // ================== FEL (solo si NO es gracia) ==================
             $felOk = false;
             $uuid  = null;
@@ -1507,14 +1505,13 @@ class ApiController {
                 // 1) Enviar a FEL
                 $clientFel = new \App\Services\G4SClient($cfg);
 
-                // Construye el payload con el total final que ya decidiste arriba
                 $payloadFel = [
                     'ticket_no'    => $ticketNo,
                     'receptor_nit' => $receptorNit,
-                    'total'        => round($billingAmount, 2), // usa el monto efectivo que facturarás
+                    'total'        => round($billingAmount, 2),
                     'hours'        => $hours,
                     'minutes'      => $minutes,
-                    'mode'         => $mode,                    // 'hourly' aquí
+                    'mode'         => $mode,
                 ];
 
                 $felRes = $clientFel->submitInvoice($payloadFel);
@@ -1533,7 +1530,6 @@ class ApiController {
                     if (!empty($felRes['pdf_base64'])) {
                         $pdfBase64 = (string)$felRes['pdf_base64'];
                     } else {
-                        // intenta por GUID; si no, por el último XML que dejamos en storage
                         $pdfBase64 = $this->pdfFromUuidViaG4S($uuid);
                         if (!$pdfBase64 && isset($felRes['raw'])) {
                             $xmlDte = @file_get_contents(__DIR__ . '/../../storage/last_dte.xml') ?: '';
@@ -1601,7 +1597,7 @@ class ApiController {
 
                 $pdo->commit();
 
-                // 4) Recupera datos de payments (si existen) para payNotify
+                // 4) Recupera datos de payments para payNotify
                 try {
                     $qp = $pdo->prepare("SELECT billin, billin_json, plate FROM payments WHERE ticket_no = :t LIMIT 1");
                     $qp->execute([':t' => $ticketNo]);
@@ -1612,7 +1608,7 @@ class ApiController {
                     }
                 } catch (\Throwable $e) {}
             } else {
-                // GRACE: también deja el ticket como CLOSED y registra invoice sin FEL
+                // GRACE: registra sin FEL
                 $pdo->beginTransaction();
                 try { $this->ensureInvoicePdfColumn($pdo); } catch (\Throwable $e) {}
 
@@ -1659,12 +1655,7 @@ class ApiController {
             }
             // ================== /FEL ==================
 
-
-            // PayNotify
-            // ==== Apertura / PayNotify ====
-            // En GRACE: NO usamos payNotify. Llamamos a la misma API que usa openGateManual.
-            // En NO-GRACE: mantenemos payNotify como está.
-
+            // ==== PayNotify / Apertura ====
             $manualOpen     = false;
             $payNotifySent  = false;
             $payNotifyAck   = false;
@@ -1672,40 +1663,41 @@ class ApiController {
             $payNotifyRaw   = null;
             $payNotifyType  = null;
 
+            // ✅ extra para devolver detalle
+            $payNotifyHttpCode = null;
+            $payNotifyEndpoint = null;
+            $payNotifyPayload  = null;
+            $payNotifyJson     = null;
+
             $effectiveBilling = $isGrace ? 0.0 : round((($payBillin > 0) ? $payBillin : $billingAmount), 2);
 
             if ($isGrace) {
                 // ====== GRACE: abrir por canal de salida ======
                 $reason = 'ticket de gracia';
-                $channelId = '40288048981adc4601981b7cb2660b05'; // canal de salida solicitado
+                $channelId = '40288048981adc4601981b7cb2660b05';
 
-                // === Config base (igual a openGateManual) ===
                 $baseUrl = rtrim((string) $this->config->get('HAMACHI_PARK_BASE_URL', ''), '/');
                 if ($baseUrl === '') {
-                    // si no hay URL configurada, no podemos abrir
                     $payNotifyError = 'HAMACHI_PARK_BASE_URL no está configurado.';
                     $manualOpen = true;
                 } else {
-                    // Token: igual que openGateManual admite token por query
                     $accessToken   = (string) ($this->config->get('HAMACHI_PARK_ACCESS_TOKEN', ''));
                     $tokenQueryKey = (string) ($this->config->get('HAMACHI_PARK_TOKEN_QUERY_KEY', 'access_token'));
 
                     $query = ['channelId' => $channelId];
                     if ($accessToken !== '') $query[$tokenQueryKey] = $accessToken;
 
-                    $endpoint = $baseUrl . '/api/v1/parkBase/openGateChannel?' . http_build_query($query);
+                    $payNotifyEndpoint = $baseUrl . '/api/v1/parkBase/openGateChannel?' . http_build_query($query);
 
-                    // Headers mínimos
                     $headers = ['Accept: application/json', 'Content-Type: application/json; charset=utf-8', 'Expect:'];
                     $hostHeader = trim((string) $this->config->get('HAMACHI_PARK_HOST_HEADER', ''));
                     if ($hostHeader !== '') $headers[] = 'Host: ' . $hostHeader;
 
-                    // SSL / CONNECT_TO
                     $verifySsl = strtolower((string) $this->config->get('HAMACHI_PARK_VERIFY_SSL', 'false')) === 'true';
                     $connectTo = trim((string)$this->config->get('HAMACHI_PARK_CONNECT_TO', ''));
 
                     try {
-                        $ch = curl_init($endpoint);
+                        $ch = curl_init($payNotifyEndpoint);
                         $opts = [
                             CURLOPT_RETURNTRANSFER => true,
                             CURLOPT_CONNECTTIMEOUT => 10,
@@ -1720,7 +1712,7 @@ class ApiController {
                             CURLOPT_MAXREDIRS      => 5,
                             CURLOPT_AUTOREFERER    => true,
                             CURLOPT_POST           => true,
-                            CURLOPT_POSTFIELDS     => '{}', // POST forzado como en openGateManual
+                            CURLOPT_POSTFIELDS     => '{}',
                             CURLOPT_HEADER         => true,
                         ];
                         if (!$verifySsl) { $opts[CURLOPT_SSL_VERIFYPEER]=false; $opts[CURLOPT_SSL_VERIFYHOST]=false; }
@@ -1736,10 +1728,17 @@ class ApiController {
                             $info   = curl_getinfo($ch) ?: [];
                             $status = (int)($info['http_code'] ?? 0);
                             $hsize  = (int)($info['header_size'] ?? 0);
-                            $body   = substr($resp, $hsize) ?: '';
+                            $bodyResp = substr($resp, $hsize) ?: '';
+                            $ctype = (string)($info['content_type'] ?? '');
                             curl_close($ch);
 
-                            $json = json_decode($body, true);
+                            $payNotifyHttpCode = $status;
+                            $payNotifyRaw      = $bodyResp;
+                            $payNotifyType     = $ctype;
+
+                            $json = json_decode($bodyResp, true);
+                            if (json_last_error() === JSON_ERROR_NONE) $payNotifyJson = $json;
+
                             $code    = $json['code'] ?? ($json['ret'] ?? ($json['status'] ?? null));
                             $message = $json['message'] ?? ($json['msg'] ?? ($json['detail'] ?? null));
                             $okGate  = ($status === 200) && (
@@ -1748,7 +1747,7 @@ class ApiController {
                                 ($json['success'] ?? false) === true
                             );
 
-                            $manualOpen = !$okGate; // si falla, que el front muestre botón de apertura manual
+                            $manualOpen = !$okGate;
                             if (!$okGate) $payNotifyError = 'Apertura (grace) falló: '.($message ?? "HTTP $status");
                         }
                     } catch (\Throwable $e) {
@@ -1758,7 +1757,7 @@ class ApiController {
                 }
 
             } else {
-                // ====== NO GRACE: flujo payNotify original ======
+                // ====== NO GRACE: payNotify original ======
                 $shouldNotify = ($felOk && $effectiveBilling > 0);
 
                 if ($shouldNotify) {
@@ -1776,10 +1775,10 @@ class ApiController {
                             $payNotifyError = 'Faltan carNumber/recordId para payNotify';
                             $manualOpen = true;
                         } else {
-                            $endpoint = $baseUrl . '/api/v1/parkCost/payNotify';
+                            $payNotifyEndpoint = $baseUrl . '/api/v1/parkCost/payNotify';
                             $accessToken = (string)($this->config->get('HAMACHI_PARK_ACCESS_TOKEN', ''));
                             if ($accessToken !== '') {
-                                $endpoint .= (strpos($endpoint, '?') === false ? '?' : '&') . 'access_token=' . urlencode($accessToken);
+                                $payNotifyEndpoint .= (strpos($payNotifyEndpoint, '?') === false ? '?' : '&') . 'access_token=' . urlencode($accessToken);
                             }
 
                             $headers = ['Accept: application/json', 'Content-Type: application/json'];
@@ -1797,8 +1796,11 @@ class ApiController {
                                 'recordId'    => $recordId,
                             ];
 
+                            // ✅ guardar payload para devolverlo
+                            $payNotifyPayload = $notifyPayload;
+
                             try {
-                                $ch = curl_init($endpoint);
+                                $ch = curl_init($payNotifyEndpoint);
                                 curl_setopt_array($ch, [
                                     CURLOPT_RETURNTRANSFER => true,
                                     CURLOPT_CONNECTTIMEOUT => 15,
@@ -1828,22 +1830,24 @@ class ApiController {
                                     $info   = curl_getinfo($ch) ?: [];
                                     $status = (int)($info['http_code'] ?? 0);
                                     $hsize  = (int)($info['header_size'] ?? 0);
-                                    $body  = substr($resp, $hsize) ?: '';
+                                    $bodyResp  = substr($resp, $hsize) ?: '';
                                     $ctype = (string)($info['content_type'] ?? '');
                                     curl_close($ch);
 
-                                    $payNotifyRaw  = $body;
-                                    $payNotifyType = $ctype;
+                                    $payNotifyHttpCode = $status;
+                                    $payNotifyRaw      = $bodyResp;
+                                    $payNotifyType     = $ctype;
 
                                     $payNotifySent = ($status >= 200 && $status < 300);
 
                                     $json = null;
                                     $looksJson = stripos($ctype, 'application/json') !== false
-                                            || (strlen($body) && ($body[0] === '{' || $body[0] === '['));
+                                            || (strlen($bodyResp) && ($bodyResp[0] === '{' || $bodyResp[0] === '['));
                                     if ($looksJson) {
-                                        $tmp = json_decode($body, true);
+                                        $tmp = json_decode($bodyResp, true);
                                         if (json_last_error() === JSON_ERROR_NONE) $json = $tmp;
                                     }
+                                    if (is_array($json)) $payNotifyJson = $json;
 
                                     if ($payNotifySent && is_array($json)) {
                                         $payNotifyAck = (isset($json['code']) && (int)$json['code'] === 0);
@@ -1863,6 +1867,7 @@ class ApiController {
                     }
                 }
             }
+
             echo json_encode([
                 'ok'               => $isGrace ? true : $felOk,
                 'uuid'             => $uuid,
@@ -1870,12 +1875,22 @@ class ApiController {
                 'error'            => $isGrace ? null : $felErr,
                 'billing_amount'   => $isGrace ? 0.00 : ($payBillin > 0 ? $payBillin : (float)$billingAmount),
                 'manual_open'      => $manualOpen,
+
+                // PayNotify resumen
                 'pay_notify_sent'  => $payNotifySent,
                 'pay_notify_ack'   => $payNotifyAck,
                 'pay_notify_error' => $payNotifyError,
+
+                // ✅ PayNotify detalle (lo que pasó)
+                'pay_notify_http_code' => $payNotifyHttpCode,
+                'pay_notify_endpoint'  => $payNotifyEndpoint,
+                'pay_notify_payload'   => $payNotifyPayload,
+                'pay_notify_raw'       => $payNotifyRaw,
+                'pay_notify_json'      => $payNotifyJson,
+                'pay_notify_type'      => $payNotifyType,
+
                 'has_pdf_base64'   => (bool)$pdfBase64,
 
-                // TZ/diag útiles (puedes quitar si no quieres nada de diag)
                 'tz' => [
                     'php_timezone' => $phpTz,
                     'php_now'      => $phpNow,
@@ -2315,6 +2330,7 @@ class ApiController {
                 SELECT
                     i.id,
                     i.ticket_no,
+                    t.plate AS plate,
                     COALESCE(t.exit_at, t.entry_at, i.created_at) AS fecha,
                     i.total,
                     i.uuid,
@@ -2360,7 +2376,7 @@ class ApiController {
             \App\Utils\Http::json(['ok'=>false,'error'=>$e->getMessage()], 500);
         }
     }
-    
+
     public function felPdf() {
         try {
             $uuid = $_GET['uuid'] ?? '';
@@ -3362,129 +3378,128 @@ class ApiController {
         }
     }
 
-public function reportManualInvoiceList(): void
-{
-    header('Content-Type: application/json; charset=utf-8');
+    public function reportManualInvoiceList(): void
+    {
+        header('Content-Type: application/json; charset=utf-8');
 
-    try {
-        /** @var \Config\Config $cfg */
-        $cfg = $this->config;
-        $pdo = \App\Utils\DB::pdo($cfg);
-        $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
-        $pdo->setAttribute(\PDO::ATTR_DEFAULT_FETCH_MODE, \PDO::FETCH_ASSOC);
+        try {
+            /** @var \Config\Config $cfg */
+            $cfg = $this->config;
+            $pdo = \App\Utils\DB::pdo($cfg);
+            $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
+            $pdo->setAttribute(\PDO::ATTR_DEFAULT_FETCH_MODE, \PDO::FETCH_ASSOC);
 
-        // Filtros que manda el front
-        $from   = $_GET['from']   ?? null;
-        $to     = $_GET['to']     ?? null;
-        $mode   = $_GET['mode']   ?? null;   // ANY | custom | monthly | grace
-        $nit    = $_GET['nit']    ?? null;
-        $reason = $_GET['reason'] ?? null;
+            // Filtros que manda el front
+            $from   = $_GET['from']   ?? null;
+            $to     = $_GET['to']     ?? null;
+            $mode   = $_GET['mode']   ?? null;   // ANY | custom | monthly | grace
+            $nit    = $_GET['nit']    ?? null;
+            $reason = $_GET['reason'] ?? null;
 
-        $sql = "
-            SELECT
-                id,
-                created_at,
-                reason,
-                receptor_nit,
-                receptor_name,
-                amount,
-                used_monthly,
-                send_to_fel,
-                fel_uuid,
-                fel_status,
-                fel_message,
-                fel_pdf_base64,
+            $sql = "
+                SELECT
+                    id,
+                    created_at,
+                    reason,
+                    receptor_nit,
+                    receptor_name,
+                    amount,
+                    used_monthly,
+                    send_to_fel,
+                    fel_uuid,
+                    fel_status,
+                    fel_message,
+                    fel_pdf_base64,
 
-                -- lo que espera el front como 'mode'
-                CASE
-                    WHEN used_monthly = 1 THEN 'monthly'
-                    WHEN (send_to_fel = 0 OR amount = 0) THEN 'grace'
-                    ELSE 'custom'
-                END AS mode,
+                    -- lo que espera el front como 'mode'
+                    CASE
+                        WHEN used_monthly = 1 THEN 'monthly'
+                        WHEN (send_to_fel = 0 OR amount = 0) THEN 'grace'
+                        ELSE 'custom'
+                    END AS mode,
 
-                -- lo que espera el front como 'status'
-                fel_status AS status
-            FROM manual_invoices
-            WHERE 1=1
-        ";
+                    -- lo que espera el front como 'status'
+                    fel_status AS status
+                FROM manual_invoices
+                WHERE 1=1
+            ";
 
-        $params = [];
+            $params = [];
 
-        if ($from) {
-            $sql .= " AND DATE(created_at) >= :from";
-            $params[':from'] = $from;
-        }
-
-        if ($to) {
-            $sql .= " AND DATE(created_at) <= :to";
-            $params[':to'] = $to;
-        }
-
-        if ($nit) {
-            $sql .= " AND receptor_nit LIKE :nit";
-            $params[':nit'] = '%' . $nit . '%';
-        }
-
-        if ($reason) {
-            $sql .= " AND reason LIKE :reason";
-            $params[':reason'] = '%' . $reason . '%';
-        }
-
-        // filtro por modo (como el combo del front)
-        if ($mode && $mode !== 'ANY') {
-            if ($mode === 'monthly') {
-                $sql .= " AND used_monthly = 1";
-            } elseif ($mode === 'grace') {
-                $sql .= " AND (send_to_fel = 0 OR amount = 0)";
-            } else {
-                // 'custom' → todo lo que NO es mensual y NO es gracia
-                $sql .= " AND (used_monthly IS NULL OR used_monthly = 0)
-                          AND (send_to_fel = 1 AND amount > 0)";
-            }
-        }
-
-        $sql .= " ORDER BY created_at DESC LIMIT 1000";
-
-        $stmt = $pdo->prepare($sql);
-        $stmt->execute($params);
-        $rows = $stmt->fetchAll();
-
-        // ✅ Normalizar fel_uuid para que el front no reciba 1/0 como UUID
-        foreach ($rows as &$r) {
-            $uuid = trim((string)($r['fel_uuid'] ?? ''));
-
-            // Si viene vacío o como bandera (1/0), lo anulamos
-            if ($uuid === '' || $uuid === '0' || $uuid === '1') {
-                $uuid = null;
+            if ($from) {
+                $sql .= " AND DATE(created_at) >= :from";
+                $params[':from'] = $from;
             }
 
-            $r['fel_uuid'] = $uuid;
+            if ($to) {
+                $sql .= " AND DATE(created_at) <= :to";
+                $params[':to'] = $to;
+            }
 
-            // Alias extra por si el front usa uuid como en emitidas
-            $r['uuid'] = $uuid;
+            if ($nit) {
+                $sql .= " AND receptor_nit LIKE :nit";
+                $params[':nit'] = '%' . $nit . '%';
+            }
 
-            // Casts seguros
-            $r['amount'] = (float)($r['amount'] ?? 0);
-            $r['used_monthly'] = (int)($r['used_monthly'] ?? 0);
-            $r['send_to_fel']  = (int)($r['send_to_fel'] ?? 0);
-            $r['status'] = strtoupper((string)($r['status'] ?? $r['fel_status'] ?? ''));
+            if ($reason) {
+                $sql .= " AND reason LIKE :reason";
+                $params[':reason'] = '%' . $reason . '%';
+            }
+
+            // filtro por modo (como el combo del front)
+            if ($mode && $mode !== 'ANY') {
+                if ($mode === 'monthly') {
+                    $sql .= " AND used_monthly = 1";
+                } elseif ($mode === 'grace') {
+                    $sql .= " AND (send_to_fel = 0 OR amount = 0)";
+                } else {
+                    // 'custom' → todo lo que NO es mensual y NO es gracia
+                    $sql .= " AND (used_monthly IS NULL OR used_monthly = 0)
+                            AND (send_to_fel = 1 AND amount > 0)";
+                }
+            }
+
+            $sql .= " ORDER BY created_at DESC LIMIT 1000";
+
+            $stmt = $pdo->prepare($sql);
+            $stmt->execute($params);
+            $rows = $stmt->fetchAll();
+
+            // ✅ Normalizar fel_uuid para que el front no reciba 1/0 como UUID
+            foreach ($rows as &$r) {
+                $uuid = trim((string)($r['fel_uuid'] ?? ''));
+
+                // Si viene vacío o como bandera (1/0), lo anulamos
+                if ($uuid === '' || $uuid === '0' || $uuid === '1') {
+                    $uuid = null;
+                }
+
+                $r['fel_uuid'] = $uuid;
+
+                // Alias extra por si el front usa uuid como en emitidas
+                $r['uuid'] = $uuid;
+
+                // Casts seguros
+                $r['amount'] = (float)($r['amount'] ?? 0);
+                $r['used_monthly'] = (int)($r['used_monthly'] ?? 0);
+                $r['send_to_fel']  = (int)($r['send_to_fel'] ?? 0);
+                $r['status'] = strtoupper((string)($r['status'] ?? $r['fel_status'] ?? ''));
+            }
+            unset($r);
+
+            echo json_encode([
+                'ok'   => true,
+                'rows' => $rows,      // 👈 lo que usa el front
+                'data' => $rows,      // opcional: compatibilidad
+            ], JSON_UNESCAPED_UNICODE);
+
+        } catch (\Throwable $e) {
+            echo json_encode([
+                'ok'    => false,
+                'error' => 'manualInvoiceList: ' . $e->getMessage(),
+            ]);
         }
-        unset($r);
-
-        echo json_encode([
-            'ok'   => true,
-            'rows' => $rows,      // 👈 lo que usa el front
-            'data' => $rows,      // opcional: compatibilidad
-        ], JSON_UNESCAPED_UNICODE);
-
-    } catch (\Throwable $e) {
-        echo json_encode([
-            'ok'    => false,
-            'error' => 'manualInvoiceList: ' . $e->getMessage(),
-        ]);
     }
-}
-
 
     // En tu controlador FEL (por ejemplo FelController.php)
     /**
@@ -3761,7 +3776,6 @@ public function reportManualInvoiceList(): void
 
         return $pdfBase64;
     }
-
 
     public function invoicePdf(): void
     {

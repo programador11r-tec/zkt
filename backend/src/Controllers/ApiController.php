@@ -533,17 +533,20 @@ class ApiController {
             $driver = 'mysql';
         }
 
-        // Columnas disponibles
+        // Columnas disponibles en tickets
         $columns      = $this->getTableColumns($pdo, 'tickets');
         $hasSource    = isset($columns['source']);
         $hasRawJson   = isset($columns['raw_json']);
         $hasUpdatedAt = isset($columns['updated_at']);
 
-        // --- PREPARED: existencia ---
-        $existsSql = 'SELECT 1 FROM tickets WHERE ticket_no = :ticket_no LIMIT 1';
+        // --- PREPARED: existencia en tickets ---
+        $existsSql  = 'SELECT 1 FROM tickets WHERE ticket_no = :ticket_no LIMIT 1';
         $existsStmt = $pdo->prepare($existsSql);
 
-        // --- PREPARED: insert puro ---
+        // --- Cargar tickets que ya dieron error desde el log ---
+        $erroredTicketNos = $this->loadErroredTicketNosFromLog(); // [ticket_no => true]
+
+        // --- PREPARED: insert puro en tickets ---
         $insertColumns = ['ticket_no','plate','status','entry_at','exit_at','duration_min','amount'];
         $placeholders  = [':ticket_no',':plate',':status',':entry_at',':exit_at',':duration_min',':amount'];
 
@@ -551,7 +554,7 @@ class ApiController {
         if ($hasRawJson)   { $insertColumns[] = 'raw_json';   $placeholders[] = ':raw_json'; }
         if ($hasUpdatedAt) { $insertColumns[] = 'updated_at'; $placeholders[] = ':updated_at'; }
 
-        $insertSql = sprintf(
+        $insertSql  = sprintf(
             'INSERT INTO tickets (%s) VALUES (%s)',
             implode(',', $insertColumns),
             implode(',', $placeholders)
@@ -563,38 +566,68 @@ class ApiController {
 
         foreach ($rows as $rowRaw) {
             $idx++;
-            $row = is_array($rowRaw) ? $this->normalizeParkRecordRow($rowRaw) : null;
-            if ($row === null) {
-                Logger::warning('tickets.normalize.skip', ['i' => $idx, 'rowRaw_preview' => substr(json_encode($rowRaw),0,300)]);
-                continue;
-            }
-
             $cid = $this->newCorrelationId('tkt');
             $t0  = microtime(true);
+
+            $row = is_array($rowRaw) ? $this->normalizeParkRecordRow($rowRaw) : null;
+            if ($row === null) {
+                Logger::warning('tickets.normalize.skip', [
+                    'cid'            => $cid,
+                    'i'              => $idx,
+                    'rowRaw_preview' => substr(json_encode($rowRaw), 0, 300),
+                ]);
+
+                // También guardamos en el archivo de errores
+                $this->appendTicketErrorToLog([
+                    'ticket_no'    => $rowRaw['ticket_no'] ?? '',
+                    'plate'        => $rowRaw['plate'] ?? null,
+                    'error'        => 'Normalización fallida (row nulo).',
+                    'raw_json'     => json_encode($rowRaw),
+                    'created_at'   => (new \DateTime('now'))->format('Y-m-d H:i:s'),
+                ]);
+
+                continue;
+            }
 
             $ticketNo = $row['ticket_no'] ?? null;
             $plate    = $row['plate'] ?? null;
 
-            /*Logger::info('tickets.check.begin', [
-                'cid' => $cid, 'i' => $idx, 'ticket_no' => $ticketNo, 'plate' => $plate
-            ]);*/
+            if ($ticketNo === null || $ticketNo === '') {
+                Logger::warning('tickets.skip.no_ticket_no', [
+                    'cid' => $cid,
+                    'i'   => $idx,
+                    'row' => substr(json_encode($row), 0, 300),
+                ]);
+                continue;
+            }
 
-            // 1) ¿Existe ya?
+            // 0) ¿Este ticket ya está en el log de errores? → no lo intentamos de nuevo
+            if (isset($erroredTicketNos[$ticketNo])) {
+                Logger::info('tickets.skip.already_in_error_log', [
+                    'cid'       => $cid,
+                    'i'         => $idx,
+                    'ticket_no' => $ticketNo,
+                    'elapsed_ms'=> $this->msSince($t0),
+                ]);
+                continue;
+            }
+
+            // 1) ¿Existe ya en tickets?
             $existsStmt->execute([':ticket_no' => $ticketNo]);
             $exists = (bool) $existsStmt->fetchColumn();
 
             if ($exists) {
                 // NO insertar / NO actualizar / NO billing: solo saltar
                 /*Logger::info('tickets.skip.exists', [
-                    'cid' => $cid,
-                    'i'   => $idx,
-                    'ticket_no' => $ticketNo,
+                    'cid'        => $cid,
+                    'i'          => $idx,
+                    'ticket_no'  => $ticketNo,
                     'elapsed_ms' => $this->msSince($t0),
                 ]);*/
                 continue;
             }
 
-            // 2) Insert puro
+            // 2) Insert puro en tickets
             $params = [
                 ':ticket_no'    => $ticketNo,
                 ':plate'        => $plate,
@@ -605,51 +638,55 @@ class ApiController {
                 ':amount'       => $row['amount'] ?? null,
             ];
             if ($hasSource)    { $params[':source']    = $row['source'] ?? null; }
-            if ($hasRawJson)   { $params[':raw_json']  = $row['raw_json'] ?? null; }
+            if ($hasRawJson)   { $params[':raw_json']  = $row['raw_json'] ?? json_encode($rowRaw); }
             if ($hasUpdatedAt) {
                 $params[':updated_at'] = (new \DateTime('now'))->format('Y-m-d H:i:s');
             }
 
-           /* Logger::info('tickets.insert.begin', [
-                'cid' => $cid, 'i' => $idx, 'ticket_no' => $ticketNo, 'plate' => $plate
-            ]);*/
-
-            $insertStmt->execute($params);
-            $inserted++;
-
-          /*  Logger::info('tickets.insert.ok', [
-                'cid' => $cid,
-                'i'   => $idx,
-                'ticket_no' => $ticketNo,
-                'elapsed_ms' => $this->msSince($t0),
-            ]);*/
-
-            // 3) BILLING: solo para nuevos inserts
-            $b0 = microtime(true);
             try {
-                $billingEnabled = strtolower((string)$this->config->get('BILLING_ENABLED','true')) === 'true';
-                if (!$billingEnabled) {
-                    //Logger::info('billing.skip.disabled', ['cid' => $cid, 'ticket_no' => $ticketNo]);
-                } else {
-                    //Logger::info('billing.ensure.begin', ['cid' => $cid, 'ticket_no' => $ticketNo, 'plate' => $plate]);
-                    $this->ensurePaymentStub($pdo, $row);
-                    //Logger::info('billing.ensure.done', ['cid' => $cid, 'ticket_no' => $ticketNo, 'elapsed_ms' => $this->msSince($b0)]);
-                }
-            } catch (\Throwable $e) {
-                Logger::error('billing.ensure.failed', [
-                    'cid' => $cid,
-                    'ticket_no' => $ticketNo,
-                    'error' => $e->getMessage(),
-                    'elapsed_ms' => $this->msSince($b0),
-                ]);
-            }
+                $insertStmt->execute($params);
+                $inserted++;
 
-            /*Logger::info('tickets.process.end', [
-                'cid' => $cid,
-                'i'   => $idx,
-                'ticket_no' => $ticketNo,
-                'total_ms'  => $this->msSince($t0),
-            ]);*/
+                // 3) BILLING: solo para nuevos inserts
+                $b0 = microtime(true);
+                try {
+                    $billingEnabled = strtolower((string)$this->config->get('BILLING_ENABLED','true')) === 'true';
+                    if ($billingEnabled) {
+                        $this->ensurePaymentStub($pdo, $row);
+                    }
+                } catch (\Throwable $e) {
+                    Logger::error('billing.ensure.failed', [
+                        'cid'        => $cid,
+                        'ticket_no'  => $ticketNo,
+                        'error'      => $e->getMessage(),
+                        'elapsed_ms' => $this->msSince($b0),
+                    ]);
+                }
+
+            } catch (\Throwable $e) {
+                // Si falla el INSERT en tickets, lo mandamos al archivo de log
+                Logger::error('tickets.insert.failed', [
+                    'cid'        => $cid,
+                    'i'          => $idx,
+                    'ticket_no'  => $ticketNo,
+                    'error'      => $e->getMessage(),
+                    'elapsed_ms' => $this->msSince($t0),
+                ]);
+
+                $this->appendTicketErrorToLog([
+                    'ticket_no'  => $ticketNo,
+                    'plate'      => $plate,
+                    'error'      => $e->getMessage(),
+                    'raw_json'   => json_encode($rowRaw),
+                    'created_at' => (new \DateTime('now'))->format('Y-m-d H:i:s'),
+                ]);
+
+                // Lo agregamos también al array en memoria para esta corrida
+                $erroredTicketNos[$ticketNo] = true;
+
+                // Pasamos al siguiente ticket sin romper todo el proceso
+                continue;
+            }
         }
 
         return $inserted; // cantidad realmente insertada
@@ -3823,8 +3860,72 @@ class ApiController {
         echo $pdfBinary;
     }
 
+    /**
+     * Ruta del archivo donde se guardan los errores de tickets.
+     * Puedes sobreescribirla con TICKET_ERROR_LOG_FILE en tu config/.env
+     */
+    private function getTicketErrorLogPath(): string
+    {
+        $cfg = (string)$this->config->get('TICKET_ERROR_LOG_FILE', '');
+        if ($cfg !== '') {
+            return $cfg;
+        }
 
+        // Ajusta si tu estructura es distinta:
+        // dirname(__DIR__, 3) asumiendo: backend/src/App/Controllers/EstaClase.php
+        $base = dirname(__DIR__, 3); // → backend
+        return $base . '/storage/logs/ticket_import_errors.log';
+    }
 
+    /**
+     * Lee el log y devuelve un array asociativo [ticket_no => true]
+     * para saber qué tickets ya dieron error.
+     */
+    private function loadErroredTicketNosFromLog(): array
+    {
+        $file = $this->getTicketErrorLogPath();
+        if (!is_file($file)) {
+            return [];
+        }
+
+        $fh = @fopen($file, 'r');
+        if (!$fh) {
+            return [];
+        }
+
+        $result = [];
+        while (($line = fgets($fh)) !== false) {
+            $line = trim($line);
+            if ($line === '') continue;
+
+            $data = json_decode($line, true);
+            if (!is_array($data)) continue;
+
+            $tn = $data['ticket_no'] ?? null;
+            if ($tn) {
+                $result[$tn] = true;
+            }
+        }
+        fclose($fh);
+
+        return $result;
+    }
+
+    /**
+     * Agrega una línea JSON al log de errores de tickets.
+     */
+    private function appendTicketErrorToLog(array $payload): void
+    {
+        $file = $this->getTicketErrorLogPath();
+        $dir  = dirname($file);
+
+        if (!is_dir($dir)) {
+            @mkdir($dir, 0775, true);
+        }
+
+        $line = json_encode($payload, JSON_UNESCAPED_UNICODE);
+        @file_put_contents($file, $line . PHP_EOL, FILE_APPEND | LOCK_EX);
+    }
 
 
 }

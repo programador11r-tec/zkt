@@ -1386,7 +1386,7 @@ class ApiController {
         return array_keys($arr) !== range(0, count($arr) - 1);
     }
 
-    public function invoiceOne(): void
+    public function invoiceOne(): void 
     {
         header('Content-Type: application/json; charset=utf-8');
 
@@ -1401,12 +1401,17 @@ class ApiController {
 
             $this->debugLog('fel_invoice_in.txt', ['body' => $body, 'server' => $_SERVER]);
 
-            if ($ticketNo === '') { echo json_encode(['ok' => false, 'error' => 'ticket_no requerido']); return; }
+            if ($ticketNo === '') {
+                echo json_encode(['ok' => false, 'error' => 'ticket_no requerido']);
+                return;
+            }
             if ($mode === 'custom' && (!is_finite($customTotal) || $customTotal <= 0)) {
-                echo json_encode(['ok' => false, 'error' => 'custom_total inválido']); return;
+                echo json_encode(['ok' => false, 'error' => 'custom_total inválido']);
+                return;
             }
             if ($receptorNit !== 'CF' && !ctype_digit($receptorNit)) {
-                echo json_encode(['ok' => false, 'error' => 'NIT inválido (use CF o solo dígitos)']); return;
+                echo json_encode(['ok' => false, 'error' => 'NIT inválido (use CF o solo dígitos)']);
+                return;
             }
 
             $isGrace = ($mode === 'grace');
@@ -1509,17 +1514,54 @@ class ApiController {
             }
             $this->debugLog('tz_diag_invoice_one.txt', ['php_tz'=>$phpTz, 'php_now'=>$phpNow, 'mysql'=>$mysqlTzDiag]);
 
-            // Info ticket
-            $entryAt = $exitAt = $plate = null;
+            // ================== VALIDACIÓN DEL TICKET ==================
+            $entryAt = $exitAt = $plate = $ticketStatus = null;
             try {
-                $q = $pdo->prepare("SELECT entry_at, exit_at, plate FROM tickets WHERE ticket_no = :t LIMIT 1");
+                $q = $pdo->prepare("SELECT entry_at, exit_at, plate, status FROM tickets WHERE ticket_no = :t LIMIT 1");
                 $q->execute([':t' => $ticketNo]);
-                if ($row = $q->fetch()) {
-                    $entryAt = $row['entry_at'] ?? null;
-                    $exitAt  = $row['exit_at']  ?? null;
-                    $plate   = $row['plate']    ?? null;
+                if ($row = $q->fetch(\PDO::FETCH_ASSOC)) {
+                    $entryAt      = $row['entry_at'] ?? null;
+                    $exitAt       = $row['exit_at']  ?? null;
+                    $plate        = $row['plate']    ?? null;
+                    $ticketStatus = strtoupper((string)($row['status'] ?? ''));
+                } else {
+                    $this->debugLog('fel_invoice_ticket_not_found.txt', [
+                        'ticket_no' => $ticketNo,
+                        'mode'      => $mode,
+                        'body'      => $body,
+                    ]);
+                    echo json_encode([
+                        'ok'    => false,
+                        'error' => 'El ticket no existe en la base de datos. Verifique el número antes de facturar.',
+                    ], JSON_UNESCAPED_UNICODE);
+                    return;
                 }
-            } catch (\Throwable $e) { /* ignorar */ }
+            } catch (\Throwable $e) {
+                $this->debugLog('fel_invoice_ticket_query_err.txt', [
+                    'ticket_no' => $ticketNo,
+                    'mode'      => $mode,
+                    'exception' => $e->getMessage(),
+                ]);
+                echo json_encode([
+                    'ok'    => false,
+                    'error' => 'Error al consultar el ticket en la base de datos: ' . $e->getMessage(),
+                ], JSON_UNESCAPED_UNICODE);
+                return;
+            }
+
+            // Si el ticket ya está cerrado, marcamos el error de validación
+            if ($ticketStatus === 'CLOSED') {
+                $this->debugLog('fel_invoice_ticket_closed.txt', [
+                    'ticket_no'     => $ticketNo,
+                    'mode'          => $mode,
+                    'ticket_status' => $ticketStatus,
+                ]);
+                echo json_encode([
+                    'ok'    => false,
+                    'error' => 'El ticket ya fue cerrado/facturado previamente. No se puede usar para abrir de nuevo.',
+                ], JSON_UNESCAPED_UNICODE);
+                return;
+            }
 
             // Tasas registradas
             $hourlyRate  = is_numeric($extra['hourly_rate']  ?? null) ? (float)$extra['hourly_rate']
@@ -1638,7 +1680,7 @@ class ApiController {
                 try {
                     $qp = $pdo->prepare("SELECT billin, billin_json, plate FROM payments WHERE ticket_no = :t LIMIT 1");
                     $qp->execute([':t' => $ticketNo]);
-                    if ($pr = $qp->fetch()) {
+                    if ($pr = $qp->fetch(\PDO::FETCH_ASSOC)) {
                         if (isset($pr['billin']) && is_numeric($pr['billin'])) $payBillin = (float)$pr['billin'];
                         if (!empty($pr['billin_json'])) $payRecordId = (string)$pr['billin_json'];
                         if (!empty($pr['plate'])) $payPlate = $pr['plate'];
@@ -1758,7 +1800,8 @@ class ApiController {
 
                         $resp = curl_exec($ch);
                         if ($resp === false) {
-                            $payNotifyError = curl_error($ch) ?: 'Error desconocido';
+                            $curlErr = curl_error($ch) ?: 'Error desconocido';
+                            $payNotifyError = 'No se pudo contactar al API de parking (grace). Detalle cURL: ' . $curlErr;
                             curl_close($ch);
                             $manualOpen = true;
                         } else {
@@ -1785,10 +1828,12 @@ class ApiController {
                             );
 
                             $manualOpen = !$okGate;
-                            if (!$okGate) $payNotifyError = 'Apertura (grace) falló: '.($message ?? "HTTP $status");
+                            if (!$okGate) {
+                                $payNotifyError = 'Apertura (grace) falló. HTTP ' . $status . ' Mensaje: ' . ($message ?? 'sin detalle');
+                            }
                         }
                     } catch (\Throwable $e) {
-                        $payNotifyError = $e->getMessage();
+                        $payNotifyError = 'Excepción al llamar API de parking (grace): ' . $e->getMessage();
                         $manualOpen = true;
                     }
                 }
@@ -1809,7 +1854,7 @@ class ApiController {
                         $recordId  = $payRecordId;
 
                         if ($recordId === '0' || $recordId === '' || $carNumber === '') {
-                            $payNotifyError = 'Faltan carNumber/recordId para payNotify';
+                            $payNotifyError = 'Faltan carNumber/recordId para payNotify (no se puede validar ticket en el sistema de parqueo).';
                             $manualOpen = true;
                         } else {
                             $payNotifyEndpoint = $baseUrl . '/api/v1/parkCost/payNotify';
@@ -1860,7 +1905,8 @@ class ApiController {
 
                                 $resp = curl_exec($ch);
                                 if ($resp === false) {
-                                    $payNotifyError = curl_error($ch) ?: 'Error desconocido';
+                                    $curlErr = curl_error($ch) ?: 'Error desconocido';
+                                    $payNotifyError = 'No se pudo contactar al API de parking (payNotify). Detalle cURL: ' . $curlErr;
                                     curl_close($ch);
                                     $manualOpen = true;
                                 } else {
@@ -1888,18 +1934,36 @@ class ApiController {
 
                                     if ($payNotifySent && is_array($json)) {
                                         $payNotifyAck = (isset($json['code']) && (int)$json['code'] === 0);
-                                        if (!$payNotifyAck) $payNotifyError = isset($json['message']) ? (string)$json['message'] : 'ACK inválido';
+                                        if (!$payNotifyAck) {
+                                            $msg = isset($json['message']) ? (string)$json['message'] : 'ACK inválido';
+                                            $payNotifyError = 'API de parking respondió pero no confirmó la validación del ticket: ' . $msg;
+                                        }
                                     } else if (!$payNotifySent) {
-                                        $payNotifyError = "HTTP $status";
+                                        $payNotifyError = "El API de parking respondió con HTTP $status (no se pudo validar el ticket).";
                                     }
 
                                     if (!$payNotifySent || !$payNotifyAck) $manualOpen = true;
                                 }
 
                             } catch (\Throwable $e) {
-                                $payNotifyError = $e->getMessage();
+                                $payNotifyError = 'Excepción al llamar API de parking (payNotify): ' . $e->getMessage();
                                 $manualOpen = true;
                             }
+
+                            // log de paynotify con correlación
+                            $this->debugLog('pay_notify_diag.txt', [
+                                'cid'                => $cid,
+                                'ticket_no'          => $ticketNo,
+                                'endpoint'           => $payNotifyEndpoint,
+                                'payload'            => $notifyPayload,
+                                'http_code'          => $payNotifyHttpCode,
+                                'error'              => $payNotifyError,
+                                'manual_open'        => $manualOpen,
+                                'pay_notify_sent'    => $payNotifySent,
+                                'pay_notify_ack'     => $payNotifyAck,
+                                'pay_notify_raw'     => $payNotifyRaw,
+                                'pay_notify_json'    => $payNotifyJson,
+                            ]);
                         }
                     }
                 }
@@ -1938,7 +2002,7 @@ class ApiController {
 
         } catch (\Throwable $e) {
             if (isset($pdo) && $pdo->inTransaction()) $pdo->rollBack();
-            $this->debugLog('fel_invoice_exc.txt', ['exception' => $e->getMessage()]);
+            $this->debugLog('fel_invoice_exc.txt', ['exception' => $e->getMessage(), 'ticket_no' => $ticketNo ?? null]);
             echo json_encode(['ok' => false, 'error' => $e->getMessage()]);
         }
     }

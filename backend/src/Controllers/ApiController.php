@@ -1839,7 +1839,7 @@ class ApiController {
                 }
 
             } else {
-                // ====== NO GRACE: payNotify original ======
+                // ====== NO GRACE: payNotify con reintentos (hasta 3) ======
                 $shouldNotify = ($felOk && $effectiveBilling > 0);
 
                 if ($shouldNotify) {
@@ -1881,88 +1881,152 @@ class ApiController {
                             // ✅ guardar payload para devolverlo
                             $payNotifyPayload = $notifyPayload;
 
-                            try {
-                                $ch = curl_init($payNotifyEndpoint);
-                                curl_setopt_array($ch, [
-                                    CURLOPT_RETURNTRANSFER => true,
-                                    CURLOPT_CONNECTTIMEOUT => 15,
-                                    CURLOPT_TIMEOUT        => 20,
-                                    CURLOPT_HTTPHEADER     => $headers,
-                                    CURLOPT_NOSIGNAL       => true,
-                                    CURLOPT_TCP_KEEPALIVE  => 1,
-                                    CURLOPT_TCP_KEEPIDLE   => 30,
-                                    CURLOPT_TCP_KEEPINTVL  => 10,
-                                    CURLOPT_HTTP_VERSION   => CURL_HTTP_VERSION_1_1,
-                                    CURLOPT_POST           => true,
-                                    CURLOPT_POSTFIELDS     => json_encode($notifyPayload, JSON_UNESCAPED_UNICODE),
-                                    CURLOPT_HEADER         => true,
-                                ]);
-                                if (!$verifySsl) {
-                                    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-                                    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
-                                }
-                                if ($connectTo !== '') curl_setopt($ch, CURLOPT_CONNECT_TO, [$connectTo]);
+                            // === NUEVO: estructura para registrar intentos ===
+                            $payNotifyAttempts = [];
 
-                                $resp = curl_exec($ch);
-                                if ($resp === false) {
-                                    $curlErr = curl_error($ch) ?: 'Error desconocido';
-                                    $payNotifyError = 'No se pudo contactar al API de parking (payNotify). Detalle cURL: ' . $curlErr;
-                                    curl_close($ch);
-                                    $manualOpen = true;
-                                } else {
-                                    $info   = curl_getinfo($ch) ?: [];
-                                    $status = (int)($info['http_code'] ?? 0);
-                                    $hsize  = (int)($info['header_size'] ?? 0);
-                                    $bodyResp  = substr($resp, $hsize) ?: '';
-                                    $ctype = (string)($info['content_type'] ?? '');
-                                    curl_close($ch);
+                            // helper interno para un intento de payNotify
+                            $doPayNotifyOnce = function(int $attemptNo) use (
+                                $payNotifyEndpoint, $headers, $notifyPayload,
+                                $verifySsl, $connectTo,
+                                &$payNotifyAttempts
+                            ) {
+                                $sent   = false;
+                                $ack    = false;
+                                $error  = null;
+                                $http   = null;
+                                $raw    = null;
+                                $type   = null;
+                                $json   = null;
 
-                                    $payNotifyHttpCode = $status;
-                                    $payNotifyRaw      = $bodyResp;
-                                    $payNotifyType     = $ctype;
-
-                                    $payNotifySent = ($status >= 200 && $status < 300);
-
-                                    $json = null;
-                                    $looksJson = stripos($ctype, 'application/json') !== false
-                                            || (strlen($bodyResp) && ($bodyResp[0] === '{' || $bodyResp[0] === '['));
-                                    if ($looksJson) {
-                                        $tmp = json_decode($bodyResp, true);
-                                        if (json_last_error() === JSON_ERROR_NONE) $json = $tmp;
+                                try {
+                                    $ch = curl_init($payNotifyEndpoint);
+                                    curl_setopt_array($ch, [
+                                        CURLOPT_RETURNTRANSFER => true,
+                                        CURLOPT_CONNECTTIMEOUT => 15,
+                                        CURLOPT_TIMEOUT        => 20,
+                                        CURLOPT_HTTPHEADER     => $headers,
+                                        CURLOPT_NOSIGNAL       => true,
+                                        CURLOPT_TCP_KEEPALIVE  => 1,
+                                        CURLOPT_TCP_KEEPIDLE   => 30,
+                                        CURLOPT_TCP_KEEPINTVL  => 10,
+                                        CURLOPT_HTTP_VERSION   => CURL_HTTP_VERSION_1_1,
+                                        CURLOPT_POST           => true,
+                                        CURLOPT_POSTFIELDS     => json_encode($notifyPayload, JSON_UNESCAPED_UNICODE),
+                                        CURLOPT_HEADER         => true,
+                                    ]);
+                                    if (!$verifySsl) {
+                                        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+                                        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
                                     }
-                                    if (is_array($json)) $payNotifyJson = $json;
+                                    if ($connectTo !== '') curl_setopt($ch, CURLOPT_CONNECT_TO, [$connectTo]);
 
-                                    if ($payNotifySent && is_array($json)) {
-                                        $payNotifyAck = (isset($json['code']) && (int)$json['code'] === 0);
-                                        if (!$payNotifyAck) {
-                                            $msg = isset($json['message']) ? (string)$json['message'] : 'ACK inválido';
-                                            $payNotifyError = 'API de parking respondió pero no confirmó la validación del ticket: ' . $msg;
+                                    $resp = curl_exec($ch);
+                                    if ($resp === false) {
+                                        $curlErr = curl_error($ch) ?: 'Error desconocido';
+                                        $error = 'No se pudo contactar al API de parking (payNotify, intento ' . $attemptNo . '). Detalle cURL: ' . $curlErr;
+                                        curl_close($ch);
+                                    } else {
+                                        $info   = curl_getinfo($ch) ?: [];
+                                        $status = (int)($info['http_code'] ?? 0);
+                                        $hsize  = (int)($info['header_size'] ?? 0);
+                                        $bodyResp  = substr($resp, $hsize) ?: '';
+                                        $ctype = (string)($info['content_type'] ?? '');
+                                        curl_close($ch);
+
+                                        $http = $status;
+                                        $raw  = $bodyResp;
+                                        $type = $ctype;
+
+                                        $sent = ($status >= 200 && $status < 300);
+
+                                        $looksJson = stripos($ctype, 'application/json') !== false
+                                                || (strlen($bodyResp) && ($bodyResp[0] === '{' || $bodyResp[0] === '['));
+                                        if ($looksJson) {
+                                            $tmp = json_decode($bodyResp, true);
+                                            if (json_last_error() === JSON_ERROR_NONE) $json = $tmp;
                                         }
-                                    } else if (!$payNotifySent) {
-                                        $payNotifyError = "El API de parking respondió con HTTP $status (no se pudo validar el ticket).";
+
+                                        if ($sent && is_array($json)) {
+                                            $ack = (isset($json['code']) && (int)$json['code'] === 0);
+                                            if (!$ack) {
+                                                $msg = isset($json['message']) ? (string)$json['message'] : 'ACK inválido';
+                                                $error = 'API de parking respondió pero no confirmó la validación del ticket (intento '.$attemptNo.'): ' . $msg;
+                                            }
+                                        } elseif (!$sent) {
+                                            $error = "El API de parking respondió con HTTP $status (no se pudo validar el ticket, intento $attemptNo).";
+                                        }
                                     }
 
-                                    if (!$payNotifySent || !$payNotifyAck) $manualOpen = true;
+                                } catch (\Throwable $e) {
+                                    $error = 'Excepción al llamar API de parking (payNotify, intento '.$attemptNo.'): ' . $e->getMessage();
                                 }
 
-                            } catch (\Throwable $e) {
-                                $payNotifyError = 'Excepción al llamar API de parking (payNotify): ' . $e->getMessage();
+                                $attempt = [
+                                    'attempt'   => $attemptNo,
+                                    'sent'      => $sent,
+                                    'ack'       => $ack,
+                                    'http_code' => $http,
+                                    'error'     => $error,
+                                    'raw'       => $raw,
+                                    'type'      => $type,
+                                    'json'      => $json,
+                                ];
+                                $payNotifyAttempts[] = $attempt;
+
+                                return $attempt;
+                            };
+
+                            // === INTENTO 1 (si falla, NO reintentamos) ===
+                            $attempt1 = $doPayNotifyOnce(1);
+
+                            // resumen principal SIEMPRE basado en el primer intento
+                            $payNotifySent      = (bool)$attempt1['sent'];
+                            $payNotifyAck       = (bool)$attempt1['ack'];
+                            $payNotifyError     = $attempt1['error'];
+                            $payNotifyHttpCode  = $attempt1['http_code'];
+                            $payNotifyRaw       = $attempt1['raw'];
+                            $payNotifyType      = $attempt1['type'];
+                            $payNotifyJson      = $attempt1['json'];
+
+                            // manual_open solo según resultado del primer intento
+                            if (!$payNotifySent || !$payNotifyAck) {
                                 $manualOpen = true;
                             }
 
-                            // log de paynotify con correlación
+                            // === INTENTO 2: SOLO si el primero fue OK ===
+                            if ($payNotifySent && $payNotifyAck) {
+                                $attempt2 = $doPayNotifyOnce(2);
+
+                                $ok2 = $attempt2['sent'] && $attempt2['ack'];
+
+                                // Si el segundo intento falla, NO hacemos nada más:
+                                //  - NO intentamos una 3ª vez
+                                //  - NO cambiamos la notificación (se queda la del 1er intento)
+                                if ($ok2) {
+                                    // === INTENTO 3: SOLO si el 2.º también fue OK ===
+                                    $attempt3 = $doPayNotifyOnce(3);
+                                    // El resultado del 3er intento solo se registra en logs.
+                                }
+                            }
+
+                            // log de paynotify con correlación + todos los intentos
                             $this->debugLog('pay_notify_diag.txt', [
                                 'cid'                => $cid,
                                 'ticket_no'          => $ticketNo,
                                 'endpoint'           => $payNotifyEndpoint,
                                 'payload'            => $notifyPayload,
-                                'http_code'          => $payNotifyHttpCode,
-                                'error'              => $payNotifyError,
-                                'manual_open'        => $manualOpen,
-                                'pay_notify_sent'    => $payNotifySent,
-                                'pay_notify_ack'     => $payNotifyAck,
-                                'pay_notify_raw'     => $payNotifyRaw,
-                                'pay_notify_json'    => $payNotifyJson,
+
+                                // resumen (1er intento)
+                                'summary_http_code'  => $payNotifyHttpCode,
+                                'summary_error'      => $payNotifyError,
+                                'summary_manual_open'=> $manualOpen,
+                                'summary_sent'       => $payNotifySent,
+                                'summary_ack'        => $payNotifyAck,
+                                'summary_raw'        => $payNotifyRaw,
+                                'summary_json'       => $payNotifyJson,
+
+                                // detalle de todos los intentos
+                                'attempts'           => $payNotifyAttempts,
                             ]);
                         }
                     }

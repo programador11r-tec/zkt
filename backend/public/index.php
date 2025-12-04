@@ -162,6 +162,12 @@ $router->post('/api/gate/manual-open', function () use ($api) {
     return $api->openGateManual();
 });
 
+// Reporte de registros del dispositivo biométrico
+$router->get('/api/reports/device-logs', function () use ($api) {
+    Auth::requireAuth();
+    return $api->reportsDeviceLogs();   // ← nuevo método en ApiController
+});
+
 /* ============ FRONTEND ============ */
 
 // Pantalla principal (app) — si no estás sirviendo estáticos con Apache/Nginx

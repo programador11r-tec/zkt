@@ -519,28 +519,27 @@ async function loadSettings(quiet = false) {
    DASHBOARD (Bootstrap)
    ============================ */
 
-  async function renderDashboard() { 
+  async function renderDashboard() {  
     try {
-      // 1) Primero tickets (caseta sufre si paralelizamos con settings)
+      // 1) Primero tickets
       const ticketsResp = await getTicketsSafe();
       const data = normalizeTickets(ticketsResp);
 
-      // 2) Luego settings, desempaquetado
+      // 2) Luego settings
       let settings = null;
       try {
-        settings = await safeLoadSettings(); // <<— aquí va el wrapper
+        settings = await safeLoadSettings(); 
       } catch (_) {
-        settings = null; // si falla, seguimos con defaults
+        settings = null;
       }
 
       const state = { search: '', page: 1 };
       const pageSize = 20;
 
-      // 3) Métricas con defaults/fallbacks
+      // 3) Métricas
       const metrics = settings?.database?.metrics ?? {};
       const pending = Number.isFinite(Number(metrics.pending_invoices)) ? Number(metrics.pending_invoices) : 0;
 
-      // Fallback para tickets_total si el backend no lo manda
       const ticketsTotal =
         Number.isFinite(Number(metrics.tickets_total))
           ? Number(metrics.tickets_total)
@@ -604,7 +603,7 @@ async function loadSettings(quiet = false) {
           </div>
         `).join('');
 
-      // Layout principal (igual al tuyo)
+      // Layout principal
       const app = document.getElementById('app') || document.body;
       app.innerHTML = `
         <div class="container-fluid px-0">
@@ -637,11 +636,12 @@ async function loadSettings(quiet = false) {
                           <th>Nombre</th>
                           <th>Entrada</th>
                           <th>Salida</th>
+                          <th style="width:170px">Acciones</th>
                         </tr>
                       </thead>
                       <tbody id="dashBody">
                         <tr>
-                          <td colspan="4" class="text-center text-muted py-4">
+                          <td colspan="5" class="text-center text-muted py-4">
                             Cargando registros…
                           </td>
                         </tr>
@@ -687,14 +687,48 @@ async function loadSettings(quiet = false) {
           </div>
         </div>`;
 
-      // Timeline (usa settings desempaquetado)
+      // === Helper de alertas bonitas ===
+      function showFancyAlert(type, message) {
+        let container = document.getElementById('dashAlerts');
+        if (!container) {
+          container = document.createElement('div');
+          container.id = 'dashAlerts';
+          container.className = 'position-fixed top-0 end-0 p-3';
+          container.style.zIndex = '1080';
+          document.body.appendChild(container);
+        }
+
+        const id = 'alert-' + Date.now() + '-' + Math.random().toString(16).slice(2);
+        let variant = 'info';
+        if (type === 'error') variant = 'danger';
+        else if (type === 'success') variant = 'success';
+        else if (type === 'warning') variant = 'warning';
+
+        container.insertAdjacentHTML(
+          'beforeend',
+          `
+          <div id="${id}" class="alert alert-${variant} alert-dismissible fade show shadow-sm mb-2 small" role="alert">
+            ${escapeHtml(String(message))}
+            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+          </div>`
+        );
+
+        // Auto-cierre a los 5s
+        setTimeout(() => {
+          const el = document.getElementById(id);
+          if (!el) return;
+          el.classList.remove('show');
+          el.addEventListener('transitionend', () => el.remove(), { once: true });
+        }, 5000);
+      }
+
+      // Timeline
       const timelineContainer = document.getElementById('activityTimeline');
       if (timelineContainer) {
         const tl = buildTimeline(settings?.activity);
         timelineContainer.innerHTML = tl || `<div class="text-muted small">Sin actividad reciente.</div>`;
       }
 
-      // Botón refrescar actividad
       const timelineRefresh = document.getElementById('timelineRefresh');
       if (timelineRefresh) {
         timelineRefresh.addEventListener('click', async () => {
@@ -710,6 +744,7 @@ async function loadSettings(quiet = false) {
             console.error(err);
             timelineRefresh.disabled = false;
             timelineRefresh.innerHTML = `<i class="bi bi-exclamation-triangle me-1"></i> Reintentar`;
+            showFancyAlert('error', 'No se pudo actualizar la actividad.');
           } finally {
             if (!hadError && timelineRefresh.isConnected) {
               timelineRefresh.innerHTML = original;
@@ -718,7 +753,40 @@ async function loadSettings(quiet = false) {
         });
       }
 
-      // Tabla + paginación (igual que tu versión)
+      // --- Helpers para fechas / payNotify ---
+      function parseLocalDateTime(str) {
+        if (!str) return null;
+        const [datePart, timePart = '00:00:00'] = String(str).split(' ');
+        const [y, m, d] = datePart.split('-').map(Number);
+        const [hh, mm, ss = 0] = timePart.split(':').map(Number);
+        if (!y || !m || !d) return null;
+        return new Date(y, m - 1, d, hh || 0, mm || 0, ss || 0);
+      }
+
+      function canRetryPayNotify(row) {
+        let exitStr = row.rawExitAt || row.checkOut;
+        if (!exitStr || exitStr === '-') return false;
+
+        const exitDt = parseLocalDateTime(exitStr);
+        if (!exitDt) return false;
+
+        const nowMs = Date.now();
+        const diffMs = nowMs - exitDt.getTime();
+        if (diffMs < 0) return false;
+        const diffMin = diffMs / 60000;
+        return diffMin <= 5;
+      }
+
+      async function callPayNotifyAgain(ticketNo) {
+        const res = await fetchJSON(api('fel/pay-notify-again'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ticket_no: ticketNo }),
+        });
+        return res;
+      }
+
+      // Tabla + paginación
       const tbody = document.getElementById('dashBody');
       const meta = document.getElementById('dashMeta');
       const searchInput = document.getElementById('dashSearch');
@@ -742,19 +810,55 @@ async function loadSettings(quiet = false) {
         const pageItems = filtered.slice(start, start + pageSize);
 
         if (pageItems.length) {
-          tbody.innerHTML = pageItems.map((row, index) => `
-            <tr>
-              <td>${escapeHtml(start + index + 1)}</td>
-              <td>${escapeHtml(row.name)}</td>
-              <td>${escapeHtml(row.checkIn || '-')}</td>
-              <td>${escapeHtml(row.checkOut || '-')}</td>
-            </tr>
-          `).join('');
+          const rowsHtml = pageItems.map((row, index) => {
+            const ticketNo = row.ticket_no || row.ticketNo || row.name || '';
+
+            let exitStr = row.rawExitAt || row.checkOut || '';
+            if (exitStr === '-') exitStr = '';
+
+            const hasExit  = !!exitStr;
+            const canRetry = ticketNo && hasExit && canRetryPayNotify(row);
+
+            let btnHtml = '';
+
+            if (ticketNo && hasExit) {
+              if (canRetry) {
+                btnHtml = `
+                  <button type="button"
+                          class="btn btn-sm btn-outline-primary dash-paynotify-btn"
+                          data-enabled="1"
+                          data-ticket="${escapeHtml(ticketNo)}"
+                          data-exit="${escapeHtml(exitStr)}">
+                    <i class="bi bi-arrow-repeat me-1"></i>Reenviar pago
+                  </button>`;
+              } else {
+                btnHtml = `
+                  <button type="button"
+                          class="btn btn-sm btn-success"
+                          disabled
+                          aria-disabled="true">
+                    <i class="bi bi-check-lg me-1"></i>OK
+                  </button>`;
+              }
+            }
+
+            return `
+              <tr>
+                <td>${escapeHtml(start + index + 1)}</td>
+                <td>${escapeHtml(row.name)}</td>
+                <td>${escapeHtml(row.checkIn || '-')}</td>
+                <td>${escapeHtml(row.checkOut || '-')}</td>
+                <td>${btnHtml}</td>
+              </tr>
+            `;
+          }).join('');
+
+          tbody.innerHTML = rowsHtml;
         } else {
           const message = data.length && !filtered.length ? 'No se encontraron resultados' : 'Sin registros disponibles';
           tbody.innerHTML = `
             <tr>
-              <td colspan="4" class="text-center text-muted py-4">
+              <td colspan="5" class="text-center text-muted py-4">
                 ${escapeHtml(message)}
               </td>
             </tr>
@@ -771,6 +875,79 @@ async function loadSettings(quiet = false) {
 
         prevBtn.disabled = state.page <= 1 || !filtered.length;
         nextBtn.disabled = state.page >= totalPages || !filtered.length;
+
+        // Eventos de los botones "Reenviar pago"
+        const btns = tbody.querySelectorAll('.dash-paynotify-btn[data-enabled="1"]');
+        btns.forEach((btn) => {
+          if (btn.dataset.bound === '1') return;
+          btn.dataset.bound = '1';
+
+          btn.addEventListener('click', async () => {
+            const ticketNo = btn.getAttribute('data-ticket') || '';
+            if (!ticketNo) return;
+
+            const exitStr = btn.getAttribute('data-exit') || '';
+            const exitDt  = parseLocalDateTime(exitStr);
+            if (!exitDt) {
+              showFancyAlert('error', 'No se pudo determinar la hora de salida del ticket.');
+              return;
+            }
+
+            // Antes de enviar, validamos ventana de 5 minutos
+            let nowMs = Date.now();
+            let diffMin = (nowMs - exitDt.getTime()) / 60000;
+            if (diffMin < 0 || diffMin > 5) {
+              // Fuera de ventana: convertir botón en OK verde
+              btn.classList.remove('btn-outline-primary');
+              btn.classList.add('btn-success');
+              btn.innerHTML = `<i class="bi bi-check-lg me-1"></i>OK`;
+              btn.disabled = true;
+              btn.removeAttribute('data-enabled');
+              showFancyAlert('warning', 'Fuera de la ventana de 5 minutos para reenviar el pago.');
+              return;
+            }
+
+            const originalHtml = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = `<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span> Enviando…`;
+
+            try {
+              const res = await callPayNotifyAgain(ticketNo);
+
+              if (!res || res.ok === false) {
+                const errMsg = res?.error || res?.pay_notify_error || 'No se pudo reenviar el payNotify.';
+                showFancyAlert('error', errMsg);
+              } else {
+                if (res.pay_notify_ack) {
+                  showFancyAlert('success', 'PayNotify reenviado y confirmado por el sistema de parqueo.');
+                } else {
+                  const msg = res.pay_notify_error || 'El sistema de parqueo no confirmó el ticket.';
+                  showFancyAlert('warning', 'Se envió el payNotify, pero hubo un problema: ' + msg);
+                }
+              }
+            } catch (err) {
+              console.error(err);
+              showFancyAlert('error', 'Error de red al reenviar payNotify: ' + String(err));
+            } finally {
+              // Al terminar, ver si aún está dentro de la ventana de 5 min
+              nowMs = Date.now();
+              diffMin = (nowMs - exitDt.getTime()) / 60000;
+
+              if (diffMin < 0 || diffMin > 5) {
+                // Ya se pasó el tiempo: lo cambiamos a OK verde
+                btn.classList.remove('btn-outline-primary');
+                btn.classList.add('btn-success');
+                btn.innerHTML = `<i class="bi bi-check-lg me-1"></i>OK`;
+                btn.disabled = true;
+                btn.removeAttribute('data-enabled');
+              } else {
+                // Sigue dentro de la ventana: se puede volver a usar
+                btn.disabled = false;
+                btn.innerHTML = originalHtml;
+              }
+            }
+          });
+        });
       }
 
       if (searchInput) {
@@ -1696,6 +1873,14 @@ async function loadSettings(quiet = false) {
       filters: { from: defaultFrom, to: defaultTo, q: '' },
     };
 
+    const biometricState = {
+      rows: [],
+      summary: null,
+      page: 1,
+      perPage: 20,
+      filters: { from: defaultFrom, to: defaultTo, q: '' },
+    };
+
     // === Helpers ===
     const escapeHtml = (v) => String(v ?? '')
       .replace(/&/g, '&amp;')
@@ -1704,7 +1889,7 @@ async function loadSettings(quiet = false) {
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#39;');
 
-    // 🔧 Parseo robusto de fecha como LOCAL (incluye "YYYY-MM-DD HH:MM:SS")
+    // Parseo robusto de fecha como LOCAL (incluye "YYYY-MM-DD HH:MM:SS")
     const parseDateLike = (v) => {
       if (!v) return null;
       if (v instanceof Date) {
@@ -1715,11 +1900,9 @@ async function loadSettings(quiet = false) {
         return isNaN(dNum.getTime()) ? null : dNum;
       }
       if (typeof v === 'string') {
-        // Primero, que intente el parser nativo
         let d = new Date(v);
         if (!isNaN(d.getTime())) return d;
 
-        // Formato MySQL clásico "YYYY-MM-DD HH:MM:SS"
         const m = v.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/);
         if (m) {
           const [_, yy, mm, dd, hh, mi, ss] = m;
@@ -1805,7 +1988,6 @@ async function loadSettings(quiet = false) {
       });
     };
 
-    // ✅ saca uuid de varios posibles campos
     const getUuid = (r) => {
       if (r?.fel_uuid) return r.fel_uuid;
       if (r?.uuid) return r.uuid;
@@ -1815,7 +1997,6 @@ async function loadSettings(quiet = false) {
       } catch { return null; }
     };
 
-    // === UI principal ===
     const app = document.getElementById('app') || document.body;
     app.innerHTML = `
     <div class="d-flex flex-column gap-4">
@@ -1852,7 +2033,6 @@ async function loadSettings(quiet = false) {
               <label class="form-label small" for="invoiceNit">NIT</label>
               <input type="text" id="invoiceNit" class="form-control form-control-sm" placeholder="CF o NIT">
             </div>
-            <!-- 🔍 Nuevo campo: búsqueda por número de ticket -->
             <div class="col-md-3">
               <label class="form-label small" for="invoiceTicket">Ticket</label>
               <input type="text" id="invoiceTicket" class="form-control form-control-sm" placeholder="Número de ticket">
@@ -2032,6 +2212,72 @@ async function loadSettings(quiet = false) {
           <div id="manualOpenMessage" class="small text-muted mt-2"></div>
         </div>
       </section>
+
+      <!-- Reporte de registros del dispositivo biométrico -->
+      <section class="card shadow-sm">
+        <div class="card-body">
+          <div class="d-flex flex-wrap justify-content-between align-items-start gap-2">
+            <div>
+              <h5 class="card-title mb-1">Registros del dispositivo biométrico</h5>
+              <p class="text-muted small mb-0">Eventos de acceso obtenidos desde CVSecurity.</p>
+            </div>
+            <span class="badge text-bg-secondary">Biométrico</span>
+          </div>
+
+          <form id="biometricFilters" class="row g-3 mt-3">
+            <div class="col-md-3">
+              <label class="form-label small" for="biometricFrom">Desde</label>
+              <input type="date" id="biometricFrom" class="form-control form-control-sm" value="${escapeHtml(defaultFrom)}">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label small" for="biometricTo">Hasta</label>
+              <input type="date" id="biometricTo" class="form-control form-control-sm" value="${escapeHtml(defaultTo)}">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label small" for="biometricSearch">Buscar</label>
+              <input type="text" id="biometricSearch" class="form-control form-control-sm"
+                    placeholder="PIN, nombre, área, evento...">
+            </div>
+          </form>
+
+          <div class="d-flex flex-wrap gap-2 align-items-center mt-3">
+            <div class="btn-group btn-group-sm" role="group">
+              <button type="button" class="btn btn-primary" id="biometricFetch">Buscar</button>
+              <button type="button" class="btn btn-outline-secondary" id="biometricReset">Limpiar</button>
+            </div>
+            <div class="ms-auto d-flex gap-2">
+              <button type="button" class="btn btn-outline-primary btn-sm" id="biometricCsv" disabled>Exportar CSV</button>
+            </div>
+          </div>
+
+          <div id="biometricAlert" class="mt-3"></div>
+
+          <div id="biometricSummary" class="row g-3 mt-2"></div>
+          <div class="table-responsive mt-3">
+            <table class="table table-sm table-bordered align-middle mb-0">
+              <thead class="table-light">
+                <tr>
+                  <th>Fecha / hora</th>
+                  <th>PIN</th>
+                  <th>Nombre</th>
+                  <th>Departamento</th>
+                  <th>Área</th>
+                  <th>Dispositivo</th>
+                  <th>Evento</th>
+                  <th>Punto</th>
+                  <th>Puerta</th>
+                  <th>Lector</th>
+                </tr>
+              </thead>
+              <tbody id="biometricRows">
+                <tr><td colspan="10" class="text-center text-muted">Consulta para ver resultados.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div id="biometricPagination" class="mt-2"></div>
+          <div id="biometricMessage" class="small text-muted mt-2"></div>
+        </div>
+      </section>
     </div>
     `;
 
@@ -2057,6 +2303,13 @@ async function loadSettings(quiet = false) {
     const manualOpenAlertEl = document.getElementById('manualOpenAlert');
     const manualOpenCsvBtn = document.getElementById('manualOpenCsv');
 
+    const biometricRowsEl = document.getElementById('biometricRows');
+    const biometricSummaryEl = document.getElementById('biometricSummary');
+    const biometricMsgEl = document.getElementById('biometricMessage');
+    const biometricPaginationEl = document.getElementById('biometricPagination');
+    const biometricAlertEl = document.getElementById('biometricAlert');
+    const biometricCsvBtn = document.getElementById('biometricCsv');
+
     const showAlert = (el, message, type = 'info') => {
       if (!el) return;
       el.innerHTML = `
@@ -2080,13 +2333,13 @@ async function loadSettings(quiet = false) {
       const to = document.getElementById('invoiceTo').value;
       const status = document.getElementById('invoiceStatus').value;
       const nit = document.getElementById('invoiceNit').value;
-      const ticketNo = document.getElementById('invoiceTicket').value; // 🆕 ticket
+      const ticketNo = document.getElementById('invoiceTicket').value;
 
       if (from) params.set('from', from);
       if (to) params.set('to', to);
       if (status !== 'ANY') params.set('status', status);
       if (nit) params.set('nit', nit);
-      if (ticketNo) params.set('ticket_no', ticketNo); // 🆕 se envía al backend
+      if (ticketNo) params.set('ticket_no', ticketNo);
 
       try {
         const url = params.size ? `${api('facturacion/emitidas')}?${params}` : api('facturacion/emitidas');
@@ -2183,7 +2436,7 @@ async function loadSettings(quiet = false) {
       buildPagination(invoicePaginationEl, invoiceState, renderInvoiceRows);
     };
 
-    // 📄 CSV emitidas: hora local detallada
+    // CSV emitidas
     invoiceCsvBtn.addEventListener('click', () => {
       const rows = invoiceState.rows || [];
       if (!rows.length) return;
@@ -2210,7 +2463,7 @@ async function loadSettings(quiet = false) {
       downloadBlob(blob, `facturas_${document.getElementById('invoiceFrom').value}_${document.getElementById('invoiceTo').value}.csv`);
     });
 
-    // ✅ PDF emitidas SOLO binario G4S
+    // PDF emitidas
     invoiceRowsEl.addEventListener('click', async (ev) => {
       const btn = ev.target.closest('button[data-action="pdf"]');
       if (!btn) return;
@@ -2373,7 +2626,7 @@ async function loadSettings(quiet = false) {
       buildPagination(manualInvoicePaginationEl, manualInvoiceState, renderManualInvoiceRows);
     };
 
-    // ✅ PDF manual por UUID => G4S
+    // PDF manual
     manualInvoiceRowsEl.addEventListener('click', async (ev) => {
       const btn = ev.target.closest('button[data-action="pdf-manual"]');
       if (!btn) return;
@@ -2407,7 +2660,7 @@ async function loadSettings(quiet = false) {
       }
     });
 
-    // 📄 CSV facturas manuales con hora local
+    // CSV facturas manuales
     manualInvoiceCsvBtn.addEventListener('click', () => {
       const rows = manualInvoiceState.rows || [];
       if (!rows.length) return;
@@ -2529,7 +2782,7 @@ async function loadSettings(quiet = false) {
       buildPagination(manualOpenPaginationEl, manualOpenState, renderManualOpenRows);
     };
 
-    // 📄 CSV aperturas manuales con hora local
+    // CSV aperturas
     manualOpenCsvBtn.addEventListener('click', () => {
       const rows = manualOpenState.rows || [];
       if (!rows.length) return;
@@ -2553,6 +2806,123 @@ async function loadSettings(quiet = false) {
       downloadBlob(blob, `aperturas_manuales_${document.getElementById('manualOpenFrom').value}_${document.getElementById('manualOpenTo').value}.csv`);
     });
 
+    // === Reporte biométrico ===
+    const fetchBiometricReport = async () => {
+      biometricRowsEl.innerHTML = `<tr><td colspan="10" class="text-center text-muted">Consultando...</td></tr>`;
+      biometricSummaryEl.innerHTML = '';
+      biometricMsgEl.textContent = '';
+      clearAlert(biometricAlertEl);
+      biometricCsvBtn.disabled = true;
+
+      const params = new URLSearchParams();
+      const from = document.getElementById('biometricFrom').value;
+      const to = document.getElementById('biometricTo').value;
+      const q = document.getElementById('biometricSearch').value;
+
+      if (from) params.set('from', from);
+      if (to) params.set('to', to);
+      if (q) params.set('q', q);
+
+      try {
+        const url = params.size ? `${api('reports/device-logs')}?${params}` : api('reports/device-logs');
+        const js = await fetchJSON(url);
+        if (!js || js.ok === false) throw new Error(js.error || 'Sin respuesta');
+
+        const rows = js.rows || [];
+        biometricState.rows = rows;
+        biometricState.summary = {
+          total: rows.length,
+        };
+        biometricState.page = 1;
+        renderBiometricRows();
+        renderBiometricSummary();
+        biometricCsvBtn.disabled = rows.length === 0;
+      } catch (err) {
+        biometricRowsEl.innerHTML = `<tr><td colspan="10" class="text-center text-danger">Error: ${escapeHtml(err.message)}</td></tr>`;
+        showAlert(biometricAlertEl, `No se pudo cargar el reporte de dispositivo: ${err.message}`, 'danger');
+      }
+    };
+
+    const renderBiometricSummary = () => {
+      const s = biometricState.summary;
+      if (!s) return;
+      biometricSummaryEl.innerHTML = `
+        <div class="col-sm-6 col-lg-3">
+          <div class="card border-0 bg-body-tertiary h-100">
+            <div class="card-body py-3">
+              <div class="text-muted small">Registros</div>
+              <div class="fs-5 fw-semibold">${s.total}</div>
+            </div>
+          </div>
+        </div>
+      `;
+      biometricMsgEl.textContent = '';
+    };
+
+    const renderBiometricRows = () => {
+      const { slice } = paginate(biometricState.rows, biometricState.page, biometricState.perPage);
+      if (!slice.length) {
+        biometricRowsEl.innerHTML = `<tr><td colspan="10" class="text-center text-muted">No hay registros.</td></tr>`;
+        biometricPaginationEl.innerHTML = '';
+        return;
+      }
+
+      biometricRowsEl.innerHTML = slice.map((r) => {
+        const fullName = [r.name, r.lastName].filter(Boolean).join(' ');
+        return `
+          <tr>
+            <td>${escapeHtml(formatDateValue(r.eventTime))}</td>
+            <td>${escapeHtml(r.pin ?? '')}</td>
+            <td>${escapeHtml(fullName || r.name || '')}</td>
+            <td>${escapeHtml(r.deptName ?? '')}</td>
+            <td>${escapeHtml(r.areaName ?? '')}</td>
+            <td>${escapeHtml(r.devName ?? '')}</td>
+            <td>${escapeHtml(r.eventName ?? '')}</td>
+            <td>${escapeHtml(r.eventPointName ?? '')}</td>
+            <td>${escapeHtml(r.doorName ?? '')}</td>
+            <td>${escapeHtml(r.readerName ?? '')}</td>
+          </tr>`;
+      }).join('');
+
+      buildPagination(biometricPaginationEl, biometricState, renderBiometricRows);
+    };
+
+    // CSV biométrico
+    biometricCsvBtn.addEventListener('click', () => {
+      const rows = biometricState.rows || [];
+      if (!rows.length) return;
+
+      const headers = [
+        'eventTime','pin','nombre','departamento','area',
+        'dispositivo','evento','punto','puerta','lector'
+      ];
+      const csv = [
+        headers.join(','),
+        ...rows.map(r => {
+          const fullName = [r.name, r.lastName].filter(Boolean).join(' ');
+          const vals = [
+            formatDateForCsv(r.eventTime).replaceAll('"','""'),
+            String(r.pin ?? '').replaceAll('"','""'),
+            String(fullName || r.name || '').replaceAll('"','""'),
+            String(r.deptName ?? '').replaceAll('"','""'),
+            String(r.areaName ?? '').replaceAll('"','""'),
+            String(r.devName ?? '').replaceAll('"','""'),
+            String(r.eventName ?? '').replaceAll('"','""'),
+            String(r.eventPointName ?? '').replaceAll('"','""'),
+            String(r.doorName ?? '').replaceAll('"','""'),
+            String(r.readerName ?? '').replaceAll('"','""'),
+          ];
+          return vals.map(v => `"${v}"`).join(',');
+        }),
+      ].join('\r\n');
+
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      downloadBlob(
+        blob,
+        `biometrico_${document.getElementById('biometricFrom').value}_${document.getElementById('biometricTo').value}.csv`
+      );
+    });
+
     // Listeners de búsqueda / reset
     document.getElementById('invoiceFetch').addEventListener('click', fetchInvoiceReport);
     document.getElementById('invoiceReset').addEventListener('click', () => {
@@ -2560,7 +2930,7 @@ async function loadSettings(quiet = false) {
       document.getElementById('invoiceTo').value = defaultTo;
       document.getElementById('invoiceStatus').value = 'ANY';
       document.getElementById('invoiceNit').value = '';
-      document.getElementById('invoiceTicket').value = ''; // 🧹 limpia ticket
+      document.getElementById('invoiceTicket').value = '';
       fetchInvoiceReport();
     });
 
@@ -2582,9 +2952,19 @@ async function loadSettings(quiet = false) {
       fetchManualOpenReport();
     });
 
+    document.getElementById('biometricFetch').addEventListener('click', fetchBiometricReport);
+    document.getElementById('biometricReset').addEventListener('click', () => {
+      document.getElementById('biometricFrom').value = defaultFrom;
+      document.getElementById('biometricTo').value = defaultTo;
+      document.getElementById('biometricSearch').value = '';
+      fetchBiometricReport();
+    });
+
+    // Carga inicial
     await fetchInvoiceReport();
     await fetchManualInvoiceReport();
     await fetchManualOpenReport();
+    await fetchBiometricReport();
   }
 
   // ===== Ajustes  =====

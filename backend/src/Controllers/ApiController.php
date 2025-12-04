@@ -4055,6 +4055,405 @@ class ApiController {
         @file_put_contents($file, $line . PHP_EOL, FILE_APPEND | LOCK_EX);
     }
 
+    public function payNotifyAgain(): void
+    {
+        header('Content-Type: application/json; charset=utf-8');
+
+        try {
+            $raw  = file_get_contents('php://input') ?: '{}';
+            $body = json_decode($raw, true) ?: [];
+
+            $ticketNo = trim((string)($body['ticket_no'] ?? ''));
+
+            if ($ticketNo === '') {
+                echo json_encode(['ok' => false, 'error' => 'ticket_no requerido'], JSON_UNESCAPED_UNICODE);
+                return;
+            }
+
+            @date_default_timezone_set('America/Guatemala');
+            $nowGT = new \DateTime('now', new \DateTimeZone('America/Guatemala'));
+
+            $pdo = \App\Utils\DB::pdo($this->config);
+            $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
+
+            // 1) Datos del ticket (para exit_at / placa / status)
+            $q = $pdo->prepare("
+                SELECT entry_at, exit_at, plate, status
+                FROM tickets
+                WHERE ticket_no = :t
+                LIMIT 1
+            ");
+            $q->execute([':t' => $ticketNo]);
+            $ticket = $q->fetch(\PDO::FETCH_ASSOC);
+
+            if (!$ticket) {
+                echo json_encode([
+                    'ok'    => false,
+                    'error' => 'El ticket no existe en la base de datos.',
+                ], JSON_UNESCAPED_UNICODE);
+                return;
+            }
+
+            $exitAtStr    = $ticket['exit_at'] ?? null;
+            $ticketPlate  = $ticket['plate']   ?? null;
+            $ticketStatus = strtoupper((string)($ticket['status'] ?? ''));
+
+            if (!$exitAtStr) {
+                echo json_encode([
+                    'ok'    => false,
+                    'error' => 'El ticket no tiene hora de salida registrada (exit_at nulo).',
+                ], JSON_UNESCAPED_UNICODE);
+                return;
+            }
+
+            // 2) Validar ventana de 5 minutos desde exit_at
+            try {
+                $exitAt = new \DateTime($exitAtStr, new \DateTimeZone('America/Guatemala'));
+            } catch (\Throwable $e) {
+                echo json_encode([
+                    'ok'    => false,
+                    'error' => 'Formato de exit_at inválido para el ticket.',
+                ], JSON_UNESCAPED_UNICODE);
+                return;
+            }
+
+            $diffSec = $nowGT->getTimestamp() - $exitAt->getTimestamp();
+            $diffMin = (int) floor($diffSec / 60);
+
+            if ($diffSec < 0 || $diffMin > 5) {
+                echo json_encode([
+                    'ok'    => false,
+                    'error' => 'Fuera de la ventana de 5 minutos para reenviar payNotify.',
+                    'exit_at' => $exitAt->format('Y-m-d H:i:s'),
+                    'now_gt'  => $nowGT->format('Y-m-d H:i:s'),
+                    'diff_min'=> $diffMin,
+                ], JSON_UNESCAPED_UNICODE);
+                return;
+            }
+
+            // 3) Datos de payments (recordId / billin / placa)
+            $payBillin   = 0.0;
+            $payRecordId = '0';
+            $payPlate    = $ticketPlate;
+
+            try {
+                $qp = $pdo->prepare("SELECT billin, billin_json, plate FROM payments WHERE ticket_no = :t LIMIT 1");
+                $qp->execute([':t' => $ticketNo]);
+                if ($pr = $qp->fetch(\PDO::FETCH_ASSOC)) {
+                    if (isset($pr['billin']) && is_numeric($pr['billin'])) {
+                        $payBillin = (float)$pr['billin'];
+                    }
+                    if (!empty($pr['billin_json'])) {
+                        $payRecordId = (string)$pr['billin_json'];
+                    }
+                    if (!empty($pr['plate'])) {
+                        $payPlate = $pr['plate'];
+                    }
+                }
+            } catch (\Throwable $e) {
+                // si falla, seguimos pero probablemente no haya recordId
+            }
+
+            // 4) Preparar payNotify (misma lógica que invoiceOne, pero sin FEL)
+            $manualOpen     = false;
+            $payNotifySent  = false;
+            $payNotifyAck   = false;
+            $payNotifyError = null;
+            $payNotifyRaw   = null;
+            $payNotifyType  = null;
+            $payNotifyJson  = null;
+            $payNotifyHttpCode = null;
+            $payNotifyEndpoint = null;
+            $payNotifyPayload  = null;
+
+            $baseUrl = rtrim((string) $this->config->get('HAMACHI_PARK_BASE_URL', ''), '/');
+            if ($baseUrl === '') {
+                echo json_encode([
+                    'ok'    => false,
+                    'error' => 'HAMACHI_PARK_BASE_URL no está configurado.',
+                ], JSON_UNESCAPED_UNICODE);
+                return;
+            }
+
+            $carNumber = $payPlate ?: $ticketPlate;
+            $recordId  = $payRecordId;
+
+            if ($recordId === '0' || $recordId === '' || $carNumber === '' || $carNumber === null) {
+                echo json_encode([
+                    'ok'    => false,
+                    'error' => 'Faltan carNumber/recordId para payNotify (no se puede validar ticket en el sistema de parqueo).',
+                ], JSON_UNESCAPED_UNICODE);
+                return;
+            }
+
+            $payNotifyEndpoint = $baseUrl . '/api/v1/parkCost/payNotify';
+            $accessToken = (string)($this->config->get('HAMACHI_PARK_ACCESS_TOKEN', ''));
+            if ($accessToken !== '') {
+                $payNotifyEndpoint .= (strpos($payNotifyEndpoint, '?') === false ? '?' : '&')
+                                    . 'access_token=' . urlencode($accessToken);
+            }
+
+            $headers = ['Accept: application/json', 'Content-Type: application/json'];
+            $hostHeader = trim((string) $this->config->get('HAMACHI_PARK_HOST_HEADER', ''));
+            if ($hostHeader !== '') $headers[] = 'Host: ' . $hostHeader;
+
+            $verifySsl = strtolower((string) $this->config->get('HAMACHI_PARK_VERIFY_SSL', 'false')) === 'true';
+            $connectTo = trim((string)$this->config->get('HAMACHI_PARK_CONNECT_TO', ''));
+            $paymentType = (string)$this->config->get('HAMACHI_PARK_PAYMENT_TYPE', 'cash');
+
+            $notifyPayload = [
+                'carNumber'   => $carNumber,
+                'paymentType' => $paymentType,
+                'recordId'    => $recordId,
+            ];
+            $payNotifyPayload = $notifyPayload;
+
+            $cid = $this->newCorrelationId('paynotify-again');
+
+            // === Llamada a payNotify (un intento, con logs) ===
+            try {
+                $ch = curl_init($payNotifyEndpoint);
+                curl_setopt_array($ch, [
+                    CURLOPT_RETURNTRANSFER => true,
+                    CURLOPT_CONNECTTIMEOUT => 15,
+                    CURLOPT_TIMEOUT        => 20,
+                    CURLOPT_HTTPHEADER     => $headers,
+                    CURLOPT_NOSIGNAL       => true,
+                    CURLOPT_TCP_KEEPALIVE  => 1,
+                    CURLOPT_TCP_KEEPIDLE   => 30,
+                    CURLOPT_TCP_KEEPINTVL  => 10,
+                    CURLOPT_HTTP_VERSION   => CURL_HTTP_VERSION_1_1,
+                    CURLOPT_POST           => true,
+                    CURLOPT_POSTFIELDS     => json_encode($notifyPayload, JSON_UNESCAPED_UNICODE),
+                    CURLOPT_HEADER         => true,
+                ]);
+                if (!$verifySsl) {
+                    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+                    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+                }
+                if ($connectTo !== '') curl_setopt($ch, CURLOPT_CONNECT_TO, [$connectTo]);
+
+                $resp = curl_exec($ch);
+                if ($resp === false) {
+                    $curlErr = curl_error($ch) ?: 'Error desconocido';
+                    $payNotifyError = 'No se pudo contactar al API de parking (payNotifyAgain). Detalle cURL: ' . $curlErr;
+                    curl_close($ch);
+                } else {
+                    $info   = curl_getinfo($ch) ?: [];
+                    $status = (int)($info['http_code'] ?? 0);
+                    $hsize  = (int)($info['header_size'] ?? 0);
+                    $bodyResp  = substr($resp, $hsize) ?: '';
+                    $ctype = (string)($info['content_type'] ?? '');
+                    curl_close($ch);
+
+                    $payNotifyHttpCode = $status;
+                    $payNotifyRaw      = $bodyResp;
+                    $payNotifyType     = $ctype;
+
+                    $payNotifySent = ($status >= 200 && $status < 300);
+
+                    $looksJson = stripos($ctype, 'application/json') !== false
+                            || (strlen($bodyResp) && ($bodyResp[0] === '{' || $bodyResp[0] === '['));
+                    if ($looksJson) {
+                        $tmp = json_decode($bodyResp, true);
+                        if (json_last_error() === JSON_ERROR_NONE) $payNotifyJson = $tmp;
+                    }
+
+                    if ($payNotifySent && is_array($payNotifyJson)) {
+                        $code = $payNotifyJson['code'] ?? null;
+                        $payNotifyAck = ((int)$code === 0);
+                        if (!$payNotifyAck) {
+                            $msg = isset($payNotifyJson['message']) ? (string)$payNotifyJson['message'] : 'ACK inválido';
+                            $payNotifyError = 'API de parking respondió pero no confirmó la validación del ticket: ' . $msg;
+                        }
+                    } elseif (!$payNotifySent) {
+                        $payNotifyError = "El API de parking respondió con HTTP $status (no se pudo validar el ticket).";
+                    }
+                }
+            } catch (\Throwable $e) {
+                $payNotifyError = 'Excepción al llamar API de parking (payNotifyAgain): ' . $e->getMessage();
+            }
+
+            if (!$payNotifySent || !$payNotifyAck) {
+                $manualOpen = true;
+            }
+
+            $this->debugLog('pay_notify_again_diag.txt', [
+                'cid'                => $cid,
+                'ticket_no'          => $ticketNo,
+                'endpoint'           => $payNotifyEndpoint,
+                'payload'            => $notifyPayload,
+                'http_code'          => $payNotifyHttpCode,
+                'error'              => $payNotifyError,
+                'manual_open'        => $manualOpen,
+                'sent'               => $payNotifySent,
+                'ack'                => $payNotifyAck,
+                'raw'                => $payNotifyRaw,
+                'json'               => $payNotifyJson,
+                'type'               => $payNotifyType,
+                'exit_at'            => $exitAtStr,
+                'now_gt'             => $nowGT->format('Y-m-d H:i:s'),
+                'diff_min'           => $diffMin,
+            ]);
+
+            echo json_encode([
+                'ok'                    => $payNotifySent && $payNotifyAck,
+                'manual_open'           => $manualOpen,
+                'pay_notify_sent'       => $payNotifySent,
+                'pay_notify_ack'        => $payNotifyAck,
+                'pay_notify_error'      => $payNotifyError,
+                'pay_notify_http_code'  => $payNotifyHttpCode,
+                'pay_notify_endpoint'   => $payNotifyEndpoint,
+                'pay_notify_payload'    => $payNotifyPayload,
+                'pay_notify_raw'        => $payNotifyRaw,
+                'pay_notify_json'       => $payNotifyJson,
+                'pay_notify_type'       => $payNotifyType,
+            ], JSON_UNESCAPED_UNICODE);
+
+        } catch (\Throwable $e) {
+            $this->debugLog('pay_notify_again_exc.txt', [
+                'exception' => $e->getMessage(),
+            ]);
+            echo json_encode(['ok' => false, 'error' => $e->getMessage()], JSON_UNESCAPED_UNICODE);
+        }
+    }
+
+    public function reportsDeviceLogs(): void
+    {
+        header('Content-Type: application/json; charset=utf-8');
+
+        try {
+            @date_default_timezone_set('America/Guatemala');
+
+            $from = trim((string)($_GET['from'] ?? ''));
+            $to   = trim((string)($_GET['to']   ?? ''));
+
+            if ($from === '' || $to === '') {
+                echo json_encode([
+                    'ok'    => false,
+                    'error' => 'Parámetros "from" y "to" son requeridos (YYYY-MM-DD).',
+                ], JSON_UNESCAPED_UNICODE);
+                return;
+            }
+
+            // Armamos beginTime / endTime con rango completo de día
+            $beginTime = $from . ' 00:00:00';
+            $endTime   = $to   . ' 23:59:59';
+
+            // 🔒 deviceSn fijo
+            $deviceSn  = 'TDBD244800158';
+
+            $query = http_build_query([
+                'deviceSn' => $deviceSn,
+                'pageNo'   => 1,
+                'pageSize' => 100,
+                'beginTime'=> $beginTime,
+                'endTime'  => $endTime,
+            ]);
+
+            $url = 'https://localhost:8098/api/v3/transaction/device?' . $query;
+
+            // Llamada estilo payNotifyAgain (con cURL)
+            $ch = curl_init($url);
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_CONNECTTIMEOUT => 10,
+                CURLOPT_TIMEOUT        => 30,
+                CURLOPT_HTTPHEADER     => ['Accept: application/json'],
+                CURLOPT_NOSIGNAL       => true,
+                CURLOPT_TCP_KEEPALIVE  => 1,
+                CURLOPT_TCP_KEEPIDLE   => 30,
+                CURLOPT_TCP_KEEPINTVL  => 10,
+                CURLOPT_HTTP_VERSION   => CURL_HTTP_VERSION_1_1,
+                CURLOPT_HEADER         => false,
+
+                // Como es https://localhost:8098 probablemente con certificado self-signed
+                CURLOPT_SSL_VERIFYPEER => false,
+                CURLOPT_SSL_VERIFYHOST => false,
+            ]);
+
+            $resp = curl_exec($ch);
+            if ($resp === false) {
+                $err = curl_error($ch) ?: 'Error desconocido';
+                curl_close($ch);
+
+                echo json_encode([
+                    'ok'    => false,
+                    'error' => 'No se pudo contactar al API biométrico: ' . $err,
+                ], JSON_UNESCAPED_UNICODE);
+                return;
+            }
+
+            $http = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+
+            if ($http < 200 || $http >= 300) {
+                echo json_encode([
+                    'ok'        => false,
+                    'error'     => "API biométrico devolvió HTTP $http",
+                    'http_code' => $http,
+                    'raw'       => $resp,
+                ], JSON_UNESCAPED_UNICODE);
+                return;
+            }
+
+            $js = json_decode($resp, true);
+            if (!is_array($js)) {
+                echo json_encode([
+                    'ok'    => false,
+                    'error' => 'Respuesta del API biométrico no es JSON válido.',
+                    'raw'   => $resp,
+                ], JSON_UNESCAPED_UNICODE);
+                return;
+            }
+
+            if ((int)($js['code'] ?? -1) !== 0) {
+                echo json_encode([
+                    'ok'     => false,
+                    'error'  => $js['message'] ?? 'API biométrico devolvió error.',
+                    'remote' => $js,
+                ], JSON_UNESCAPED_UNICODE);
+                return;
+            }
+
+            $dataBlock = $js['data'] ?? [];
+            $rowsRaw   = $dataBlock['data'] ?? [];
+
+            // Normalizamos las filas para la tabla del frontend
+            $rows = array_map(function (array $r): array {
+                return [
+                    'event_time'   => $r['eventTime']      ?? null,
+                    'pin'          => $r['pin']            ?? null,
+                    'name'         => trim(($r['name'] ?? '') . ' ' . ($r['lastName'] ?? '')),
+                    'dept_name'    => $r['deptName']       ?? null,
+                    'area_name'    => $r['areaName']       ?? null,
+                    'event_name'   => $r['eventName']      ?? null,
+                    'event_point'  => $r['eventPointName'] ?? null,
+                    'door_name'    => $r['doorName']       ?? null,
+                    'reader_name'  => $r['readerName']     ?? null,
+                    'dev_name'     => $r['devName']        ?? null,
+                    'acc_zone'     => $r['accZone']        ?? null,
+                ];
+            }, $rowsRaw);
+
+            echo json_encode([
+                'ok'   => true,
+                'rows' => $rows,
+                'meta' => [
+                    'total' => (int)($dataBlock['total'] ?? count($rows)),
+                    'page'  => (int)($dataBlock['page']  ?? 0),
+                    'size'  => (int)($dataBlock['size']  ?? count($rows)),
+                ],
+            ], JSON_UNESCAPED_UNICODE);
+
+        } catch (\Throwable $e) {
+            echo json_encode([
+                'ok'    => false,
+                'error' => $e->getMessage(),
+            ], JSON_UNESCAPED_UNICODE);
+        }
+    }
+
 
 }
 

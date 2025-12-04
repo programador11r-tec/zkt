@@ -2258,19 +2258,18 @@ async function loadSettings(quiet = false) {
               <thead class="table-light">
                 <tr>
                   <th>Fecha / hora</th>
+                  <th>ID</th>
                   <th>PIN</th>
                   <th>Nombre</th>
-                  <th>Departamento</th>
+                  <th>Apellido</th>
+                  <th>Tipo verificación</th>
                   <th>Área</th>
                   <th>Dispositivo</th>
                   <th>Evento</th>
-                  <th>Punto</th>
-                  <th>Puerta</th>
-                  <th>Lector</th>
                 </tr>
               </thead>
               <tbody id="biometricRows">
-                <tr><td colspan="10" class="text-center text-muted">Consulta para ver resultados.</td></tr>
+                <tr><td colspan="9" class="text-center text-muted">Consulta para ver resultados.</td></tr>
               </tbody>
             </table>
           </div>
@@ -2806,9 +2805,9 @@ async function loadSettings(quiet = false) {
       downloadBlob(blob, `aperturas_manuales_${document.getElementById('manualOpenFrom').value}_${document.getElementById('manualOpenTo').value}.csv`);
     });
 
-    // === Reporte biométrico ===
+    // === Reporte biométrico (simplificado) ===
     const fetchBiometricReport = async () => {
-      biometricRowsEl.innerHTML = `<tr><td colspan="10" class="text-center text-muted">Consultando...</td></tr>`;
+      biometricRowsEl.innerHTML = `<tr><td colspan="9" class="text-center text-muted">Consultando...</td></tr>`;
       biometricSummaryEl.innerHTML = '';
       biometricMsgEl.textContent = '';
       clearAlert(biometricAlertEl);
@@ -2838,7 +2837,7 @@ async function loadSettings(quiet = false) {
         renderBiometricSummary();
         biometricCsvBtn.disabled = rows.length === 0;
       } catch (err) {
-        biometricRowsEl.innerHTML = `<tr><td colspan="10" class="text-center text-danger">Error: ${escapeHtml(err.message)}</td></tr>`;
+        biometricRowsEl.innerHTML = `<tr><td colspan="9" class="text-center text-danger">Error: ${escapeHtml(err.message)}</td></tr>`;
         showAlert(biometricAlertEl, `No se pudo cargar el reporte de dispositivo: ${err.message}`, 'danger');
       }
     };
@@ -2862,55 +2861,51 @@ async function loadSettings(quiet = false) {
     const renderBiometricRows = () => {
       const { slice } = paginate(biometricState.rows, biometricState.page, biometricState.perPage);
       if (!slice.length) {
-        biometricRowsEl.innerHTML = `<tr><td colspan="10" class="text-center text-muted">No hay registros.</td></tr>`;
+        biometricRowsEl.innerHTML = `<tr><td colspan="9" class="text-center text-muted">No hay registros.</td></tr>`;
         biometricPaginationEl.innerHTML = '';
         return;
       }
 
       biometricRowsEl.innerHTML = slice.map((r) => {
-        const fullName = [r.name, r.lastName].filter(Boolean).join(' ');
         return `
           <tr>
             <td>${escapeHtml(formatDateValue(r.eventTime))}</td>
+            <td>${escapeHtml(r.logId ?? r.id ?? '')}</td>
             <td>${escapeHtml(r.pin ?? '')}</td>
-            <td>${escapeHtml(fullName || r.name || '')}</td>
-            <td>${escapeHtml(r.deptName ?? '')}</td>
+            <td>${escapeHtml(r.name ?? '')}</td>
+            <td>${escapeHtml(r.lastName ?? '')}</td>
+            <td>${escapeHtml(r.verifyModeName ?? r.verify_mode ?? '')}</td>
             <td>${escapeHtml(r.areaName ?? '')}</td>
             <td>${escapeHtml(r.devName ?? '')}</td>
             <td>${escapeHtml(r.eventName ?? '')}</td>
-            <td>${escapeHtml(r.eventPointName ?? '')}</td>
-            <td>${escapeHtml(r.doorName ?? '')}</td>
-            <td>${escapeHtml(r.readerName ?? '')}</td>
           </tr>`;
       }).join('');
 
       buildPagination(biometricPaginationEl, biometricState, renderBiometricRows);
     };
 
-    // CSV biométrico
+    // CSV biométrico reducido
     biometricCsvBtn.addEventListener('click', () => {
       const rows = biometricState.rows || [];
       if (!rows.length) return;
 
       const headers = [
-        'eventTime','pin','nombre','departamento','area',
-        'dispositivo','evento','punto','puerta','lector'
+        'eventTime','id','pin','nombre','apellido','tipo_verificacion',
+        'area','dispositivo','evento'
       ];
       const csv = [
         headers.join(','),
         ...rows.map(r => {
-          const fullName = [r.name, r.lastName].filter(Boolean).join(' ');
           const vals = [
             formatDateForCsv(r.eventTime).replaceAll('"','""'),
+            String(r.logId ?? r.id ?? '').replaceAll('"','""'),
             String(r.pin ?? '').replaceAll('"','""'),
-            String(fullName || r.name || '').replaceAll('"','""'),
-            String(r.deptName ?? '').replaceAll('"','""'),
+            String(r.name ?? '').replaceAll('"','""'),
+            String(r.lastName ?? '').replaceAll('"','""'),
+            String(r.verifyModeName ?? r.verify_mode ?? '').replaceAll('"','""'),
             String(r.areaName ?? '').replaceAll('"','""'),
             String(r.devName ?? '').replaceAll('"','""'),
             String(r.eventName ?? '').replaceAll('"','""'),
-            String(r.eventPointName ?? '').replaceAll('"','""'),
-            String(r.doorName ?? '').replaceAll('"','""'),
-            String(r.readerName ?? '').replaceAll('"','""'),
           ];
           return vals.map(v => `"${v}"`).join(',');
         }),

@@ -4320,7 +4320,9 @@ class ApiController {
 
     public function reportsDeviceLogs(): void
     {
-        header('Content-Type: application/json; charset=utf-8');
+        // Mismo patrón que syncRemoteParkRecords, pero SOLO lee y devuelve JSON
+        $cid = $this->newCorrelationId('devlogs');
+        $t0  = microtime(true);
 
         try {
             @date_default_timezone_set('America/Guatemala');
@@ -4329,131 +4331,191 @@ class ApiController {
             $to   = trim((string)($_GET['to']   ?? ''));
 
             if ($from === '' || $to === '') {
-                echo json_encode([
+                \App\Utils\Http::json([
                     'ok'    => false,
                     'error' => 'Parámetros "from" y "to" son requeridos (YYYY-MM-DD).',
-                ], JSON_UNESCAPED_UNICODE);
+                ], 400);
                 return;
             }
 
-            // Armamos beginTime / endTime con rango completo de día
+            // Rango de día completo
             $beginTime = $from . ' 00:00:00';
             $endTime   = $to   . ' 23:59:59';
 
-            // 🔒 deviceSn fijo
-            $deviceSn  = 'TDBD244800158';
+            // Device SN FIJO (lo que pediste)
+            $deviceSn = 'TDBD244800158';
 
-            $query = http_build_query([
-                'deviceSn' => $deviceSn,
-                'pageNo'   => 1,
-                'pageSize' => 100,
-                'beginTime'=> $beginTime,
-                'endTime'  => $endTime,
-            ]);
+            // === BASE URL desde Hamachi (igual que syncRemoteParkRecords) ===
+            $baseUrl = rtrim((string) $this->config->get('HAMACHI_PARK_BASE_URL', ''), '/');
+            if ($baseUrl === '') {
+                \App\Utils\Http::json([
+                    'ok'    => false,
+                    'error' => 'HAMACHI_PARK_BASE_URL no está configurado.',
+                ], 400);
+                return;
+            }
 
-            $url = 'https://localhost:8098/api/v3/transaction/device?' . $query;
+            // Token opcional, mismo patrón que syncRemoteParkRecords
+            $accessToken = (string) ($_GET['access_token'] ?? $this->config->get('HAMACHI_PARK_ACCESS_TOKEN', ''));
 
-            // Llamada estilo payNotifyAgain (con cURL)
-            $ch = curl_init($url);
+            // Paginación opcional
+            $pageNo   = (int) ($_GET['pageNo'] ?? $_GET['page'] ?? 1);
+            if ($pageNo < 1) $pageNo = 1;
+            $pageSize = (int) ($_GET['pageSize'] ?? $_GET['limit'] ?? 100);
+            if ($pageSize <= 0) $pageSize = 100;
+            $pageSize = min($pageSize, 500); // suficiente para log
+
+            // Query EXACTO que usa el API de CVSecurity
+            $query = [
+                'deviceSn'  => $deviceSn,
+                'pageNo'    => $pageNo,
+                'pageSize'  => $pageSize,
+                'beginTime' => $beginTime,
+                'endTime'   => $endTime,
+            ];
+            if ($accessToken !== '') {
+                $query['access_token'] = $accessToken;
+            }
+
+            $endpoint = $baseUrl . '/api/v3/transaction/device?' . http_build_query($query);
+
+            $headers = ['Accept: application/json'];
+            $hostHeader = trim((string) $this->config->get('HAMACHI_PARK_HOST_HEADER', ''));
+            if ($hostHeader !== '') {
+                $headers[] = 'Host: ' . $hostHeader;
+            }
+
+            $verifySsl = strtolower((string) $this->config->get('HAMACHI_PARK_VERIFY_SSL', 'false')) === 'true';
+
+            $ch = curl_init($endpoint);
             curl_setopt_array($ch, [
                 CURLOPT_RETURNTRANSFER => true,
-                CURLOPT_CONNECTTIMEOUT => 10,
-                CURLOPT_TIMEOUT        => 30,
-                CURLOPT_HTTPHEADER     => ['Accept: application/json'],
+                CURLOPT_CONNECTTIMEOUT => 15,
+                CURLOPT_TIMEOUT        => 35,
+                CURLOPT_HTTPHEADER     => $headers,
                 CURLOPT_NOSIGNAL       => true,
                 CURLOPT_TCP_KEEPALIVE  => 1,
                 CURLOPT_TCP_KEEPIDLE   => 30,
                 CURLOPT_TCP_KEEPINTVL  => 10,
                 CURLOPT_HTTP_VERSION   => CURL_HTTP_VERSION_1_1,
-                CURLOPT_HEADER         => false,
-
-                // Como es https://localhost:8098 probablemente con certificado self-signed
-                CURLOPT_SSL_VERIFYPEER => false,
-                CURLOPT_SSL_VERIFYHOST => false,
             ]);
+            if (!$verifySsl) {
+                curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+                curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+            }
 
-            $resp = curl_exec($ch);
-            if ($resp === false) {
-                $err = curl_error($ch) ?: 'Error desconocido';
+            // === MUY IMPORTANTE: CONNECT_TO (igual que syncRemoteParkRecords) ===
+            $connectTo = trim((string)$this->config->get('HAMACHI_PARK_CONNECT_TO', '')); // ej: "localhost:8098:25.21.54.208:8098"
+            if ($connectTo !== '') {
+                curl_setopt($ch, CURLOPT_CONNECT_TO, [$connectTo]);
+            }
+
+            $raw = curl_exec($ch);
+            if ($raw === false) {
+                $err  = curl_error($ch) ?: 'Error desconocido';
+                $info = curl_getinfo($ch) ?: [];
                 curl_close($ch);
 
-                echo json_encode([
+                \App\Utils\Http::json([
                     'ok'    => false,
                     'error' => 'No se pudo contactar al API biométrico: ' . $err,
-                ], JSON_UNESCAPED_UNICODE);
+                    'info'  => $info,
+                ], 500);
                 return;
             }
 
-            $http = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $info   = curl_getinfo($ch) ?: [];
+            $status = (int)($info['http_code'] ?? 0);
             curl_close($ch);
 
-            if ($http < 200 || $http >= 300) {
-                echo json_encode([
+            if ($status < 200 || $status >= 300) {
+                \App\Utils\Http::json([
                     'ok'        => false,
-                    'error'     => "API biométrico devolvió HTTP $http",
-                    'http_code' => $http,
-                    'raw'       => $resp,
-                ], JSON_UNESCAPED_UNICODE);
+                    'error'     => 'HTTP ' . $status . ' desde API biométrico',
+                    'preview'   => substr($raw, 0, 500),
+                    'http_code' => $status,
+                    'endpoint'  => $endpoint,
+                ], 500);
                 return;
             }
 
-            $js = json_decode($resp, true);
-            if (!is_array($js)) {
-                echo json_encode([
-                    'ok'    => false,
-                    'error' => 'Respuesta del API biométrico no es JSON válido.',
-                    'raw'   => $resp,
-                ], JSON_UNESCAPED_UNICODE);
+            $payload = json_decode($raw, true);
+            if (!is_array($payload)) {
+                \App\Utils\Http::json([
+                    'ok'        => false,
+                    'error'     => 'Respuesta del API biométrico no es JSON válido.',
+                    'raw'       => substr($raw, 0, 500),
+                    'http_code' => $status,
+                ], 500);
                 return;
             }
 
-            if ((int)($js['code'] ?? -1) !== 0) {
-                echo json_encode([
+            if ((int)($payload['code'] ?? -1) !== 0) {
+                \App\Utils\Http::json([
                     'ok'     => false,
-                    'error'  => $js['message'] ?? 'API biométrico devolvió error.',
-                    'remote' => $js,
-                ], JSON_UNESCAPED_UNICODE);
+                    'error'  => $payload['message'] ?? 'API biométrico devolvió error.',
+                    'remote' => $payload,
+                ], 200);
                 return;
             }
 
-            $dataBlock = $js['data'] ?? [];
-            $rowsRaw   = $dataBlock['data'] ?? [];
+            $dataBlock = is_array($payload['data'] ?? null) ? $payload['data'] : [];
+            $rowsRaw   = is_array($dataBlock['data'] ?? null) ? $dataBlock['data'] : [];
 
-            // Normalizamos las filas para la tabla del frontend
+            // 🔴 AQUÍ está el cambio importante: devolvemos las llaves que el front espera
             $rows = array_map(function (array $r): array {
                 return [
-                    'event_time'   => $r['eventTime']      ?? null,
-                    'pin'          => $r['pin']            ?? null,
-                    'name'         => trim(($r['name'] ?? '') . ' ' . ($r['lastName'] ?? '')),
-                    'dept_name'    => $r['deptName']       ?? null,
-                    'area_name'    => $r['areaName']       ?? null,
-                    'event_name'   => $r['eventName']      ?? null,
-                    'event_point'  => $r['eventPointName'] ?? null,
-                    'door_name'    => $r['doorName']       ?? null,
-                    'reader_name'  => $r['readerName']     ?? null,
-                    'dev_name'     => $r['devName']        ?? null,
-                    'acc_zone'     => $r['accZone']        ?? null,
+                    // FECHA / HORA
+                    'eventTime'      => $r['eventTime']      ?? null,
+
+                    // ID (puedes usar logId o id según prefieras)
+                    'logId'          => $r['logId']          ?? null,
+                    'id'             => $r['id']             ?? null,
+
+                    // PIN, nombre, apellido
+                    'pin'            => $r['pin']            ?? null,
+                    'name'           => $r['name']           ?? null,
+                    'lastName'       => $r['lastName']       ?? null,
+
+                    // Tipo de verificación
+                    'verifyModeName' => $r['verifyModeName'] ?? null,
+
+                    // Área y dispositivo
+                    'areaName'       => $r['areaName']       ?? null,
+                    'devName'        => $r['devName']        ?? null,
+
+                    // Evento
+                    'eventName'      => $r['eventName']      ?? null,
+
+                    // (Opcionales, por si luego los quieres usar)
+                    'eventPointName' => $r['eventPointName'] ?? null,
+                    'doorName'       => $r['doorName']       ?? null,
+                    'readerName'     => $r['readerName']     ?? null,
+                    'accZone'        => $r['accZone']        ?? null,
                 ];
             }, $rowsRaw);
 
-            echo json_encode([
+            \App\Utils\Http::json([
                 'ok'   => true,
                 'rows' => $rows,
                 'meta' => [
-                    'total' => (int)($dataBlock['total'] ?? count($rows)),
-                    'page'  => (int)($dataBlock['page']  ?? 0),
-                    'size'  => (int)($dataBlock['size']  ?? count($rows)),
+                    'total'       => (int)($dataBlock['total'] ?? count($rows)),
+                    'page'        => (int)($dataBlock['page']  ?? 0),
+                    'size'        => (int)($dataBlock['size']  ?? count($rows)),
+                    'http_code'   => $status,
+                    'endpoint'    => $endpoint,
+                    'duration_ms' => $this->msSince($t0),
+                    'cid'         => $cid,
                 ],
-            ], JSON_UNESCAPED_UNICODE);
+            ]);
 
         } catch (\Throwable $e) {
-            echo json_encode([
+            \App\Utils\Http::json([
                 'ok'    => false,
                 'error' => $e->getMessage(),
-            ], JSON_UNESCAPED_UNICODE);
+            ], 500);
         }
     }
-
 
 }
 

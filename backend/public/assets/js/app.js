@@ -1873,12 +1873,19 @@ async function loadSettings(quiet = false) {
       filters: { from: defaultFrom, to: defaultTo, q: '' },
     };
 
-    const biometricState = {
+    // Ahora tenemos DOS estados biométricos, uno por dispositivo
+    const biometricState158 = {
       rows: [],
       summary: null,
       page: 1,
       perPage: 20,
-      filters: { from: defaultFrom, to: defaultTo, q: '' },
+    };
+
+    const biometricState155 = {
+      rows: [],
+      summary: null,
+      page: 1,
+      perPage: 20,
     };
 
     // === Helpers ===
@@ -2213,13 +2220,13 @@ async function loadSettings(quiet = false) {
         </div>
       </section>
 
-      <!-- Reporte de registros del dispositivo biométrico -->
+      <!-- Reporte de registros de dispositivos biométricos -->
       <section class="card shadow-sm">
         <div class="card-body">
           <div class="d-flex flex-wrap justify-content-between align-items-start gap-2">
             <div>
-              <h5 class="card-title mb-1">Registros del dispositivo biométrico</h5>
-              <p class="text-muted small mb-0">Eventos de acceso obtenidos desde CVSecurity.</p>
+              <h5 class="card-title mb-1">Registros de dispositivos biométricos</h5>
+              <p class="text-muted small mb-0">Eventos de acceso obtenidos desde CVSecurity (dos dispositivos).</p>
             </div>
             <span class="badge text-bg-secondary">Biométrico</span>
           </div>
@@ -2253,7 +2260,10 @@ async function loadSettings(quiet = false) {
           <div id="biometricAlert" class="mt-3"></div>
 
           <div id="biometricSummary" class="row g-3 mt-2"></div>
-          <div class="table-responsive mt-3">
+
+          <!-- Tabla dispositivo TDBD244800158 -->
+          <h6 class="mt-3 mb-1">Dispositivo TDBD244800158</h6>
+          <div class="table-responsive">
             <table class="table table-sm table-bordered align-middle mb-0">
               <thead class="table-light">
                 <tr>
@@ -2268,12 +2278,37 @@ async function loadSettings(quiet = false) {
                   <th>Evento</th>
                 </tr>
               </thead>
-              <tbody id="biometricRows">
+              <tbody id="biometricRows158">
                 <tr><td colspan="9" class="text-center text-muted">Consulta para ver resultados.</td></tr>
               </tbody>
             </table>
           </div>
-          <div id="biometricPagination" class="mt-2"></div>
+          <div id="biometricPagination158" class="mt-2"></div>
+
+          <!-- Tabla dispositivo TDBD244800155 -->
+          <h6 class="mt-4 mb-1">Dispositivo TDBD244800155</h6>
+          <div class="table-responsive">
+            <table class="table table-sm table-bordered align-middle mb-0">
+              <thead class="table-light">
+                <tr>
+                  <th>Fecha / hora</th>
+                  <th>ID</th>
+                  <th>PIN</th>
+                  <th>Nombre</th>
+                  <th>Apellido</th>
+                  <th>Tipo verificación</th>
+                  <th>Área</th>
+                  <th>Dispositivo</th>
+                  <th>Evento</th>
+                </tr>
+              </thead>
+              <tbody id="biometricRows155">
+                <tr><td colspan="9" class="text-center text-muted">Consulta para ver resultados.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div id="biometricPagination155" class="mt-2"></div>
+
           <div id="biometricMessage" class="small text-muted mt-2"></div>
         </div>
       </section>
@@ -2302,10 +2337,12 @@ async function loadSettings(quiet = false) {
     const manualOpenAlertEl = document.getElementById('manualOpenAlert');
     const manualOpenCsvBtn = document.getElementById('manualOpenCsv');
 
-    const biometricRowsEl = document.getElementById('biometricRows');
+    const biometricRows158El = document.getElementById('biometricRows158');
+    const biometricRows155El = document.getElementById('biometricRows155');
     const biometricSummaryEl = document.getElementById('biometricSummary');
     const biometricMsgEl = document.getElementById('biometricMessage');
-    const biometricPaginationEl = document.getElementById('biometricPagination');
+    const biometricPagination158El = document.getElementById('biometricPagination158');
+    const biometricPagination155El = document.getElementById('biometricPagination155');
     const biometricAlertEl = document.getElementById('biometricAlert');
     const biometricCsvBtn = document.getElementById('biometricCsv');
 
@@ -2462,7 +2499,7 @@ async function loadSettings(quiet = false) {
       downloadBlob(blob, `facturas_${document.getElementById('invoiceFrom').value}_${document.getElementById('invoiceTo').value}.csv`);
     });
 
-    // PDF emitidas
+    // PDF emitidas — con sincronización de estado FEL antes de generar PDF
     invoiceRowsEl.addEventListener('click', async (ev) => {
       const btn = ev.target.closest('button[data-action="pdf"]');
       if (!btn) return;
@@ -2479,6 +2516,40 @@ async function loadSettings(quiet = false) {
       clearAlert(invoiceAlertEl);
 
       try {
+        // 1) Sincronizar estado FEL -> BD
+        try {
+          const statusResp = await fetchJSON(api('fel/invoice/status-sync') + '?uuid=' + encodeURIComponent(uuid));
+          if (statusResp && statusResp.ok) {
+            const msgParts = [];
+            if (statusResp.document_status) {
+              msgParts.push(`Estado FEL: ${statusResp.document_status}`);
+            }
+            if (statusResp.db_updated) {
+              msgParts.push('Base de datos actualizada.');
+            }
+            if (msgParts.length) {
+              showAlert(invoiceAlertEl, msgParts.join(' · '), 'info');
+            }
+            if (statusResp.db_updated) {
+              // Recargar lista para reflejar el nuevo estado
+              await fetchInvoiceReport();
+            }
+          } else if (statusResp && statusResp.error) {
+            showAlert(
+              invoiceAlertEl,
+              `No se pudo sincronizar el estado FEL: ${statusResp.error}`,
+              'warning'
+            );
+          }
+        } catch (syncErr) {
+          showAlert(
+            invoiceAlertEl,
+            `Error al sincronizar estado FEL: ${syncErr.message}`,
+            'warning'
+          );
+        }
+
+        // 2) Generar PDF como siempre
         const resp = await fetch(api('fel/invoice/pdf') + '?uuid=' + encodeURIComponent(uuid));
         if (!resp.ok) {
           const txt = await resp.text().catch(() => '');
@@ -2805,9 +2876,10 @@ async function loadSettings(quiet = false) {
       downloadBlob(blob, `aperturas_manuales_${document.getElementById('manualOpenFrom').value}_${document.getElementById('manualOpenTo').value}.csv`);
     });
 
-    // === Reporte biométrico (simplificado) ===
+    // === Reporte biométrico (dos dispositivos) ===
     const fetchBiometricReport = async () => {
-      biometricRowsEl.innerHTML = `<tr><td colspan="9" class="text-center text-muted">Consultando...</td></tr>`;
+      biometricRows158El.innerHTML = `<tr><td colspan="9" class="text-center text-muted">Consultando...</td></tr>`;
+      biometricRows155El.innerHTML = `<tr><td colspan="9" class="text-center text-muted">Consultando...</td></tr>`;
       biometricSummaryEl.innerHTML = '';
       biometricMsgEl.textContent = '';
       clearAlert(biometricAlertEl);
@@ -2823,50 +2895,96 @@ async function loadSettings(quiet = false) {
       if (q) params.set('q', q);
 
       try {
-        const url = params.size ? `${api('reports/device-logs')}?${params}` : api('reports/device-logs');
-        const js = await fetchJSON(url);
-        if (!js || js.ok === false) throw new Error(js.error || 'Sin respuesta');
+        const baseUrl = api('reports/device-logs');
 
-        const rows = js.rows || [];
-        biometricState.rows = rows;
-        biometricState.summary = {
-          total: rows.length,
-        };
-        biometricState.page = 1;
-        renderBiometricRows();
+        const url158 = params.size
+          ? `${baseUrl}?${params.toString()}&deviceSn=TDBD244800158`
+          : `${baseUrl}?deviceSn=TDBD244800158`;
+
+        const url155 = params.size
+          ? `${baseUrl}?${params.toString()}&deviceSn=TDBD244800155`
+          : `${baseUrl}?deviceSn=TDBD244800155`;
+
+        const [js158, js155] = await Promise.all([
+          fetchJSON(url158),
+          fetchJSON(url155),
+        ]);
+
+        if (!js158 || js158.ok === false) {
+          throw new Error(js158?.error || 'Error en logs de dispositivo TDBD244800158');
+        }
+        if (!js155 || js155.ok === false) {
+          throw new Error(js155?.error || 'Error en logs de dispositivo TDBD244800155');
+        }
+
+        const rows158 = js158.rows || [];
+        const rows155 = js155.rows || [];
+
+        biometricState158.rows = rows158;
+        biometricState155.rows = rows155;
+
+        biometricState158.summary = { total: rows158.length };
+        biometricState155.summary = { total: rows155.length };
+
+        biometricState158.page = 1;
+        biometricState155.page = 1;
+
+        renderBiometricRows158();
+        renderBiometricRows155();
         renderBiometricSummary();
-        biometricCsvBtn.disabled = rows.length === 0;
+
+        biometricCsvBtn.disabled = (rows158.length + rows155.length) === 0;
       } catch (err) {
-        biometricRowsEl.innerHTML = `<tr><td colspan="9" class="text-center text-danger">Error: ${escapeHtml(err.message)}</td></tr>`;
-        showAlert(biometricAlertEl, `No se pudo cargar el reporte de dispositivo: ${err.message}`, 'danger');
+        biometricRows158El.innerHTML = `<tr><td colspan="9" class="text-center text-danger">Error: ${escapeHtml(err.message)}</td></tr>`;
+        biometricRows155El.innerHTML = `<tr><td colspan="9" class="text-center text-danger">Error: ${escapeHtml(err.message)}</td></tr>`;
+        showAlert(biometricAlertEl, `No se pudo cargar el reporte de dispositivos: ${err.message}`, 'danger');
       }
     };
 
     const renderBiometricSummary = () => {
-      const s = biometricState.summary;
-      if (!s) return;
+      const s158 = biometricState158.summary || { total: 0 };
+      const s155 = biometricState155.summary || { total: 0 };
+      const total = (s158.total || 0) + (s155.total || 0);
+
       biometricSummaryEl.innerHTML = `
-        <div class="col-sm-6 col-lg-3">
+        <div class="col-sm-6 col-lg-4">
           <div class="card border-0 bg-body-tertiary h-100">
             <div class="card-body py-3">
-              <div class="text-muted small">Registros</div>
-              <div class="fs-5 fw-semibold">${s.total}</div>
+              <div class="text-muted small">Registros dispositivo TDBD244800158</div>
+              <div class="fs-5 fw-semibold">${s158.total || 0}</div>
+            </div>
+          </div>
+        </div>
+        <div class="col-sm-6 col-lg-4">
+          <div class="card border-0 bg-body-tertiary h-100">
+            <div class="card-body py-3">
+              <div class="text-muted small">Registros dispositivo TDBD244800155</div>
+              <div class="fs-5 fw-semibold">${s155.total || 0}</div>
+            </div>
+          </div>
+        </div>
+        <div class="col-sm-6 col-lg-4">
+          <div class="card border-0 bg-body-tertiary h-100">
+            <div class="card-body py-3">
+              <div class="text-muted small">Registros totales</div>
+              <div class="fs-5 fw-semibold">${total}</div>
             </div>
           </div>
         </div>
       `;
+
       biometricMsgEl.textContent = '';
     };
 
-    const renderBiometricRows = () => {
-      const { slice } = paginate(biometricState.rows, biometricState.page, biometricState.perPage);
+    const renderBiometricRows158 = () => {
+      const { slice } = paginate(biometricState158.rows, biometricState158.page, biometricState158.perPage);
       if (!slice.length) {
-        biometricRowsEl.innerHTML = `<tr><td colspan="9" class="text-center text-muted">No hay registros.</td></tr>`;
-        biometricPaginationEl.innerHTML = '';
+        biometricRows158El.innerHTML = `<tr><td colspan="9" class="text-center text-muted">No hay registros.</td></tr>`;
+        biometricPagination158El.innerHTML = '';
         return;
       }
 
-      biometricRowsEl.innerHTML = slice.map((r) => {
+      biometricRows158El.innerHTML = slice.map((r) => {
         return `
           <tr>
             <td>${escapeHtml(formatDateValue(r.eventTime))}</td>
@@ -2881,12 +2999,40 @@ async function loadSettings(quiet = false) {
           </tr>`;
       }).join('');
 
-      buildPagination(biometricPaginationEl, biometricState, renderBiometricRows);
+      buildPagination(biometricPagination158El, biometricState158, renderBiometricRows158);
     };
 
-    // CSV biométrico reducido
+    const renderBiometricRows155 = () => {
+      const { slice } = paginate(biometricState155.rows, biometricState155.page, biometricState155.perPage);
+      if (!slice.length) {
+        biometricRows155El.innerHTML = `<tr><td colspan="9" class="text-center text-muted">No hay registros.</td></tr>`;
+        biometricPagination155El.innerHTML = '';
+        return;
+      }
+
+      biometricRows155El.innerHTML = slice.map((r) => {
+        return `
+          <tr>
+            <td>${escapeHtml(formatDateValue(r.eventTime))}</td>
+            <td>${escapeHtml(r.logId ?? r.id ?? '')}</td>
+            <td>${escapeHtml(r.pin ?? '')}</td>
+            <td>${escapeHtml(r.name ?? '')}</td>
+            <td>${escapeHtml(r.lastName ?? '')}</td>
+            <td>${escapeHtml(r.verifyModeName ?? r.verify_mode ?? '')}</td>
+            <td>${escapeHtml(r.areaName ?? '')}</td>
+            <td>${escapeHtml(r.devName ?? '')}</td>
+            <td>${escapeHtml(r.eventName ?? '')}</td>
+          </tr>`;
+      }).join('');
+
+      buildPagination(biometricPagination155El, biometricState155, renderBiometricRows155);
+    };
+
+    // CSV biométrico combinado (ambos dispositivos)
     biometricCsvBtn.addEventListener('click', () => {
-      const rows = biometricState.rows || [];
+      const rows158 = biometricState158.rows || [];
+      const rows155 = biometricState155.rows || [];
+      const rows = rows158.concat(rows155);
       if (!rows.length) return;
 
       const headers = [

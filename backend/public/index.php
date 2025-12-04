@@ -92,6 +92,21 @@ $router->get('/api/fel/manual-invoice/one', function () use ($api) {
     $api->getManualInvoiceOne(); // ?id=...
 });
 
+// 🔹 NUEVO: Sincronizar estado FEL de una factura por UUID
+// GET /api/fel/invoice/status-sync?uuid=...
+$router->get('/api/fel/invoice/status-sync', function () {
+    Auth::requireAuth();
+
+    // Cargar configuración desde .env
+    $cfg = new Config(__DIR__ . '/../.env');
+
+    // Cliente G4S
+    $client = new G4SClient($cfg);
+
+    // Método que agregaste en G4SClient.php
+    $client->syncInvoiceStatus();
+});
+
 // (Si aún usas estas) — normalmente SOLO ADMIN
 $router->get('/api/sync/tickets', function () use ($api) {
      Auth::requireAuth();
@@ -123,12 +138,10 @@ $router->get('/api/reports/manual-open', function () use ($api) {
     return $api->reportsManualOpen();   // nuevo método en ApiController
 });
 
-
 // === FEL PDFs ===
 $router->get('/api/fel/invoice/pdf', function () use ($api) {
     $api->invoicePdf();
 });
-
 
 // Consulta NIT (G4S): autenticado (tú decides si solo admin)
 $router->get('/api/g4s/lookup-nit', function () {
@@ -224,8 +237,5 @@ if ($__method === 'POST' && $__path === '/api/ingest/tickets')  { $api->ingestTi
 if ($__method === 'POST' && $__path === '/api/ingest/payments') { $api->ingestPayments(); return; }
 
 /* ============ DISPATCH ============ */
-
-
-
 
 $router->dispatch($_SERVER['REQUEST_METHOD'], $_SERVER['REQUEST_URI']);

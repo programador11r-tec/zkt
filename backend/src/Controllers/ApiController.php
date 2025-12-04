@@ -4342,8 +4342,12 @@ class ApiController {
             $beginTime = $from . ' 00:00:00';
             $endTime   = $to   . ' 23:59:59';
 
-            // Device SN FIJO (lo que pediste)
-            $deviceSn = 'TDBD244800158';
+            // Device SN: puede venir por querystring, si no se usa el por defecto
+            $deviceSn = trim((string)($_GET['deviceSn'] ?? $_GET['device_sn'] ?? ''));
+            if ($deviceSn === '') {
+                // valor por defecto (el que ya usabas)
+                $deviceSn = 'TDBD244800158';
+            }
 
             // === BASE URL desde Hamachi (igual que syncRemoteParkRecords) ===
             $baseUrl = rtrim((string) $this->config->get('HAMACHI_PARK_BASE_URL', ''), '/');
@@ -4416,7 +4420,7 @@ class ApiController {
                 $info = curl_getinfo($ch) ?: [];
                 curl_close($ch);
 
-                \App\Utils\Http::json([
+                \App\Utils.Http::json([
                     'ok'    => false,
                     'error' => 'No se pudo contactar al API biométrico: ' . $err,
                     'info'  => $info,
@@ -4462,32 +4466,18 @@ class ApiController {
             $dataBlock = is_array($payload['data'] ?? null) ? $payload['data'] : [];
             $rowsRaw   = is_array($dataBlock['data'] ?? null) ? $dataBlock['data'] : [];
 
-            // 🔴 AQUÍ está el cambio importante: devolvemos las llaves que el front espera
             $rows = array_map(function (array $r): array {
                 return [
-                    // FECHA / HORA
                     'eventTime'      => $r['eventTime']      ?? null,
-
-                    // ID (puedes usar logId o id según prefieras)
                     'logId'          => $r['logId']          ?? null,
                     'id'             => $r['id']             ?? null,
-
-                    // PIN, nombre, apellido
                     'pin'            => $r['pin']            ?? null,
                     'name'           => $r['name']           ?? null,
                     'lastName'       => $r['lastName']       ?? null,
-
-                    // Tipo de verificación
                     'verifyModeName' => $r['verifyModeName'] ?? null,
-
-                    // Área y dispositivo
                     'areaName'       => $r['areaName']       ?? null,
                     'devName'        => $r['devName']        ?? null,
-
-                    // Evento
                     'eventName'      => $r['eventName']      ?? null,
-
-                    // (Opcionales, por si luego los quieres usar)
                     'eventPointName' => $r['eventPointName'] ?? null,
                     'doorName'       => $r['doorName']       ?? null,
                     'readerName'     => $r['readerName']     ?? null,
@@ -4499,6 +4489,7 @@ class ApiController {
                 'ok'   => true,
                 'rows' => $rows,
                 'meta' => [
+                    'deviceSn'    => $deviceSn,
                     'total'       => (int)($dataBlock['total'] ?? count($rows)),
                     'page'        => (int)($dataBlock['page']  ?? 0),
                     'size'        => (int)($dataBlock['size']  ?? count($rows)),

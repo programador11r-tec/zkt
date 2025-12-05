@@ -58,14 +58,14 @@ class G4SClient
         $xmlDte = $this->buildGuatemalaDTE([
             'emisor' => [
                 'nit'             => $this->config->get('FEL_G4S_ENTITY', '81491514'),
-                'nombre'          => $this->config->get('EMISOR_NOMBRE', 'PARQUEO OBELISCO REFORMA'),
+                'nombre'          => $this->config->get('EMISOR_NOMBRE', 'KAVOD, SOCIEDAD ANONIMA'),
                 'comercial'       => $this->config->get('EMISOR_COMERCIAL', 'PARQUEO OBELISCO REFORMA'),
                 'establecimiento' => $this->config->get('FEL_G4S_ESTABLECIMIENTO', '4'),
                 'direccion'       => [
-                    'direccion'    => $this->config->get('EMISOR_DIR', 'Ciudad'),
+                    'direccion'    => $this->config->get('EMISOR_DIR', '8 AVENIDA 15-46 ZONA 9, CIUDAD DE GUATEMALA'),
                     'postal'       => $this->config->get('EMISOR_POSTAL', '01001'),
-                    'municipio'    => $this->config->get('EMISOR_MUNI', 'Guatemala'),
-                    'departamento' => $this->config->get('EMISOR_DEPTO', 'Guatemala'),
+                    'municipio'    => $this->config->get('EMISOR_MUNI', 'GUATEMALA'),
+                    'departamento' => $this->config->get('EMISOR_DEPTO', 'GUATEMALA'),
                     'pais'         => 'GT',
                 ],
             ],
@@ -1137,83 +1137,96 @@ class G4SClient
         $uuid = trim($uuid ?? '');
         if ($uuid === '') {
             return [
-                'ok'             => false,
-                'uuid'           => null,
-                'document_status'=> null,
-                'anulado'        => null,
-                'error'          => 'UUID requerido',
+                'ok'              => false,
+                'uuid'            => null,
+                'document_status' => null,
+                'anulado'         => null,
+                'error'           => 'UUID requerido',
             ];
         }
 
-        // Lee config igual que g4sLookupNit
-        $cfgPath   = __DIR__ . '/../../.env';
-        $config    = new \Config\Config($cfgPath);
+        // === Lee config directo, SIN getConfig() ===
+        $config    = new \Config\Config(__DIR__ . '/../../.env');
         $entity    = (string) $config->get('FEL_G4S_ENTITY', '');
         $requestor = (string) $config->get('FEL_G4S_REQUESTOR', '');
-        // Cambia esta URL si tu manual indica otra
-        $baseUrl   = rtrim(
-            (string) $config->get(
-                'FEL_G4S_STATUS_WSDL',
-                'https://fel.g4sdocumenta.com/WSConsultaDTE/WSConsultaDTE.asmx'
-            ),
-            '/'
+
+        // Puede venir con ?wsdl, lo limpiamos
+        $baseUrlRaw = (string) $config->get(
+            'FEL_G4S_STATUS_WSDL',
+            'https://fel.g4sdocumenta.com/WSConsultaDTE/WSConsultaDTE.asmx?wsdl'
         );
+
+        $baseUrlNoQuery = preg_replace('~\?.*$~', '', $baseUrlRaw);
+        $baseUrl        = rtrim($baseUrlNoQuery, '/');
+
+        // Logs de depuración
+        error_log('[G4S][STATUS][BASE_URL_RAW] ' . $baseUrlRaw);
+        error_log('[G4S][STATUS][BASE_URL] ' . $baseUrl);
 
         if ($entity === '' || $requestor === '') {
             return [
-                'ok'             => false,
-                'uuid'           => $uuid,
-                'document_status'=> null,
-                'anulado'        => null,
-                'error'          => 'Faltan FEL_G4S_ENTITY o FEL_G4S_REQUESTOR',
+                'ok'              => false,
+                'uuid'            => $uuid,
+                'document_status' => null,
+                'anulado'         => null,
+                'error'           => 'Faltan FEL_G4S_ENTITY o FEL_G4S_REQUESTOR',
             ];
         }
 
-        // -------- helper de parseo --------
+        // --- helper genérico para parsear GET_INFODTE ---
         $parseXml = function (string $xml) {
             $sx = @simplexml_load_string($xml);
             if ($sx === false) {
                 return [false, null, null, null, 'XML inválido'];
             }
 
-            // Namespace típico de G4S
-            $sx->registerXPathNamespace('t', 'http://tempuri.org/');
+            error_log('[G4S][STATUS][RAW_XML] ' . substr($xml, 0, 500));
 
-            // 1) Forma genérica: <Response><Result>... dentro de cualquier GET_INFODTE
-            $respNodes = $sx->xpath('//t:Response');
+            // Buscar nodos *Response* por nombre local
+            $respNodes = $sx->xpath('//*[contains(local-name(), "Response")]');
             if (!isset($respNodes[0])) {
-                // A veces viene envuelto en GET_INFODTEResult
-                $respNodes = $sx->xpath('//t:GET_INFODTEResult/t:Response');
+                $respNodes = $sx->xpath('//*[contains(local-name(), "Result")]/*[contains(local-name(), "Response")]');
             }
-
             if (!isset($respNodes[0])) {
                 return [false, null, null, null, 'No se encontraron nodos Response'];
             }
 
             $resp = $respNodes[0];
 
-            $result = (string)($resp->Result ?? '');
-            $ok     = ($result === 'true' || $result === '1');
+            $ok       = false;
+            $uuidOut  = null;
+            $estado   = null;
+            $anulado  = null;
+            $errStr   = null;
 
-            // Ajusta estos nombres al PDF si difieren
-            $uuidOut = (string)($resp->UUID ?? $resp->uuid ?? '');
-            $estado  = (string)($resp->estado ?? $resp->Estado ?? '');
-            $anulado = (string)($resp->anulado ?? $resp->Anulado ?? '');
-            $errStr  = (string)($resp->error ?? '');
+            foreach ($resp->children() as $child) {
+                $name = strtoupper((string) $child->getName());
+                $val  = trim((string) $child);
 
-            return [
-                $ok,
-                $uuidOut ?: null,
-                $estado ?: null,
-                $anulado ?: null,
-                $errStr ?: null,
-            ];
+                if (strpos($name, 'RESULT') !== false) {
+                    $ok = ($val === 'true' || $val === '1');
+                }
+                if (strpos($name, 'UUID') !== false) {
+                    $uuidOut = $val;
+                }
+                if (strpos($name, 'ESTAD') !== false || strpos($name, 'STATUS') !== false) {
+                    $estado = $val;
+                }
+                if (strpos($name, 'ANUL') !== false || strpos($name, 'ANULAC') !== false) {
+                    $anulado = $val;
+                }
+                if (strpos($name, 'ERROR') !== false) {
+                    $errStr = $val;
+                }
+            }
+
+            return [$ok, $uuidOut ?: null, $estado ?: null, $anulado ?: null, $errStr ?: null];
         };
 
         // -------- 1) SOAP 1.1 --------
         try {
             $soapAction = 'http://tempuri.org/GET_INFODTE';
-            $xml = <<<XML
+            $xmlReq = <<<XML
             <?xml version="1.0" encoding="utf-8"?>
             <soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
                         xmlns:xsd="http://www.w3.org/2001/XMLSchema"
@@ -1236,7 +1249,7 @@ class G4SClient
                     'Content-Type: text/xml; charset=utf-8',
                     'SOAPAction: "'.$soapAction.'"',
                 ],
-                CURLOPT_POSTFIELDS     => $xml,
+                CURLOPT_POSTFIELDS     => $xmlReq,
                 CURLOPT_CONNECTTIMEOUT => 10,
                 CURLOPT_TIMEOUT        => 20,
             ]);
@@ -1253,6 +1266,7 @@ class G4SClient
             }
 
             [$ok, $uuidOut, $estado, $anulado, $errStr] = $parseXml($resp);
+
             return [
                 'ok'              => $ok,
                 'uuid'            => $uuidOut ?: $uuid,
@@ -1265,9 +1279,9 @@ class G4SClient
             error_log('[G4S][STATUS][SOAP11] ' . $e->getMessage());
         }
 
-        // -------- 2) SOAP 1.2 (último recurso) --------
+        // -------- 2) SOAP 1.2 --------
         try {
-            $xml = <<<XML
+            $xmlReq = <<<XML
             <?xml version="1.0" encoding="utf-8"?>
             <soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
                             xmlns:xsd="http://www.w3.org/2001/XMLSchema"
@@ -1287,7 +1301,7 @@ class G4SClient
                 CURLOPT_POST           => true,
                 CURLOPT_RETURNTRANSFER => true,
                 CURLOPT_HTTPHEADER     => ['Content-Type: application/soap+xml; charset=utf-8'],
-                CURLOPT_POSTFIELDS     => $xml,
+                CURLOPT_POSTFIELDS     => $xmlReq,
                 CURLOPT_CONNECTTIMEOUT => 10,
                 CURLOPT_TIMEOUT        => 20,
             ]);
@@ -1304,6 +1318,7 @@ class G4SClient
             }
 
             [$ok, $uuidOut, $estado, $anulado, $errStr] = $parseXml($resp);
+
             return [
                 'ok'              => $ok,
                 'uuid'            => $uuidOut ?: $uuid,
@@ -1324,70 +1339,95 @@ class G4SClient
             'error'           => 'No se pudo consultar el estado del DTE',
         ];
     }
-
+    
     public function syncInvoiceStatus(): void
-    {
-        header('Content-Type: application/json; charset=utf-8');
+{
+    header('Content-Type: application/json; charset=utf-8');
 
-        $uuid = trim((string)($_GET['uuid'] ?? ''));
-        if ($uuid === '') {
-            http_response_code(400);
-            echo json_encode([
-                'ok'    => false,
-                'error' => 'Parámetro uuid es requerido',
-            ], JSON_UNESCAPED_UNICODE);
-            return;
-        }
+    $uuid = trim((string)($_GET['uuid'] ?? ''));
+    error_log('[G4S][STATUS_SYNC][START] uuid=' . $uuid);
 
-        // 1) Consulta a G4S con el método "estilo NIT"
+    if ($uuid === '') {
+        error_log('[G4S][STATUS_SYNC][ERROR] UUID vacío');
+        http_response_code(400);
+        echo json_encode([
+            'ok'    => false,
+            'error' => 'Parámetro uuid es requerido',
+        ], JSON_UNESCAPED_UNICODE);
+        return;
+    }
+
+    try {
+        // 1) Consultar estado en G4S
         $res = $this->g4sGetDocumentStatus($uuid);
+        error_log('[G4S][STATUS_SYNC][G4S_RES] ' . json_encode($res, JSON_UNESCAPED_UNICODE));
 
-        if (!$res['ok'] && empty($res['document_status'])) {
-            // No se pudo consultar nada útil
+        $docStatus  = strtoupper(trim((string)($res['document_status'] ?? '')));
+        $anuladoRaw = trim((string)($res['anulado'] ?? ''));
+        $errorMsg   = $res['error'] ?? null;
+
+        if (!$res['ok'] && $docStatus === '') {
+            error_log('[G4S][STATUS_SYNC][ERROR] G4S no devolvió estado válido. error=' . $errorMsg);
             echo json_encode([
-                'ok'    => false,
-                'uuid'  => $uuid,
-                'error' => $res['error'] ?? 'No se pudo obtener el estado',
+                'ok'              => false,
+                'uuid'            => $uuid,
+                'document_status' => $docStatus,
+                'anulado'         => $anuladoRaw,
+                'error'           => $errorMsg ?: 'No se pudo obtener el estado',
             ], JSON_UNESCAPED_UNICODE);
             return;
         }
 
-        $docStatus = strtoupper((string)($res['document_status'] ?? ''));
-        $anuladoRaw = (string)($res['anulado'] ?? '');
-        $anulado = in_array(strtoupper($anuladoRaw), ['1','TRUE','SI','S','Y'], true);
+        // 2) Determinar si está anulado
+        $anulado = in_array(strtoupper($anuladoRaw), ['1','TRUE','SI','S','Y','ANULADO'], true)
+                || (strpos($docStatus, 'ANUL') !== false);
 
-        // 2) Mapear a columnas de la tabla invoices
+        // 3) Mapear al campo status de nuestra tabla invoices
         $invoiceStatus = 'PENDING';
-        if (in_array($docStatus, ['EMITIDO','ACEPTADO','CERTIFICADO'], true) && !$anulado) {
-            $invoiceStatus = 'OK';
-        } elseif ($anulado || in_array($docStatus, ['ANULADO','RECHAZADO','ERROR'], true)) {
+        if ($anulado || in_array($docStatus, ['ANULADO','RECHAZADO','ERROR'], true)) {
             $invoiceStatus = 'ERROR';
+        } elseif (in_array($docStatus, ['EMITIDO','ACEPTADO','CERTIFICADO','VIGENTE'], true)) {
+            $invoiceStatus = 'OK';
         }
 
-        // 3) Actualizar BD
+        error_log(sprintf(
+            '[G4S][STATUS_SYNC][MAP] uuid=%s doc_status=%s anulado=%s mapped_status=%s',
+            $uuid,
+            $docStatus,
+            $anulado ? '1' : '0',
+            $invoiceStatus
+        ));
+
+        // 4) Actualizar BD
         $dbUpdated = false;
         try {
-            // Usa el mismo helper que uses en el resto del proyecto
-            // Si tienes algo como \App\DB::getConnection(), úsalo aquí:
-            $pdo = \App\DB::getConnection(); // AJUSTA estoooo si tu helper se llama distinto
+            $pdo = \App\DB::getConnection();
+            error_log('[G4S][STATUS_SYNC][DB] Conexión OK, actualizando invoices...');
 
             $sql = <<<SQL
-        UPDATE invoices
-        SET status          = :status,
-            document_status = :doc_status,
-            updated_at      = NOW()
-        WHERE fel_uuid = :uuid
-            OR uuid     = :uuid
-        SQL;
+UPDATE invoices
+   SET status          = :status,
+       document_status = :doc_status,
+       updated_at      = NOW()
+ WHERE fel_uuid = :uuid
+    OR uuid     = :uuid
+SQL;
             $stmt = $pdo->prepare($sql);
             $stmt->execute([
-                ':status'    => $invoiceStatus,
-                ':doc_status'=> $docStatus,
-                ':uuid'      => $uuid,
+                ':status'     => $invoiceStatus,
+                ':doc_status' => $docStatus,
+                ':uuid'       => $uuid,
             ]);
             $dbUpdated = $stmt->rowCount() > 0;
+
+            error_log(sprintf(
+                '[G4S][STATUS_SYNC][DB] rowCount=%d dbUpdated=%s',
+                $stmt->rowCount(),
+                $dbUpdated ? '1' : '0'
+            ));
         } catch (\Throwable $e) {
-            // Si falla la BD, devolvemos que sí obtuvimos estado pero sin actualizar
+            error_log('[G4S][STATUS_SYNC][DB_ERROR] ' . $e->getMessage());
+            http_response_code(500);
             echo json_encode([
                 'ok'              => false,
                 'uuid'            => $uuid,
@@ -1400,7 +1440,16 @@ class G4SClient
             return;
         }
 
-        // 4) Respuesta final
+        // 5) Respuesta final OK
+        error_log(sprintf(
+            '[G4S][STATUS_SYNC][DONE] uuid=%s doc_status=%s invoice_status=%s anulado=%s db_updated=%s',
+            $uuid,
+            $docStatus,
+            $invoiceStatus,
+            $anulado ? '1' : '0',
+            $dbUpdated ? '1' : '0'
+        ));
+
         echo json_encode([
             'ok'              => true,
             'uuid'            => $uuid,
@@ -1408,8 +1457,19 @@ class G4SClient
             'invoice_status'  => $invoiceStatus,
             'anulado'         => $anulado,
             'db_updated'      => $dbUpdated,
-            'error'           => $res['error'] ?? null,
+            'error'           => $errorMsg,
+        ], JSON_UNESCAPED_UNICODE);
+    } catch (\Throwable $e) {
+        // Cualquier excepción inesperada en todo el flujo
+        error_log('[G4S][STATUS_SYNC][FATAL] ' . $e->getMessage() . ' TRACE: ' . $e->getTraceAsString());
+        http_response_code(500);
+        echo json_encode([
+            'ok'    => false,
+            'uuid'  => $uuid,
+            'error' => 'Excepción en syncInvoiceStatus: ' . $e->getMessage(),
         ], JSON_UNESCAPED_UNICODE);
     }
+}
+
 
 }

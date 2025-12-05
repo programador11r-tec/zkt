@@ -337,7 +337,7 @@ class G4SClient
 
         // ===== Emisor
         $nitEmisor    = trim($doc['emisor']['nit']     ?? '81491514');
-        $nomEmisor    = $doc['emisor']['nombre']       ?? 'PARQUEO OBELISCO REFORMA';
+        $nomEmisor    = $doc['emisor']['nombre']       ?? 'KAVOD, SOCIEDAD ANONIMA';
         $nomComercial = $doc['emisor']['comercial']    ?? 'PARQUEO OBELISCO REFORMA';
         $codEst       = $doc['emisor']['establecimiento'] ?? $this->config->get('FEL_G4S_ESTABLECIMIENTO', '4');
 
@@ -779,11 +779,11 @@ class G4SClient
             $xmlDte = $this->buildGuatemalaDTE([
                 'emisor' => [
                     'nit'             => $this->config->get('FEL_G4S_ENTITY', '81491514'),
-                    'nombre'          => $this->config->get('EMISOR_NOMBRE', 'PARQUEO OBELISCO REFORMA'),
+                    'nombre'          => $this->config->get('EMISOR_NOMBRE', 'KAVOD, SOCIEDAD ANONIMA'),
                     'comercial'       => $this->config->get('EMISOR_COMERCIAL', 'PARQUEO OBELISCO REFORMA'),
                     'establecimiento' => $this->config->get('FEL_G4S_ESTABLECIMIENTO', '4'),
                     'direccion'       => [
-                        'direccion'    => $this->config->get('EMISOR_DIR', 'Ciudad'),
+                        'direccion'    => $this->config->get('EMISOR_DIR', '8 AVENIDA 15-46 ZONA 9, CIUDAD DE GUATEMALA'),
                         'postal'       => $this->config->get('EMISOR_POSTAL', '01001'),
                         'municipio'    => $this->config->get('EMISOR_MUNI', 'Guatemala'),
                         'departamento' => $this->config->get('EMISOR_DEPTO', 'Guatemala'),

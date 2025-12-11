@@ -95,7 +95,9 @@
 
       <div class="ms-auto d-flex align-items-center gap-2">
         <span class="badge bg-white text-dark" id="envBadge" data-status="local">Local</span>
-        <button id="refreshBtn" class="btn btn-sm btn-outline-light">Actualizar</button>
+        <button id="btnLogout" class="btn btn-sm btn-outline-light">
+          <i class="bi bi-box-arrow-right me-1"></i> Cerrar sesión
+        </button>
       </div>
     </div>
   </nav>
@@ -222,7 +224,13 @@
     };
   </script>
 
-  <!-- Tu app -->
+  <!-- Tu app (modular) -->
+  <script src="/assets/js/core/app-core.js" defer></script>
+  <script src="/assets/js/pages/dashboard.js" defer></script>
+  <script src="/assets/js/pages/invoices.js" defer></script>
+  <script src="/assets/js/pages/reports.js" defer></script>
+  <script src="/assets/js/pages/settings.js" defer></script>
+  <script src="/assets/js/pages/manual-invoice.js" defer></script>
   <script src="/assets/js/app.js" defer></script>
 </body>
 </html>

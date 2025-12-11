@@ -22,6 +22,41 @@ use Config\Config;
 $router = new Router();
 $api    = new ApiController();
 
+// Restringir rutas si el usuario autenticado es rol "caseta"
+$currentUser = \App\Utils\Auth::currentUser();
+if ($currentUser && (($currentUser['role'] ?? null) === 'caseta')) {
+    $method = strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET');
+    $path   = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
+    $path   = rtrim($path, '/') ?: '/';
+
+    // Solo aplicamos la restricción a rutas API; los assets y el frontend pasan libres
+    if (str_starts_with($path, '/api')) {
+        // Solo dashboard y facturación (lectura + PDFs FEL) para caseta
+        $allowedCaseta = [
+            'GET /api/auth/me',
+            'POST /api/auth/ping',
+            'POST /api/auth/logout',
+            'GET /api/health',
+            'GET /api/tickets',
+            'GET /api/facturacion/list',
+            'GET /api/facturacion/emitidas',
+            'GET /api/fel/pdf',
+        'GET /api/fel/xml',
+        'GET /api/fel/invoice/pdf',
+        'GET /api/fel/document-pdf',
+        'GET /api/g4s/lookup-nit',
+    ];
+
+        $key = $method . ' ' . $path;
+        if (!in_array($key, $allowedCaseta, true)) {
+            http_response_code(403);
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['ok' => false, 'error' => 'Acceso restringido para rol caseta'], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+    }
+}
+
 /* ============ AUTH ============ */
 $router->post('/api/auth/login', function() {
     (new AuthController())->login();

@@ -1,4 +1,8 @@
 <?php
+// Zona horaria por defecto para todo el backend
+$tz = getenv('APP_TIMEZONE') ?: getenv('APP_TZ') ?: 'America/Guatemala';
+@date_default_timezone_set($tz);
+
 spl_autoload_register(function ($class) {
     $prefix = 'App\\';
     $base_dir = __DIR__ . '/../src/';

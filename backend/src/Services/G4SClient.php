@@ -31,10 +31,10 @@ class G4SClient
         \App\Utils\Logger::log("=== [SUBMIT INVOICE (PDF) START] ===", $logFile);
         \App\Utils\Logger::log("Payload: " . json_encode($payload, JSON_UNESCAPED_UNICODE), $logFile);
 
-        // 1) Validaciones mínimas
+        // 1) Validaciones m├¡nimas
         $total = isset($payload['total']) ? (float)$payload['total'] : 0.0;
         if ($total <= 0) {
-            $msg = "❌ Total debe ser > 0 para construir DTE (valor={$total})";
+            $msg = "ÔØî Total debe ser > 0 para construir DTE (valor={$total})";
             \App\Utils\Logger::log($msg, $logFile);
             throw new \RuntimeException($msg);
         }
@@ -83,7 +83,7 @@ class G4SClient
             ],
         ]);
 
-        // Guarda XML para inspección
+        // Guarda XML para inspecci├│n
         @file_put_contents(__DIR__ . '/../../storage/last_dte_pdf.xml', $xmlDte);
 
         // 4) SYSTEM_REQUEST con POST_DOCUMENT_SAT_PDF
@@ -93,17 +93,17 @@ class G4SClient
 
         $params = [
             'Transaction' => 'SYSTEM_REQUEST',
-            'Data1'       => 'POST_DOCUMENT_SAT_PDF', // ← como tu ejemplo
-            'Data2'       => $xmlB64,                 // ← XML en Base64
+            'Data1'       => 'POST_DOCUMENT_SAT_PDF', // ÔåÉ como tu ejemplo
+            'Data2'       => $xmlB64,                 // ÔåÉ XML en Base64
             'Data3'       => $reference,              // opcional, referencia
-            // Si tu emisor exige clave, colócala en Data3 o Data4 según su variante
+            // Si tu emisor exige clave, col├│cala en Data3 o Data4 seg├║n su variante
         ];
-        \App\Utils\Logger::log("→ SYSTEM_REQUEST POST_DOCUMENT_SAT_PDF (XML b64 len=".strlen($xmlB64).", ref={$reference})", $logFile);
+        \App\Utils\Logger::log("ÔåÆ SYSTEM_REQUEST POST_DOCUMENT_SAT_PDF (XML b64 len=".strlen($xmlB64).", ref={$reference})", $logFile);
 
         try {
             $respXml = $this->requestTransaction($params); // usa tu helper existente
         } catch (\Throwable $e) {
-            \App\Utils\Logger::log("❌ Error en requestTransaction(): " . $e->getMessage(), $logFile);
+            \App\Utils\Logger::log("ÔØî Error en requestTransaction(): " . $e->getMessage(), $logFile);
             throw $e;
         }
 
@@ -187,7 +187,7 @@ class G4SClient
             \App\Utils\Logger::log("Warn parse UUID/PDF: ".$e->getMessage(), $logFile);
         }
 
-        // Limpieza y verificación básica de PDF
+        // Limpieza y verificaci├│n b├ísica de PDF
         if ($pdfB64) $pdfB64 = str_replace(["\r","\n"," "], '', $pdfB64);
         $isPdf = false;
         if ($pdfB64) {
@@ -197,15 +197,15 @@ class G4SClient
         if ($isPdf) {
             \App\Utils\Logger::log("PDF base64 len=".strlen($pdfB64)." (ok)", $logFile);
         } else {
-            if ($pdfB64) \App\Utils\Logger::log("⚠️ PDF capturado pero no valida como PDF.", $logFile);
-            else         \App\Utils\Logger::log("⚠️ No se encontró PDF en la respuesta.", $logFile);
+            if ($pdfB64) \App\Utils\Logger::log("ÔÜá´©Å PDF capturado pero no valida como PDF.", $logFile);
+            else         \App\Utils\Logger::log("ÔÜá´©Å No se encontr├│ PDF en la respuesta.", $logFile);
             $pdfB64 = null;
         }
 
         $result = [
             'ok'         => (bool)$uuid,
             'uuid'       => $uuid ?: null,
-            'pdf_base64' => $pdfB64,                 // ← listo para guardar en BD
+            'pdf_base64' => $pdfB64,                 // ÔåÉ listo para guardar en BD
             'raw'        => $respXml,
             'httpStatus' => $this->getLastHttpStatus(),
             'reference'  => $reference,
@@ -216,7 +216,7 @@ class G4SClient
         return $result;
     }
 
-    /** 🧩 Helper para loggear request/response SOAP */
+    /** ­ƒº® Helper para loggear request/response SOAP */
     private function logSoap(string $file, string $content): void
     {
         $dir = __DIR__ . '/../../storage/logs';
@@ -242,7 +242,7 @@ class G4SClient
         $soapUrl   = (string)$this->config->get('FEL_G4S_SOAP_URL', 'https://fel.g4sdocumenta.com/webservicefront/factwsfront.asmx');
         $soapAction= 'http://www.fact.com.mx/schema/ws/RequestTransaction';
 
-        // Campos obligatorios según docs G4S
+        // Campos obligatorios seg├║n docs G4S
         $requestor = (string)$this->config->get('FEL_G4S_REQUESTOR', '');
         $country   = (string)$this->config->get('FEL_G4S_COUNTRY', 'GT');
         $entity    = (string)$this->config->get('FEL_G4S_ENTITY', '');
@@ -276,9 +276,9 @@ class G4SClient
         </soap:Envelope>
         XML;
 
-        // Logging (útil para depurar)
+        // Logging (├║til para depurar)
         $logFile = __DIR__ . '/../../storage/fel_submit_invoice.log';
-        \App\Utils\Logger::log("SOAP Request →\n".$envelope, $logFile);
+        \App\Utils\Logger::log("SOAP Request ÔåÆ\n".$envelope, $logFile);
 
         $ch = curl_init($soapUrl);
         curl_setopt_array($ch, [
@@ -325,8 +325,8 @@ class G4SClient
     /* ========================= DTE FEL Guatemala ========================= */
 
     /**
-     * Builder mínimo válido (FACT, IVA 12%, 1 ítem).
-     * Ajusta campos de dirección/correos/razón social según tu emisor.
+     * Builder m├¡nimo v├ílido (FACT, IVA 12%, 1 ├¡tem).
+     * Ajusta campos de direcci├│n/correos/raz├│n social seg├║n tu emisor.
      */
     private function buildGuatemalaDTE(array $doc): string
     {
@@ -379,12 +379,12 @@ class G4SClient
                     }
                 }
             } catch (\Throwable $e) {
-                // continúa con los datos originales si falla
+                // contin├║a con los datos originales si falla
             }
             if (!$nomRec) $nomRec = 'Receptor';
         }
 
-        // ===== Documento / Ítem
+        // ===== Documento / ├ìtem
         $moneda      = $doc['documento']['moneda'] ?? ($doc['moneda'] ?? 'GTQ');
         $totalBruto  = isset($doc['documento']['total']) ? (float)$doc['documento']['total'] : (float)($doc['total'] ?? 0);
         $descItem    = $doc['documento']['items'][0]['descripcion'] ?? ($doc['descripcion'] ?? 'Servicio de parqueo');
@@ -403,7 +403,7 @@ class G4SClient
         $montoGravable    = $f6($base);
         $montoImpuestoIVA = $f6($iva);
         $totalLinea       = $f6($totalBruto);
-        $granTotal        = $f6($totalBruto); // 6 decimales como en tu XML “perfecto”
+        $granTotal        = $f6($totalBruto); // 6 decimales como en tu XML ÔÇ£perfectoÔÇØ
 
         // Total en letras (tu helper sin NumberFormatter)
         $totalEnLetras = $this->montoEnLetrasGT((float)$granTotal);
@@ -496,7 +496,7 @@ class G4SClient
     }
 
     /**
-     * Convierte el total a letras al formato típico usado en Adenda:
+     * Convierte el total a letras al formato t├¡pico usado en Adenda:
      * - Exactos si no hay centavos.
      * - Si hay centavos: "QUETZALES CON nn/100".
      */
@@ -509,7 +509,7 @@ class G4SClient
         $entero = (int)floor($monto + 0.0000001);
         $cent   = (int)round(($monto - $entero) * 100);
 
-        // A) Con intl (si está disponible)
+        // A) Con intl (si est├í disponible)
         if (class_exists(\NumberFormatter::class)) {
             $fmt    = new \NumberFormatter('es_GT', \NumberFormatter::SPELLOUT);
             $letras = strtoupper($fmt->format($entero));
@@ -525,18 +525,18 @@ class G4SClient
         return "{$letras} QUETZALES CON {$cc}/100";
     }
 
-    /** Fallback simple: número entero a letras en español (0..999,999,999) */
+    /** Fallback simple: n├║mero entero a letras en espa├▒ol (0..999,999,999) */
     private function spelloutEs(int $n): string
     {
         if ($n === 0) return 'cero';
         $u = ['','uno','dos','tres','cuatro','cinco','seis','siete','ocho','nueve','diez','once','doce','trece','catorce','quince',
-            'dieciséis','diecisiete','dieciocho','diecinueve'];
+            'diecis├®is','diecisiete','dieciocho','diecinueve'];
         $d = ['','diez','veinte','treinta','cuarenta','cincuenta','sesenta','setenta','ochenta','noventa'];
         $c = ['','ciento','doscientos','trescientos','cuatrocientos','quinientos','seiscientos','setecientos','ochocientos','novecientos'];
 
         $numTo99 = function(int $x) use ($u,$d): string {
             if ($x < 20) return $u[$x];
-            if ($x < 30) return $x === 20 ? 'veinte' : 'veinti'.str_replace('uno','ún',$u[$x-20]); // veintiuno→veintiún (lo ajustamos abajo)
+            if ($x < 30) return $x === 20 ? 'veinte' : 'veinti'.str_replace('uno','├║n',$u[$x-20]); // veintiunoÔåÆveinti├║n (lo ajustamos abajo)
             $t = intdiv($x,10); $r = $x % 10;
             return $r ? $d[$t].' y '.$u[$r] : $d[$t];
         };
@@ -553,7 +553,7 @@ class G4SClient
         $miles    = intdiv($resto, 1_000); $unos  = $resto % 1_000;
 
         if ($millones) {
-            $parts[] = ($millones===1 ? 'un millón' : $this->fixUno($numTo999($millones)).' millones');
+            $parts[] = ($millones===1 ? 'un mill├│n' : $this->fixUno($numTo999($millones)).' millones');
         }
         if ($miles) {
             $parts[] = ($miles===1 ? 'mil' : $this->fixUno($numTo999($miles)).' mil');
@@ -565,12 +565,12 @@ class G4SClient
         return implode(' ', $parts);
     }
 
-    /** Ajustes ortográficos simples: "uno"→"un" en posiciones compuestas, veintiuno→veintiún */
+    /** Ajustes ortogr├íficos simples: "uno"ÔåÆ"un" en posiciones compuestas, veintiunoÔåÆveinti├║n */
     private function fixUno(string $s): string
     {
-        // veintiuno → veintiún
-        $s = preg_replace('/\bveintiuno\b/u', 'veintiún', $s);
-        // ... y "uno" final → "un"
+        // veintiuno ÔåÆ veinti├║n
+        $s = preg_replace('/\bveintiuno\b/u', 'veinti├║n', $s);
+        // ... y "uno" final ÔåÆ "un"
         $s = preg_replace('/\buno\b$/u', 'un', $s);
         return $s;
     }
@@ -595,9 +595,9 @@ class G4SClient
             // -------- helper de parseo (sirve para SOAP y POST/GET) --------
             $parseXml = function (string $xml) {
                 $sx = @simplexml_load_string($xml);
-                if ($sx === false) return [false, null, null, 'XML inválido'];
+                if ($sx === false) return [false, null, null, 'XML inv├ílido'];
 
-                // Intento 1: respuesta POST/GET (raíz <respuesta xmlns="http://tempuri.org/">)
+                // Intento 1: respuesta POST/GET (ra├¡z <respuesta xmlns="http://tempuri.org/">)
                 $sx->registerXPathNamespace('t', 'http://tempuri.org/');
                 $resNode = $sx->xpath('//t:Response');
                 if (isset($resNode[0])) {
@@ -625,7 +625,7 @@ class G4SClient
                 return [false, null, null, 'No se encontraron nodos Response'];
             };
 
-            // -------- 1) Intento POST application/x-www-form-urlencoded (más simple) --------
+            // -------- 1) Intento POST application/x-www-form-urlencoded (m├ís simple) --------
             try {
                 $url = $baseUrl . '/getNIT';
                 $postFields = http_build_query(['vNIT' => $nit, 'Entity' => $entity, 'Requestor' => $requestor], '', '&');
@@ -696,7 +696,7 @@ class G4SClient
             error_log('[G4S][SOAP11] ' . $e->getMessage());
         }
 
-        // -------- 3) Intento SOAP 1.2 (último recurso) --------
+        // -------- 3) Intento SOAP 1.2 (├║ltimo recurso) --------
         try {
             $xml = <<<XML
             <?xml version="1.0" encoding="utf-8"?>
@@ -751,10 +751,10 @@ class G4SClient
         \App\Utils\Logger::log("=== [SUBMIT INVOICE (PDF) START] ===", $logFile);
         \App\Utils\Logger::log("Payload recibido: " . json_encode($payload, JSON_UNESCAPED_UNICODE), $logFile);
 
-        // 1) Validaciones mínimas
+        // 1) Validaciones m├¡nimas
         $total = isset($payload['total']) ? (float)$payload['total'] : 0.0;
         if ($total <= 0) {
-            $msg = "❌ Total debe ser > 0 para construir DTE (valor={$total})";
+            $msg = "ÔØî Total debe ser > 0 para construir DTE (valor={$total})";
             \App\Utils\Logger::log($msg, $logFile);
             throw new \RuntimeException($msg);
         }
@@ -810,11 +810,11 @@ class G4SClient
                 ],
             ]);
         } catch (\Throwable $e) {
-            \App\Utils\Logger::log("❌ Error generando XML DTE: " . $e->getMessage(), $logFile);
+            \App\Utils\Logger::log("ÔØî Error generando XML DTE: " . $e->getMessage(), $logFile);
             throw $e;
         }
 
-        // 4) Guarda XML para inspección
+        // 4) Guarda XML para inspecci├│n
         $xmlPath = __DIR__ . '/../../storage/last_dte_pdf.xml';
         @file_put_contents($xmlPath, $xmlDte);
         \App\Utils\Logger::log("XML generado guardado en: {$xmlPath}", $logFile);
@@ -832,12 +832,12 @@ class G4SClient
             'Data3'       => $reference,
         ];
 
-        \App\Utils\Logger::log("→ SYSTEM_REQUEST params: Data1=POST_DOCUMENT_SAT_PDF, Data2(Base64)=".strlen($dataB64)." bytes, Data3={$reference}", $logFile);
+        \App\Utils\Logger::log("ÔåÆ SYSTEM_REQUEST params: Data1=POST_DOCUMENT_SAT_PDF, Data2(Base64)=".strlen($dataB64)." bytes, Data3={$reference}", $logFile);
 
         try {
             $respXml = $this->requestTransaction($params);
         } catch (\Throwable $e) {
-            \App\Utils\Logger::log("❌ Error en requestTransaction(): " . $e->getMessage(), $logFile);
+            \App\Utils\Logger::log("ÔØî Error en requestTransaction(): " . $e->getMessage(), $logFile);
             throw $e;
         }
 
@@ -851,8 +851,8 @@ class G4SClient
             // --- NUEVO: primero leer ResponseData1/2/3 del SOAP externo ---
             $sx = @simplexml_load_string($respXml);
             if ($sx) {
-                // sin namespace explícito, buscar por nombre también
-                // 6.1 UUID en ResponseData2 (muchas respuestas lo traen allí)
+                // sin namespace expl├¡cito, buscar por nombre tambi├®n
+                // 6.1 UUID en ResponseData2 (muchas respuestas lo traen all├¡)
                 $respData2 = $sx->xpath('//ResponseData2');
                 if ($respData2 && isset($respData2[0])) {
                     $uuidCandidate = trim((string)$respData2[0]);
@@ -860,7 +860,7 @@ class G4SClient
                         $uuid = $uuidCandidate;
                     }
                 }
-                // 6.2 PDF en ResponseData3 (POST_DOCUMENT_SAT_PDF devuelve el PDF aquí)
+                // 6.2 PDF en ResponseData3 (POST_DOCUMENT_SAT_PDF devuelve el PDF aqu├¡)
                 $respData3 = $sx->xpath('//ResponseData3');
                 if ($respData3 && isset($respData3[0])) {
                     $pdfB64Candidate = trim((string)$respData3[0]);
@@ -869,7 +869,7 @@ class G4SClient
                     }
                 }
 
-                // Además, algunas implementaciones anidan XML en RequestTransactionResult
+                // Adem├ís, algunas implementaciones anidan XML en RequestTransactionResult
                 $sx->registerXPathNamespace('ns0','http://www.fact.com.mx/schema/ws');
                 $node = $sx->xpath('//ns0:RequestTransactionResult');
                 if ($node && isset($node[0])) {
@@ -925,11 +925,11 @@ class G4SClient
             // Fallbacks sobre TODO el SOAP
             if (!$uuid && preg_match('/<UUID>([^<]+)<\/UUID>/i', $respXml, $m)) $uuid = $m[1];
             if (!$uuid && preg_match('/<DocumentGUID>([^<]+)<\/DocumentGUID>/i', $respXml, $m)) $uuid = $m[1];
-            // 🔧 NUEVO: si no se capturó antes, intentar UUID directo desde <ResponseData2>
+            // ­ƒöº NUEVO: si no se captur├│ antes, intentar UUID directo desde <ResponseData2>
             if (!$uuid && preg_match('/<ResponseData2>\s*([^<]+)\s*<\/ResponseData2>/i', $respXml, $m)) {
                 $uuid = trim($m[1]);
             }
-            // 🔧 NUEVO: PDF directo en <ResponseData3>
+            // ­ƒöº NUEVO: PDF directo en <ResponseData3>
             if (!$pdfB64 && preg_match('/<ResponseData3>\s*([A-Za-z0-9+\/=\r\n]+)\s*<\/ResponseData3>/i', $respXml, $m)) {
                 $pdfB64 = trim($m[1]);
             }
@@ -971,7 +971,7 @@ class G4SClient
             }
         }
 
-        // ✅ Guarda el PDF localmente si vino en base64
+        // Ô£à Guarda el PDF localmente si vino en base64
         if ($uuid && $this->isBase64Pdf($pdfB64)) {
             $tzGT = new \DateTimeZone('America/Guatemala');
             $now  = new \DateTime('now', $tzGT);
@@ -983,7 +983,7 @@ class G4SClient
 
             $pdfPath = $dir.'/'.$uuid.'.pdf';
             @file_put_contents($pdfPath, base64_decode($pdfB64));
-            \App\Utils\Logger::log("✅ PDF guardado en: {$pdfPath}", $logFile);
+            \App\Utils\Logger::log("Ô£à PDF guardado en: {$pdfPath}", $logFile);
         }
 
         $result = [
@@ -1000,7 +1000,7 @@ class G4SClient
         return $result;
     }
 
-    // ¿es un PDF real?
+    // ┬┐es un PDF real?
     private function isBase64Pdf(?string $b64): bool {
         if (!$b64) return false;
         $s = preg_replace('/\s+/', '', $b64);
@@ -1010,7 +1010,7 @@ class G4SClient
         return strncmp($bin, "%PDF-", 5) === 0; // %PDF-
     }
 
-    // Saca PDF por UUID probando varias “dialectos” de G4S
+    // Saca PDF por UUID probando varias ÔÇ£dialectosÔÇØ de G4S
     private function fetchPdfByGuid(string $uuid, string $prefer = 'GET_DOCUMENT_SAT_PDF'): ?string {
         $cands = [
             ['tx'=>'SYSTEM_REQUEST', 'd1'=>$prefer,               'd2'=>$uuid, 'd3'=>''],
@@ -1109,7 +1109,7 @@ class G4SClient
         // Algunas instalaciones aceptan UUID en Data2:
         $params = [
             'Transaction' => 'SYSTEM_REQUEST',
-            'Data1'       => 'POST_DOCUMENT_SAT_PDF', // literal que te mostró G4S
+            'Data1'       => 'POST_DOCUMENT_SAT_PDF', // literal que te mostr├│ G4S
             'Data2'       => $uuid,                    // UUID directo
             'Data3'       => (string)$this->config->get('FEL_G4S_DATA3', ''), // clave si aplica
         ];
@@ -1124,7 +1124,7 @@ class G4SClient
 
         $params = [
             'Transaction' => 'SYSTEM_REQUEST',
-            'Data1'       => 'POST_DOCUMENT_SAT_PDF',  // según tu captura
+            'Data1'       => 'POST_DOCUMENT_SAT_PDF',  // seg├║n tu captura
             'Data2'       => $b64,                      // XML en Base64
             'Data3'       => (string)$this->config->get('FEL_G4S_DATA3', ''), // clave/ref si tu emisor la pide
         ];
@@ -1159,7 +1159,7 @@ class G4SClient
         $baseUrlNoQuery = preg_replace('~\?.*$~', '', $baseUrlRaw);
         $baseUrl        = rtrim($baseUrlNoQuery, '/');
 
-        // Logs de depuración
+        // Logs de depuraci├│n
         error_log('[G4S][STATUS][BASE_URL_RAW] ' . $baseUrlRaw);
         error_log('[G4S][STATUS][BASE_URL] ' . $baseUrl);
 
@@ -1173,11 +1173,11 @@ class G4SClient
             ];
         }
 
-        // --- helper genérico para parsear GET_INFODTE ---
+        // --- helper gen├®rico para parsear GET_INFODTE ---
         $parseXml = function (string $xml) {
             $sx = @simplexml_load_string($xml);
             if ($sx === false) {
-                return [false, null, null, null, 'XML inválido'];
+                return [false, null, null, null, 'XML inv├ílido'];
             }
 
             error_log('[G4S][STATUS][RAW_XML] ' . substr($xml, 0, 500));
@@ -1348,11 +1348,11 @@ class G4SClient
     error_log('[G4S][STATUS_SYNC][START] uuid=' . $uuid);
 
     if ($uuid === '') {
-        error_log('[G4S][STATUS_SYNC][ERROR] UUID vacío');
+        error_log('[G4S][STATUS_SYNC][ERROR] UUID vac├¡o');
         http_response_code(400);
         echo json_encode([
             'ok'    => false,
-            'error' => 'Parámetro uuid es requerido',
+            'error' => 'Par├ímetro uuid es requerido',
         ], JSON_UNESCAPED_UNICODE);
         return;
     }
@@ -1367,7 +1367,7 @@ class G4SClient
         $errorMsg   = $res['error'] ?? null;
 
         if (!$res['ok'] && $docStatus === '') {
-            error_log('[G4S][STATUS_SYNC][ERROR] G4S no devolvió estado válido. error=' . $errorMsg);
+            error_log('[G4S][STATUS_SYNC][ERROR] G4S no devolvi├│ estado v├ílido. error=' . $errorMsg);
             echo json_encode([
                 'ok'              => false,
                 'uuid'            => $uuid,
@@ -1378,7 +1378,7 @@ class G4SClient
             return;
         }
 
-        // 2) Determinar si está anulado
+        // 2) Determinar si est├í anulado
         $anulado = in_array(strtoupper($anuladoRaw), ['1','TRUE','SI','S','Y','ANULADO'], true)
                 || (strpos($docStatus, 'ANUL') !== false);
 
@@ -1402,7 +1402,7 @@ class G4SClient
         $dbUpdated = false;
         try {
             $pdo = \App\DB::getConnection();
-            error_log('[G4S][STATUS_SYNC][DB] Conexión OK, actualizando invoices...');
+            error_log('[G4S][STATUS_SYNC][DB] Conexi├│n OK, actualizando invoices...');
 
             $sql = <<<SQL
 UPDATE invoices
@@ -1460,16 +1460,17 @@ SQL;
             'error'           => $errorMsg,
         ], JSON_UNESCAPED_UNICODE);
     } catch (\Throwable $e) {
-        // Cualquier excepción inesperada en todo el flujo
+        // Cualquier excepci├│n inesperada en todo el flujo
         error_log('[G4S][STATUS_SYNC][FATAL] ' . $e->getMessage() . ' TRACE: ' . $e->getTraceAsString());
         http_response_code(500);
         echo json_encode([
             'ok'    => false,
             'uuid'  => $uuid,
-            'error' => 'Excepción en syncInvoiceStatus: ' . $e->getMessage(),
+            'error' => 'Excepci├│n en syncInvoiceStatus: ' . $e->getMessage(),
         ], JSON_UNESCAPED_UNICODE);
     }
 }
 
 
 }
+

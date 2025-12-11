@@ -37,6 +37,7 @@ if ($currentUser && (($currentUser['role'] ?? null) === 'caseta')) {
             'POST /api/auth/ping',
             'POST /api/auth/logout',
             'GET /api/health',
+            'GET /api/settings',
             'GET /api/tickets',
             'GET /api/facturacion/list',
             'GET /api/facturacion/emitidas',
@@ -47,6 +48,19 @@ if ($currentUser && (($currentUser['role'] ?? null) === 'caseta')) {
         'GET /api/g4s/lookup-nit',
         // Permit auto-sync desde el dashboard para caseta
         'POST /api/sync/park-records/hamachi',
+        'GET /api/reports/tickets',
+        // Facturación completa para caseta
+        'POST /api/fel/invoice',
+        'GET /api/fel/invoice/status-sync',
+        'GET /api/fel/manual-invoice/pdf',
+        'GET /api/fel/manual-invoice/one',
+        'GET /api/fel/manual-invoice-list',
+            'GET /api/fel/report-manual-invoice-list',
+            'POST /api/fel/manual-invoice',
+            'POST /api/invoice/tickets',
+            'GET /api/reports/manual-open',
+            'GET /api/reports/device-logs',
+            'POST /api/gate/manual-open',
     ];
 
         $key = $method . ' ' . $path;

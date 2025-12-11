@@ -5,6 +5,7 @@
   const pages = Core.pages;
   const { app } = Core.elements;
   let allowedPages = null;
+  let hiddenPages = null;
   let currentUser = null;
 
   const notImpl = (name) => {
@@ -122,10 +123,12 @@
   });
 
   async function filterNavByRole() {
-    if (!allowedPages) return;
     const keep = (link) => {
       const page = link.getAttribute('data-page');
-      return page && allowedPages.has(page);
+      if (!page) return false;
+      if (hiddenPages && hiddenPages.has(page)) return false;
+      if (allowedPages) return allowedPages.has(page);
+      return true;
     };
     // Oculta (no elimina) para mantener estructura
     document.querySelectorAll('#sidebarCollapse .nav-link').forEach((a) => {
@@ -150,7 +153,9 @@
         Core.currentUser = user;
         const role = (user.role || '').toLowerCase();
         if (role === 'caseta') {
-          allowedPages = new Set(['dashboard', 'invoices']);
+          // Caseta puede consumir datos de todos los mÃ³dulos, pero ocultamos el resto del sidebar
+          allowedPages = null; // sin restricciÃ³n de rutas
+          hiddenPages = new Set(['settings', 'reports', 'ManualInvoice']);
           filterNavByRole();
         }
       }

@@ -249,6 +249,11 @@ class G4SClient
         $user      = (string)$this->config->get('FEL_G4S_USER', $requestor);
         $username  = (string)$this->config->get('FEL_G4S_USERNAME', 'TEMP');
 
+        // Fallbacks defensivos: si vienen vacÃ­os del .env, usa valores conocidos por defecto
+        if ($requestor === '') { $requestor = '425C5714-AA9E-4212-B4AA-75BD70328030'; }
+        if ($entity === '')    { $entity    = '81491514'; }
+        if ($user === '')      { $user      = $requestor; }
+
         $transaction = (string)($params['Transaction'] ?? 'TIMBRAR');
         $data1       = (string)($params['Data1'] ?? ''); // XML DTE (normal o Base64)
         $data2       = (string)($params['Data2'] ?? ''); // password

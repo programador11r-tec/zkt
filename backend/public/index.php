@@ -45,6 +45,8 @@ if ($currentUser && (($currentUser['role'] ?? null) === 'caseta')) {
         'GET /api/fel/invoice/pdf',
         'GET /api/fel/document-pdf',
         'GET /api/g4s/lookup-nit',
+        // Permit auto-sync desde el dashboard para caseta
+        'POST /api/sync/park-records/hamachi',
     ];
 
         $key = $method . ' ' . $path;

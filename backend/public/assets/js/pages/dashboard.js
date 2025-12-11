@@ -13,7 +13,29 @@
     normalizeTickets,
     safeLoadSettings,
     buildTimeline,
+    triggerHamachiSync,
+    hamachiSyncState,
   } = Core;
+
+  const HAMACHI_AUTO_SYNC_MS = 30000; // 30s
+
+  async function syncHamachiOnce({ silent = true } = {}) {
+    if (typeof triggerHamachiSync !== 'function') return;
+    try {
+      await triggerHamachiSync({ silent });
+    } catch (err) {
+      if (!silent) throw err;
+      console.warn('[hamachi] sync failed', err);
+    }
+  }
+
+  function ensureHamachiAutoSync() {
+    if (!hamachiSyncState) return;
+    if (hamachiSyncState.timer) return;
+    hamachiSyncState.timer = setInterval(() => {
+      void syncHamachiOnce({ silent: true });
+    }, HAMACHI_AUTO_SYNC_MS);
+  }
 
   // Fallbacks defensivos si algУn helper no estß presente
   const getTicketsSafeFn = typeof getTicketsSafe === 'function'
@@ -29,6 +51,10 @@
 
   async function renderDashboard() {  
     try {
+      // Sincroniza con el parqueo remoto antes de pintar el dashboard
+      await syncHamachiOnce({ silent: true });
+      ensureHamachiAutoSync();
+
       // 1) Primero tickets
       const ticketsResp = await getTicketsSafeFn();
       const data = normalizeTicketsFn(ticketsResp);

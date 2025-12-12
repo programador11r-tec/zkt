@@ -458,8 +458,8 @@ trait TicketsModule
             // Paginaci├│n opcional
             $pageNo   = (int) ($_GET['pageNo'] ?? $_GET['page'] ?? 1);
             if ($pageNo < 1) $pageNo = 1;
-            $pageSize = (int) ($_GET['pageSize'] ?? $_GET['limit'] ?? 100);
-            if ($pageSize <= 0) $pageSize = 100;
+            $pageSize = (int) ($_GET['pageSize'] ?? $_GET['limit'] ?? 25);
+            if ($pageSize <= 0) $pageSize = 25;
             $pageSize = min($pageSize, 500); // suficiente para log
 
             // Query EXACTO que usa el API de CVSecurity

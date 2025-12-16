@@ -155,7 +155,7 @@
         if (role === 'caseta') {
           // Caseta puede consumir datos de todos los mÃ³dulos, pero ocultamos el resto del sidebar
           allowedPages = null; // sin restricciÃ³n de rutas
-          hiddenPages = new Set(['settings', 'reports', 'ManualInvoice']);
+          hiddenPages = new Set(['settings', 'reports', 'ManualInvoice', 'discounts']);
           filterNavByRole();
         }
       }

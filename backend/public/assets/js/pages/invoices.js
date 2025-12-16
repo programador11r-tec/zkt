@@ -205,6 +205,22 @@
               </div>
 
               <div class="mt-3">
+                <label for="mDiscountCode" class="form-label mb-1">Código de descuento (QR)</label>
+                <div class="input-group input-group-sm">
+                  <input type="text" id="mDiscountCode" class="form-control" placeholder="Escanea o escribe el código">
+                  <button type="button" class="btn btn-outline-secondary" id="mDiscountCheck">
+                    <i class="bi bi-qr-code-scan me-1"></i> Validar
+                  </button>
+                </div>
+                <div class="form-text">Cupones generados en el módulo Descuentos. Cada código se usa una sola vez.</div>
+                <div class="small mt-1 text-muted" id="mDiscountStatus" aria-live="polite"></div>
+              </div>
+
+              <div class="d-flex justify-content-between small" id="mSumDiscountRow" hidden>
+                <span class="text-muted">Descuento aplicado</span><span id="mSumDiscount">Q0.00</span>
+              </div>
+
+              <div class="mt-3">
                 <label for="mNit" class="form-label mb-1">NIT del cliente</label>
                 <input type="text" id="mNit" class="form-control"
                       placeholder='Escribe el NIT o "CF"' value="CF"
@@ -403,6 +419,12 @@
         const mNitStatus = document.getElementById('mNitStatus');
         const mHourlyLabel = document.getElementById('mHourlyLabel');
         const mHourlyHelp  = document.getElementById('mHourlyHelp');
+        const mDiscountCode = document.getElementById('mDiscountCode');
+        const mDiscountCheck = document.getElementById('mDiscountCheck');
+        const mDiscountStatus = document.getElementById('mDiscountStatus');
+        const mSumDiscountRow = document.getElementById('mSumDiscountRow');
+        const mSumDiscount = document.getElementById('mSumDiscount');
+        let appliedDiscount = null;
 
         // Resumen
         document.getElementById('mSumTicket').textContent = String(ticket.ticket_no ?? '');
@@ -422,7 +444,6 @@
           mHourlyLabel.textContent = '';
           mHourlyHelp.textContent  = 'Define una tarifa por hora válida.';
         }
-
         // Estado inicial
         mHourly.disabled = !canHourly;
         if (canHourly) { mHourly.checked = true; mCustom.disabled = true; }
@@ -444,6 +465,60 @@
           mNitStatus.className = `small mt-1 ${cls}`;
           mNitStatus.textContent = text || '';
         };
+
+        const setDiscountStatus = (text, cls = 'text-muted') => {
+          if (!mDiscountStatus) return;
+          mDiscountStatus.className = `small mt-1 ${cls}`;
+          mDiscountStatus.textContent = text || '';
+        };
+
+        const updateDiscountSummary = (baseTotal) => {
+          if (!mSumDiscountRow) return;
+          if (appliedDiscount && appliedDiscount.amount > 0) {
+            mSumDiscountRow.hidden = false;
+            mSumDiscount.textContent = formatCurrency(appliedDiscount.amount);
+          } else {
+            mSumDiscountRow.hidden = true;
+            mSumDiscount.textContent = 'Q0.00';
+          }
+          if (Number.isFinite(baseTotal) && canHourly && mHourlyLabel) {
+            const net = Math.max(0, baseTotal - (appliedDiscount?.amount || 0));
+            mHourlyLabel.textContent = formatCurrency(net);
+          }
+        };
+
+        const validateDiscount = async () => {
+          if (!mDiscountCode) return null;
+          const code = mDiscountCode.value.trim();
+          if (!code) {
+            appliedDiscount = null;
+            updateDiscountSummary(hourlyTotal ?? 0);
+            setDiscountStatus('Ingresa o escanea un código.', 'text-muted');
+            return null;
+          }
+          try {
+            setDiscountStatus('Validando…', 'text-info');
+            const res = await fetchJSON(api(`discounts/lookup?code=${encodeURIComponent(code)}`));
+            const status = (res?.status || '').toUpperCase();
+            if (!res?.ok || status !== 'NEW') {
+              appliedDiscount = null;
+              setDiscountStatus(res?.error || 'No disponible', 'text-danger');
+              updateDiscountSummary(hourlyTotal ?? 0);
+              return null;
+            }
+            appliedDiscount = { code: res.code, amount: Number(res.amount) || 0, description: res.description || '' };
+            setDiscountStatus(`Descuento válido: ${formatCurrency(appliedDiscount.amount)}${appliedDiscount.description ? ' · ' + appliedDiscount.description : ''}`, 'text-success');
+            updateDiscountSummary(hourlyTotal ?? 0);
+            return appliedDiscount;
+          } catch (err) {
+            appliedDiscount = null;
+            setDiscountStatus(err.message || 'Error al validar', 'text-danger');
+            updateDiscountSummary(hourlyTotal ?? 0);
+            return null;
+          }
+        };
+
+        updateDiscountSummary(hourlyTotal ?? 0);
 
         const doLookup = debounce(async () => {
           const v = mNit.value;
@@ -484,6 +559,16 @@
         mGrace.onchange  = updateCustomState;
         mCustomR.onchange= updateCustomState;
 
+        if (mDiscountCheck) {
+          mDiscountCheck.addEventListener('click', () => { void validateDiscount(); });
+        }
+        if (mDiscountCode) {
+          mDiscountCode.addEventListener('keydown', (ev) => {
+            if (ev.key === 'Enter') { ev.preventDefault(); void validateDiscount(); }
+          });
+          mDiscountCode.addEventListener('blur', () => { void validateDiscount(); });
+        }
+
         function closeModal(retVal = null) {
           modalEl.classList.remove('show');
           modalEl.style.display = 'none';
@@ -504,7 +589,7 @@
         }, { once: true });
 
         // submit
-        form.onsubmit = (e) => {
+        form.onsubmit = async (e) => {
           e.preventDefault();
           mErr.hidden = true; mErr.textContent = '';
           const selected = form.querySelector('input[name="billingMode"]:checked')?.value;
@@ -517,25 +602,44 @@
             mErr.hidden = false; return;
           }
 
+          const discountInput = mDiscountCode ? mDiscountCode.value.trim() : '';
+          if (discountInput && (!appliedDiscount || appliedDiscount.code !== discountInput)) {
+            const validated = await validateDiscount();
+            if (!validated) {
+              mErr.textContent = 'El descuento no es válido o ya fue usado.';
+              mErr.hidden = false; return;
+            }
+          }
+
           if (selected === 'hourly') {
             if (!canHourly || hourlyTotal == null) {
               mErr.textContent = 'Configura una tarifa por hora válida.';
               mErr.hidden = false; return;
             }
+            const netTotal = appliedDiscount ? Math.max(0, hourlyTotal - (appliedDiscount.amount || 0)) : hourlyTotal;
             closeModal({
               mode: 'hourly',
-              total: hourlyTotal,
-              label: `Cobro por hora ${formatCurrency(hourlyTotal)}`,
+              total: netTotal,
+              label: `Cobro por hora ${formatCurrency(netTotal)}${appliedDiscount ? ' (con descuento)' : ''}`,
               receptor_nit: receptorNit,
               duration_minutes: minutes,
               hours_billed_used: hoursBilled,
-              hourly_rate_used: hourlyRate
+              hourly_rate_used: hourlyRate,
+              discount_code: appliedDiscount?.code || null,
+              discount_amount: appliedDiscount?.amount || null,
             });
             return;
           }
 
           if (selected === 'grace') {
-            closeModal({ mode: 'grace', total: 0, label: 'Ticket de gracia (Q0.00, sin FEL)', receptor_nit: receptorNit });
+            closeModal({
+              mode: 'grace',
+              total: 0,
+              label: 'Ticket de gracia (Q0.00, sin FEL)',
+              receptor_nit: receptorNit,
+              discount_code: appliedDiscount?.code || null,
+              discount_amount: appliedDiscount?.amount || null,
+            });
             return;
           }
 
@@ -545,7 +649,15 @@
             mErr.hidden = false; return;
           }
           const normalized = Math.round(customVal * 100) / 100;
-          closeModal({ mode: 'custom', total: normalized, label: `Cobro personalizado ${formatCurrency(normalized)}`, receptor_nit: receptorNit });
+          const netCustom = appliedDiscount ? Math.max(0, normalized - (appliedDiscount.amount || 0)) : normalized;
+          closeModal({
+            mode: 'custom',
+            total: netCustom,
+            label: `Cobro personalizado ${formatCurrency(netCustom)}${appliedDiscount ? ' (con descuento)' : ''}`,
+            receptor_nit: receptorNit,
+            discount_code: appliedDiscount?.code || null,
+            discount_amount: appliedDiscount?.amount || null,
+          });
         };
 
         // mostrar modal (manual)
@@ -588,6 +700,11 @@
               numero: payload.numero || null,
               mode: confirmation.mode
             };
+
+            if (confirmation.discount_code) {
+              requestPayload.discount_code = confirmation.discount_code;
+              requestPayload.discount_amount_client = confirmation.discount_amount ?? null;
+            }
 
             if (confirmation.mode === 'hourly') {
               const tot = Number(confirmation.total);

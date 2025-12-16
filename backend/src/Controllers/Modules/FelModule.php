@@ -123,6 +123,8 @@ trait FelModule
             $receptorNit = strtoupper(trim((string)($body['receptor_nit'] ?? 'CF'))); // CF permitido
             $mode        = (string)($body['mode'] ?? 'hourly'); // hourly | custom | grace
             $customTotal = isset($body['custom_total']) ? (float)$body['custom_total'] : null;
+            $discountCode = trim((string)($body['discount_code'] ?? ''));
+            $discountAmountClient = isset($body['discount_amount_client']) ? (float)$body['discount_amount_client'] : null;
 
             $this->debugLog('fel_invoice_in.txt', ['body' => $body, 'server' => $_SERVER]);
 
@@ -168,6 +170,8 @@ trait FelModule
             $finalTotal          = $totalBackend;
             $durationMinPersist  = $durationMinBackend;
             $hoursBilledPersist  = $hoursBilledBackend;
+            $discountInfo        = null;
+            $discountApplied     = 0.0;
 
             if ($mode === 'custom') {
                 $finalTotal    = round((float)$customTotal, 2);
@@ -216,6 +220,36 @@ trait FelModule
             $cfg = new \Config\Config(__DIR__ . '/../../.env');
             $pdo = \App\Utils\DB::pdo($this->config);
             $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
+            Schema::ensureDiscountVoucherSchema($pdo);
+
+            // Validar y aplicar descuento (valor fijo restado al total)
+            if ($discountCode !== '') {
+                try {
+                    $discountInfo    = $this->prepareDiscountForInvoice($pdo, $discountCode);
+                    $discountAmount  = isset($discountInfo['amount']) ? (float)$discountInfo['amount'] : 0.0;
+                    $discountAmount  = max(0.0, $discountAmount);
+                    $discountApplied = $discountAmount;
+
+                    // Opcional: registrar diferencias con el monto enviado por el cliente
+                    if (is_finite($discountAmountClient) && $discountAmountClient !== null) {
+                        $extra['discount_client_amount'] = (float)$discountAmountClient;
+                        if (abs($discountAmountClient - $discountAmount) > 0.01) {
+                            $extra['discount_mismatch'] = [
+                                'client' => (float)$discountAmountClient,
+                                'server' => $discountAmount,
+                            ];
+                        }
+                    }
+
+                    if ($discountApplied > 0) {
+                        $billingAmount = max(0.0, $billingAmount - $discountApplied);
+                    }
+                    $extra['discount_applied'] = $discountApplied;
+                } catch (\Throwable $e) {
+                    echo json_encode(['ok' => false, 'error' => 'Descuento no vƒ"¡lido: ' . $e->getMessage()], JSON_UNESCAPED_UNICODE);
+                    return;
+                }
+            }
 
             $mysqlTzDiag = null;
             try {
@@ -355,7 +389,7 @@ trait FelModule
                         request_json, response_json, created_at,
                         receptor_nit, entry_at, exit_at,
                         duration_min, hours_billed, billing_mode,
-                        hourly_rate, monthly_rate
+                        hourly_rate, monthly_rate, discount_code, discount_amount
                     )
                     VALUES
                     (
@@ -363,7 +397,7 @@ trait FelModule
                         :request_json, :response_json, :created_at,
                         :receptor_nit, :entry_at, :exit_at,
                         :duration_min, :hours_billed, :billing_mode,
-                        :hourly_rate, :monthly_rate
+                        :hourly_rate, :monthly_rate, :discount_code, :discount_amount
                     )
                 ");
                 $stmt->execute([
@@ -382,6 +416,8 @@ trait FelModule
                     ':billing_mode'  => $mode,
                     ':hourly_rate'   => $hourlyRate,
                     ':monthly_rate'  => $monthlyRate,
+                    ':discount_code'   => $discountCode !== '' ? $discountCode : null,
+                    ':discount_amount' => ($discountInfo && $discountApplied > 0) ? $discountApplied : null,
                 ]);
 
                 if ($pdfBase64) {
@@ -398,6 +434,14 @@ trait FelModule
                 // marca ticket cerrado
                 $up = $pdo->prepare("UPDATE tickets SET status = 'CLOSED', exit_at = COALESCE(exit_at, :now_exit) WHERE ticket_no = :t");
                 $up->execute([':now_exit' => $nowGT, ':t' => $ticketNo]);
+
+                // Redimir descuento solo si FEL se concretó
+                if ($discountInfo && $discountCode !== '' && $felOk) {
+                    $redeemed = $this->redeemDiscountVoucher($pdo, $discountCode, $ticketNo);
+                    if (!$redeemed) {
+                        throw new \RuntimeException('No se pudo marcar el descuento como usado.');
+                    }
+                }
 
                 $pdo->commit();
 
@@ -423,7 +467,7 @@ trait FelModule
                         request_json, response_json, created_at,
                         receptor_nit, entry_at, exit_at,
                         duration_min, hours_billed, billing_mode,
-                        hourly_rate, monthly_rate
+                        hourly_rate, monthly_rate, discount_code, discount_amount
                     )
                     VALUES
                     (
@@ -431,7 +475,7 @@ trait FelModule
                         :request_json, :response_json, :created_at,
                         :receptor_nit, :entry_at, :exit_at,
                         :duration_min, :hours_billed, :billing_mode,
-                        :hourly_rate, :monthly_rate
+                        :hourly_rate, :monthly_rate, :discount_code, :discount_amount
                     )
                 ");
                 $stmt->execute([
@@ -450,12 +494,21 @@ trait FelModule
                     ':billing_mode'  => 'grace',
                     ':hourly_rate'   => $hourlyRate,
                     ':monthly_rate'  => $monthlyRate,
+                    ':discount_code'   => $discountCode !== '' ? $discountCode : null,
+                    ':discount_amount' => ($discountInfo && $discountApplied > 0) ? $discountApplied : null,
                 ]);
 
                 $up = $pdo->prepare("UPDATE tickets SET status = 'CLOSED', exit_at = COALESCE(exit_at, :now_exit) WHERE ticket_no = :t");
                 $up->execute([':now_exit' => $nowGT, ':t' => $ticketNo]);
 
                 $pdo->commit();
+
+                if ($discountInfo && $discountCode !== '') {
+                    $redeemed = $this->redeemDiscountVoucher($pdo, $discountCode, $ticketNo);
+                    if (!$redeemed) {
+                        throw new \RuntimeException('No se pudo marcar el descuento como usado.');
+                    }
+                }
             }
             // ================== /FEL ==================
 
@@ -764,6 +817,10 @@ trait FelModule
                 'message'          => $isGrace ? 'Ticket de gracia registrado (sin FEL)' : ($felOk ? 'Factura certificada' : 'No se pudo certificar (registrada en BD)'),
                 'error'            => $isGrace ? null : $felErr,
                 'billing_amount'   => $isGrace ? 0.00 : ($payBillin > 0 ? $payBillin : (float)$billingAmount),
+                'discount'         => [
+                    'code'   => $discountCode !== '' ? $discountCode : null,
+                    'amount' => ($discountInfo && $discountApplied > 0) ? $discountApplied : 0.0,
+                ],
                 'manual_open'      => $manualOpen,
 
                 // PayNotify resumen

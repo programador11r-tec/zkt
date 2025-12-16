@@ -604,7 +604,7 @@
     const renderInvoiceRows = () => {
       const { slice } = paginate(invoiceState.rows, invoiceState.page, invoiceState.perPage);
       if (!slice.length) {
-        invoiceRowsEl.innerHTML = `<tr><td colspan="8" class="text-center text-muted">No hay registros.</td></tr>`;
+        invoiceRowsEl.innerHTML = `<tr><td colspan="9" class="text-center text-muted">No hay registros.</td></tr>`;
         invoicePaginationEl.innerHTML = '';
         return;
       }
@@ -619,6 +619,7 @@
           : 'text-bg-secondary';
 
         const uuid = getUuid(r);
+        const discount = Number(r.discount_amount ?? 0);
         const actions = uuid
           ? `<button type="button" class="btn btn-sm btn-outline-primary me-1"
               data-action="pdf"
@@ -630,7 +631,10 @@
             <td>${escapeHtml(r.ticket_no)}</td>
             <td>${escapeHtml(r.plate ?? '—')}</td>
             <td>${escapeHtml(formatDateValue(r.fecha))}</td>
-            <td class="text-end">${formatCurrency(r.total)}</td>
+            <td class="text-end">
+              ${formatCurrency(r.total)}
+              ${discount > 0 ? `<div class="small text-success">- ${formatCurrency(discount)}${r.discount_code ? ' (' + escapeHtml(r.discount_code) + ')' : ''}</div>` : ''}
+            </td>
             <td>${escapeHtml(r.receptor ?? 'CF')}</td>
             <td class="text-truncate" style="max-width:220px;">${escapeHtml(uuid ?? '—')}</td>
             <td><span class="badge ${badge}">${formatInvoiceStatus(status)}</span></td>

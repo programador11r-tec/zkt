@@ -9,6 +9,7 @@ use App\Controllers\Modules\SettingsModule;
 use App\Controllers\Modules\SharedApi;
 use App\Controllers\Modules\SyncModule;
 use App\Controllers\Modules\TicketsModule;
+use App\Controllers\Modules\DiscountModule;
 use Config\Config;
 
 /**
@@ -22,6 +23,7 @@ class ApiController
     use TicketsModule;
     use FelModule;
     use ManualModule;
+    use DiscountModule;
 
     private Config $config;
     /** @var array<string, array<string, bool>> */

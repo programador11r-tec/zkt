@@ -18,6 +18,7 @@
   } = Core;
 
   const HAMACHI_AUTO_SYNC_MS = 30000; // 30s
+  const autoRefreshState = { running: false };
 
   async function syncHamachiOnce({ silent = true } = {}) {
     if (typeof triggerHamachiSync !== 'function') return;
@@ -32,8 +33,19 @@
   function ensureHamachiAutoSync() {
     if (!hamachiSyncState) return;
     if (hamachiSyncState.timer) return;
-    hamachiSyncState.timer = setInterval(() => {
-      void syncHamachiOnce({ silent: true });
+    hamachiSyncState.timer = setInterval(async () => {
+      if (Core.state.currentPage !== 'dashboard') return;
+      if (autoRefreshState.running) return;
+      autoRefreshState.running = true;
+      try {
+        await syncHamachiOnce({ silent: true });
+        // Vuelve a renderizar para recargar tickets y métricas
+        await renderDashboard();
+      } catch (err) {
+        console.warn('[hamachi] auto-refresh failed', err);
+      } finally {
+        autoRefreshState.running = false;
+      }
     }, HAMACHI_AUTO_SYNC_MS);
   }
 

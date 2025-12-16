@@ -58,9 +58,10 @@ if ($currentUser && (($currentUser['role'] ?? null) === 'caseta')) {
             'GET /api/fel/report-manual-invoice-list',
             'POST /api/fel/manual-invoice',
             'POST /api/invoice/tickets',
-            'GET /api/reports/manual-open',
-            'GET /api/reports/device-logs',
-            'POST /api/gate/manual-open',
+        'GET /api/reports/manual-open',
+        'GET /api/reports/device-logs',
+        'POST /api/gate/manual-open',
+        'GET /api/discounts/lookup',
     ];
 
         $key = $method . ' ' . $path;
@@ -230,6 +231,26 @@ $router->post('/api/gate/manual-open', function () use ($api) {
 $router->get('/api/reports/device-logs', function () use ($api) {
     Auth::requireAuth();
     return $api->reportsDeviceLogs();   
+});
+$router->post('/api/discounts', function () use ($api) {
+    Auth::requireAuth();
+    return $api->createDiscountVoucher();
+});
+$router->post('/api/discounts/reprint', function () use ($api) {
+    Auth::requireAuth();
+    return $api->reprintDiscountVoucher();
+});
+$router->get('/api/discounts/batches', function () use ($api) {
+    Auth::requireAuth();
+    return $api->listDiscountBatches();
+});
+$router->get('/api/discounts', function () use ($api) {
+    Auth::requireAuth();
+    return $api->listDiscountVouchers();
+});
+$router->get('/api/discounts/lookup', function () use ($api) {
+    Auth::requireAuth();
+    return $api->lookupDiscountVoucher();
 });
 
 /* ============ FRONTEND ============ */

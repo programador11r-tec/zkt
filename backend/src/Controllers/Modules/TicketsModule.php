@@ -368,6 +368,8 @@ trait TicketsModule
                     COALESCE(t.exit_at, t.entry_at, i.created_at) AS fecha,
                     i.total,
                     i.uuid,
+                    i.discount_code,
+                    i.discount_amount,
                     -- status normalizado para el front
                     CASE
                         WHEN UPPER(i.status) IN ('OK','CERTIFIED','CERT') THEN 'OK'
@@ -391,6 +393,9 @@ trait TicketsModule
             // Post-procesado: forzar tipos y fallback de UUID desde response_json si fuera necesario
             foreach ($rows as &$r) {
                 $r['total'] = isset($r['total']) ? (float)$r['total'] : 0.0;
+                if (isset($r['discount_amount'])) {
+                    $r['discount_amount'] = (float)$r['discount_amount'];
+                }
 
                 if (empty($r['uuid']) && !empty($r['response_json'])) {
                     try {

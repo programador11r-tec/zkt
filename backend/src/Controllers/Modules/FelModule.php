@@ -251,6 +251,22 @@ trait FelModule
                 }
             }
 
+            // Si el descuento resulta en 0 o menos, convertir a ticket de gracia automáticamente
+            if ($discountCode !== '' && $discountApplied <= 0) {
+                $isGrace = true;
+                $mode = 'grace';
+                $billingAmount = 0.0;
+                $finalTotal = 0.0;
+            }
+
+            // Si el total a facturar quedó en cero, forzar modo gracia para evitar DTE con valor 0
+            if (!$isGrace && $billingAmount <= 0) {
+                $isGrace = true;
+                $mode = 'grace';
+                $billingAmount = 0.0;
+                $finalTotal = 0.0;
+            }
+
             $mysqlTzDiag = null;
             try {
                 $drv = strtolower((string)$pdo->getAttribute(\PDO::ATTR_DRIVER_NAME));

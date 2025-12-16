@@ -154,14 +154,14 @@
       app.innerHTML = `
         <div class="container-fluid px-0">
           <!-- Resumen -->
-          <div class="row row-cols-1 row-cols-sm-2 row-cols-xxl-4 g-3 mb-4">
+          <div class="row row-cols-1 row-cols-sm-2 row-cols-xxl-4 g-3 mb-4" id="dashSummary">
             ${summaryHtml}
           </div>
 
           <div class="row g-4 align-items-stretch">
             <!-- Tabla -->
             <div class="col-xl-8">
-              <div class="card h-100 shadow-sm">
+              <div class="card h-100 shadow-sm" id="dashTableCard">
                 <div class="card-body d-flex flex-column gap-3 h-100">
                   <div class="d-flex flex-wrap gap-2 align-items-start justify-content-between">
                     <div>

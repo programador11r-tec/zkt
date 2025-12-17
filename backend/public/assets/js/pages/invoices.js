@@ -69,6 +69,26 @@
       } catch { return ''; }
     };
 
+    const autoPrintInvoice = (uuid) => {
+      if (!uuid) return;
+      const url = api(`fel/invoice/pdf?uuid=${encodeURIComponent(uuid)}`);
+      const iframe = document.createElement('iframe');
+      iframe.style.position = 'fixed';
+      iframe.style.width = '0';
+      iframe.style.height = '0';
+      iframe.style.border = '0';
+      iframe.style.visibility = 'hidden';
+      iframe.onload = () => {
+        try {
+          iframe.contentWindow?.focus();
+          iframe.contentWindow?.print();
+        } catch (_) { /* ignore */ }
+        setTimeout(() => iframe.remove(), 5000);
+      };
+      iframe.src = url;
+      document.body.appendChild(iframe);
+    };
+
     const app = document.getElementById('app') || document.body;
     app.innerHTML = `
       <div class="card shadow-sm">
@@ -84,7 +104,7 @@
 
             <div class="ms-auto d-flex flex-wrap align-items-center gap-2" style="max-width: 520px;">
               <input type="search" id="invSearch" class="form-control form-control-sm" placeholder="Buscar ticket..." />
-              <div class="btn-group btn-group-sm" role="group">
+              <div class="btn-group btn-group-sm" role="group" id="manualOpenGroup">
                 <button type="button" class="btn btn-outline-warning" id="btnManualOpen" title="Abrir SALIDA">
                   <i class="bi bi-box-arrow-right me-1"></i> Salida
                 </button>
@@ -353,8 +373,16 @@
       });
     }
 
-    wireManualOpen(document.getElementById('btnManualOpen'),   { title: 'Salida',  channelId: CHANNEL_SALIDA });
-    wireManualOpen(document.getElementById('btnManualOpenIn'), { title: 'Entrada', channelId: CHANNEL_ENTRADA });
+    const isCaseta = (Core.currentUser?.role || '').toLowerCase() === 'caseta';
+    const manualGroup = document.getElementById('manualOpenGroup');
+    if (manualGroup && isCaseta) {
+      manualGroup.classList.add('d-none');
+    }
+
+    if (!isCaseta) {
+      wireManualOpen(document.getElementById('btnManualOpen'),   { title: 'Salida',  channelId: CHANNEL_SALIDA });
+      wireManualOpen(document.getElementById('btnManualOpenIn'), { title: 'Entrada', channelId: CHANNEL_ENTRADA });
+    }
 
     if (hourlyRateHint) {
       hourlyRateHint.textContent =
@@ -769,6 +797,11 @@
               title: 'Factura enviada',
               message: `${confirmation.label}. ${uuidTxt}`
             });
+
+            const billingAmount = Number(js.billing_amount ?? 0);
+            if (billingAmount > 0 && js.uuid) {
+              autoPrintInvoice(js.uuid);
+            }
 
             // ============================
             // ✅ PAYNOTIFY: verde si OK, amarillo si falla
